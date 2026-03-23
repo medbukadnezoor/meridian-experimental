@@ -180,7 +180,7 @@ If instruction set: Note: "[instruction text]"
 If close rule triggered: Rule [N]: [reason]
 
 Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action or "no action"]
-      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048);
+      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 4096);
       mgmtReport = content;
 
       // Trigger screening AFTER management completes — uses fresh count so we don't race with a close

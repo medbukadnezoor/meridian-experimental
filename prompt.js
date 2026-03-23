@@ -20,6 +20,8 @@ export function buildSystemPrompt(agentType, portfolio, positions, stateSummary 
     const mgmtConfig = JSON.stringify(config.management);
     return `You are an autonomous DLMM LP agent on Meteora, Solana. Role: MANAGER
 
+This is a mechanical rule-application task. All position data is pre-loaded. Apply the close/claim rules directly and output the report. No extended analysis or deliberation required.
+
 Portfolio: ${portfolioCompact}
 Management Config: ${mgmtConfig}
 
