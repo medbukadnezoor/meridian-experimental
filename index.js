@@ -107,8 +107,8 @@ export function startCronJobs() {
     let mgmtReport = null;
     let positions = [];
     try {
-      // Pre-load all positions + PnL in parallel — LLM gets everything, no fetch steps needed
-      const livePositions = await getMyPositions().catch(() => null);
+      // Pre-load all positions + PnL in parallel — force fresh to avoid stale cache
+      const livePositions = await getMyPositions({ force: true }).catch(() => null);
       positions = livePositions?.positions || [];
 
       if (positions.length === 0) {
@@ -213,7 +213,7 @@ After all positions, add one summary line:
     // Hard guards — don't even run the agent if preconditions aren't met
     let prePositions, preBalance;
     try {
-      [prePositions, preBalance] = await Promise.all([getMyPositions(), getWalletBalances()]);
+      [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
       if (prePositions.total_positions >= config.risk.maxPositions) {
         log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
         _screeningBusy = false;
@@ -407,6 +407,7 @@ function formatCandidates(candidates) {
 const isTTY = process.stdin.isTTY;
 let cronStarted = false;
 let busy = false;
+const _telegramQueue = []; // queued messages received while agent was busy
 const sessionHistory = []; // persists conversation across REPL turns
 const MAX_HISTORY = 20;    // keep last 20 messages (10 exchanges)
 
@@ -473,7 +474,7 @@ if (isTTY) {
   try {
     const [wallet, positions, { candidates, total_eligible, total_screened }] = await Promise.all([
       getWalletBalances(),
-      getMyPositions(),
+      getMyPositions({ force: true }),
       getTopCandidates({ limit: 5 }),
     ]);
 
@@ -504,10 +505,22 @@ if (isTTY) {
   launchCron();
   maybeRunMissedBriefing().catch(() => { });
 
-  // Telegram bot
-  startPolling(async (text) => {
+  // Telegram bot — queue messages received while busy, drain after each task
+  async function drainTelegramQueue() {
+    while (_telegramQueue.length > 0 && !_managementBusy && !_screeningBusy && !busy) {
+      const queued = _telegramQueue.shift();
+      await telegramHandler(queued);
+    }
+  }
+
+  async function telegramHandler(text) {
     if (_managementBusy || _screeningBusy || busy) {
-      sendMessage("Agent is busy right now — try again in a moment.").catch(() => { });
+      if (_telegramQueue.length < 5) {
+        _telegramQueue.push(text);
+        sendMessage(`⏳ Queued (${_telegramQueue.length} in queue): "${text.slice(0, 60)}"`).catch(() => {});
+      } else {
+        sendMessage("Queue is full (5 messages). Wait for the agent to finish.").catch(() => {});
+      }
       return;
     }
 
@@ -583,8 +596,11 @@ if (isTTY) {
       busy = false;
       rl.setPrompt(buildPrompt());
       rl.prompt(true);
+      drainTelegramQueue().catch(() => {});
     }
-  });
+  }
+
+  startPolling(telegramHandler);
 
   console.log(`
 Commands:
@@ -652,7 +668,7 @@ Commands:
 
     if (input === "/status") {
       await runBusy(async () => {
-        const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions()]);
+        const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
         console.log(`\nWallet: ${wallet.sol} SOL  ($${wallet.sol_usd})`);
         console.log(`Positions: ${positions.total_positions}`);
         for (const p of positions.positions) {
