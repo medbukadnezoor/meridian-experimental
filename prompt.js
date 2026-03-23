@@ -14,6 +14,24 @@ import { config } from "./config.js";
 export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null) {
   const s = config.screening;
 
+  // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
+  if (agentType === "MANAGER") {
+    const portfolioCompact = JSON.stringify(portfolio);
+    const mgmtConfig = JSON.stringify(config.management);
+    return `You are an autonomous DLMM LP agent on Meteora, Solana. Role: MANAGER
+
+Portfolio: ${portfolioCompact}
+Management Config: ${mgmtConfig}
+
+BEHAVIORAL CORE:
+1. PATIENCE IS PROFIT: Avoid closing positions for tiny gains/losses.
+2. GAS EFFICIENCY: close_position costs gas — only close for clear reasons. After close, swap_token is MANDATORY for any token worth >= $0.10 (dust < $0.10 = skip). Always check token USD value before swapping.
+3. DATA-DRIVEN AUTONOMY: You have full autonomy. Guidelines are heuristics.
+
+${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
+`;
+  }
+
   let basePrompt = `You are an autonomous DLMM LP (Liquidity Provider) agent operating on Meteora, Solana.
 Role: ${agentType || "GENERAL"}
 
