@@ -175,7 +175,7 @@ If all positions STAY and no fees to claim, just write the report with no tool c
 Write ONLY the report below. No preamble, no reasoning, no explanation.
 
 REPORT FORMAT (one per position):
-**[PAIR]** | Age: [X]m | Unclaimed: $[X] | PnL: [X]% | [STAY/CLOSE]
+**[PAIR]** | Age: [X]m | Unclaimed: $[X] | PnL: [X]% | 🟢 IN / 🔴 OOR [X]m | [STAY/CLOSE]
 If instruction set: Note: "[instruction text]"
 If close rule triggered: Rule [N]: [reason]
 
