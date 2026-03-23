@@ -159,13 +159,11 @@ export function startCronJobs() {
         return lines.join("\n");
       }).join("\n\n");
 
-      const hivePatterns = "";
-
       const { content } = await agentLoop(`
 MANAGEMENT CYCLE — ${positions.length} position(s)
 
 PRE-LOADED POSITION DATA (no fetching needed):
-${positionBlocks}${hivePatterns}
+${positionBlocks}
 
 HARD CLOSE RULES — apply in order, first match wins:
 1. instruction set AND condition met → CLOSE (highest priority)
@@ -181,7 +179,7 @@ CLAIM RULE: If unclaimed_fee_usd >= ${config.management.minClaimAmount}, call cl
 INSTRUCTIONS:
 All data is pre-loaded above — do NOT call get_my_positions or get_position_pnl.
 Apply the rules to each position and write your report immediately.
-Only call tools if a position needs to be CLOSED, FLIPPED, or fees need to be CLAIMED.
+Only call tools if a position needs to be CLOSED or fees need to be CLAIMED.
 If all positions STAY and no fees to claim, just write the report with no tool calls.
 
 REPORT FORMAT (one per position):
