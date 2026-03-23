@@ -274,6 +274,10 @@ WARNING: This executes a real on-chain transaction. Cannot be undone.`,
           skip_swap: {
             type: "boolean",
             description: "Set to true if user explicitly wants to hold/keep the base token after closing. Default: false (auto-swaps base token back to SOL)."
+          },
+          reason: {
+            type: "string",
+            description: "Why this position is being closed. Include the rule that triggered it, e.g. 'low yield', 'stop loss', 'trailing TP', 'OOR'. Used for pool memory."
           }
         },
         required: ["position_address"]

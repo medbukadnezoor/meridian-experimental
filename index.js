@@ -13,7 +13,7 @@ import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isE
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 
@@ -186,6 +186,7 @@ CLAIM RULE: If unclaimed_fee_usd >= ${config.management.minClaimAmount}, call cl
 INSTRUCTIONS:
 All data is pre-loaded above — do NOT call get_my_positions or get_position_pnl.
 Only call tools if a position needs to be CLOSED or fees need to be CLAIMED.
+When closing, always pass reason= with the rule that triggered it (e.g. "low yield", "stop loss", "trailing TP", "OOR").
 If all positions STAY and no fees to claim, just write the report with no tool calls.
 Write ONLY the report below. No preamble, no reasoning, no explanation.
 
@@ -264,29 +265,27 @@ Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action 
         ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
         : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
-      // Fetch top candidates + all recon data fully in parallel
+      // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
       const topCandidates = await getTopCandidates({ limit: 5 }).catch(() => null);
       const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 5);
 
-      const reconResults = await Promise.allSettled(
-        candidates.map(async (pool) => {
-          const mint = pool.base?.mint;
-          const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
-            checkSmartWalletsOnPool({ pool_address: pool.pool }),
-            mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-            mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-          ]);
-          return {
-            pool,
-            sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-            n: narrative.status === "fulfilled" ? narrative.value : null,
-            ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-            mem: recallForPool(pool.pool),
-          };
-        })
-      );
-
-      const allCandidates = reconResults.filter(r => r.status === "fulfilled").map(r => r.value);
+      const allCandidates = [];
+      for (const pool of candidates) {
+        const mint = pool.base?.mint;
+        const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+          checkSmartWalletsOnPool({ pool_address: pool.pool }),
+          mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+          mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        ]);
+        allCandidates.push({
+          pool,
+          sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
+          n: narrative.status === "fulfilled" ? narrative.value : null,
+          ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
+          mem: recallForPool(pool.pool),
+        });
+        await new Promise(r => setTimeout(r, 150)); // avoid 429s
+      }
 
       // JS hard filters — no LLM needed for binary rule violations
       const skipReasons = [];
