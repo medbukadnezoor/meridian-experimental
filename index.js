@@ -21,8 +21,8 @@ log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
 log("startup", `Model: ${process.env.LLM_MODEL || "hermes-3-405b"}`);
 
-const TP_PCT  = config.management.takeProfitFeePct;
-const DEPLOY  = config.management.deployAmountSol;
+const TP_PCT = config.management.takeProfitFeePct;
+const DEPLOY = config.management.deployAmountSol;
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -46,8 +46,8 @@ function formatCountdown(seconds) {
 }
 
 function buildPrompt() {
-  const mgmt  = formatCountdown(nextRunIn(timers.managementLastRun, config.schedule.managementIntervalMin));
-  const scrn  = formatCountdown(nextRunIn(timers.screeningLastRun,  config.schedule.screeningIntervalMin));
+  const mgmt = formatCountdown(nextRunIn(timers.managementLastRun, config.schedule.managementIntervalMin));
+  const scrn = formatCountdown(nextRunIn(timers.screeningLastRun, config.schedule.screeningIntervalMin));
   return `[manage: ${mgmt} | screen: ${scrn}]\n> `;
 }
 
@@ -125,8 +125,7 @@ export function startCronJobs() {
       const targetInterval = maxVolatility >= 5 ? 3 : maxVolatility >= 2 ? 5 : 10;
       if (config.schedule.managementIntervalMin !== targetInterval) {
         config.schedule.managementIntervalMin = targetInterval;
-        log("cron", `Management interval adjusted to ${targetInterval}m (max volatility: ${maxVolatility})`);
-        if (cronStarted) startCronJobs();
+        log("cron", `Management interval adjusted to ${targetInterval}m (max volatility: ${maxVolatility}) — takes effect next restart`);
       }
 
       // Also trigger screening if under max positions — cooldown 5min to avoid spamming
@@ -187,7 +186,6 @@ If all positions STAY and no fees to claim, just write the report with no tool c
 
 REPORT FORMAT (one per position):
 **[PAIR]** | Age: [X]m | Unclaimed: $[X] | PnL: [X]% | [STAY/CLOSE]
-Range: [████████░░░░░░░░░░░░] (20 chars: █ = bins up to active, ░ = bins above active)
 Only add: **Rule [N]:** [reason] — if a close rule triggered. Omit rule line if STAY with no rule.
 
 After all positions, add one summary line:
@@ -200,10 +198,10 @@ After all positions, add one summary line:
     } finally {
       _managementBusy = false;
       if (telegramEnabled()) {
-        if (mgmtReport) sendMessage(`🔄 Management Cycle\n\n${mgmtReport}`).catch(() => {});
+        if (mgmtReport) sendMessage(`🔄 Management Cycle\n\n${mgmtReport}`).catch(() => { });
         for (const p of positions) {
           if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
-            notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => {});
+            notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
           }
         }
       }
@@ -212,6 +210,7 @@ After all positions, add one summary line:
 
   async function runScreeningCycle() {
     if (_screeningBusy) return;
+    _screeningBusy = true; // set immediately — prevents TOCTOU race with concurrent callers
 
     // Hard guards — don't even run the agent if preconditions aren't met
     let prePositions, preBalance;
@@ -219,19 +218,20 @@ After all positions, add one summary line:
       [prePositions, preBalance] = await Promise.all([getMyPositions(), getWalletBalances()]);
       if (prePositions.total_positions >= config.risk.maxPositions) {
         log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
+        _screeningBusy = false;
         return;
       }
       const minRequired = config.management.deployAmountSol + config.management.gasReserve;
       if (preBalance.sol < minRequired) {
         log("cron", `Screening skipped — insufficient SOL (${preBalance.sol.toFixed(3)} < ${minRequired} needed for deploy + gas)`);
+        _screeningBusy = false;
         return;
       }
     } catch (e) {
       log("cron_error", `Screening pre-check failed: ${e.message}`);
+      _screeningBusy = false;
       return;
     }
-
-    _screeningBusy = true;
     timers.screeningLastRun = Date.now();
     log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
     let screenReport = null;
@@ -255,48 +255,48 @@ After all positions, add one summary line:
       for (const pool of candidates.slice(0, 5)) {
         const mint = pool.base?.mint;
         const [smartWallets, holders, narrative, tokenInfo, poolMemory] = await Promise.allSettled([
-            checkSmartWalletsOnPool({ pool_address: pool.pool }),
-            mint ? getTokenHolders({ mint, limit: 100 }) : Promise.resolve(null),
-            mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
-            mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
-            Promise.resolve(recallForPool(pool.pool)),
-          ]);
+          checkSmartWalletsOnPool({ pool_address: pool.pool }),
+          mint ? getTokenHolders({ mint, limit: 100 }) : Promise.resolve(null),
+          mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
+          mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+          Promise.resolve(recallForPool(pool.pool)),
+        ]);
 
-          const sw   = smartWallets.status === "fulfilled" ? smartWallets.value : null;
-          const h    = holders.status === "fulfilled" ? holders.value : null;
-          const n    = narrative.status === "fulfilled" ? narrative.value : null;
-          const ti   = tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null;
-          const mem  = poolMemory.value;
+        const sw = smartWallets.status === "fulfilled" ? smartWallets.value : null;
+        const h = holders.status === "fulfilled" ? holders.value : null;
+        const n = narrative.status === "fulfilled" ? narrative.value : null;
+        const ti = tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null;
+        const mem = poolMemory.value;
 
-          const priceChange = ti?.stats_1h?.price_change;
-          const netBuyers = ti?.stats_1h?.net_buyers;
+        const priceChange = ti?.stats_1h?.price_change;
+        const netBuyers = ti?.stats_1h?.net_buyers;
 
-          // Use Jupiter audit for bot/top holders (more reliable than custom detection)
-          const botPct    = ti?.audit?.bot_holders_pct ?? h?.bundlers_pct_in_top_100 ?? "?";
-          const top10Pct  = ti?.audit?.top_holders_pct ?? h?.top_10_real_holders_pct ?? "?";
-          const launchpad = ti?.launchpad ?? null;
-          const feesSol   = ti?.global_fees_sol ?? h?.global_fees_sol ?? "?";
+        // Use Jupiter audit for bot/top holders (more reliable than custom detection)
+        const botPct = ti?.audit?.bot_holders_pct ?? h?.bundlers_pct_in_top_100 ?? "?";
+        const top10Pct = ti?.audit?.top_holders_pct ?? h?.top_10_real_holders_pct ?? "?";
+        const launchpad = ti?.launchpad ?? null;
+        const feesSol = ti?.global_fees_sol ?? h?.global_fees_sol ?? "?";
 
-          // Hard filter: skip blocked launchpads before even showing to LLM
-          if (launchpad && config.screening.blockedLaunchpads.length > 0) {
-            if (config.screening.blockedLaunchpads.includes(launchpad)) {
-              log("screening", `Skipping ${pool.name} — blocked launchpad: ${launchpad}`);
-              continue;
-            }
+        // Hard filter: skip blocked launchpads before even showing to LLM
+        if (launchpad && config.screening.blockedLaunchpads.length > 0) {
+          if (config.screening.blockedLaunchpads.includes(launchpad)) {
+            log("screening", `Skipping ${pool.name} — blocked launchpad: ${launchpad}`);
+            continue;
           }
+        }
 
-          // Build compact block
-          const lines = [
-            `POOL: ${pool.name} (${pool.pool})`,
-            `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}`,
-            `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
-            `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
-            priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
-            n?.narrative ? `  narrative: ${n.narrative.slice(0, 500)}` : `  narrative: none`,
-            mem ? `  memory: ${mem}` : null,
-          ].filter(Boolean);
+        // Build compact block
+        const lines = [
+          `POOL: ${pool.name} (${pool.pool})`,
+          `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}`,
+          `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+          `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+          priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
+          n?.narrative ? `  narrative: ${n.narrative.slice(0, 500)}` : `  narrative: none`,
+          mem ? `  memory: ${mem}` : null,
+        ].filter(Boolean);
 
-          candidateBlocks.push(lines.join("\n"));
+        candidateBlocks.push(lines.join("\n"));
       }
 
       let candidateContext = candidateBlocks.length > 0
@@ -329,7 +329,7 @@ STEPS:
     } finally {
       _screeningBusy = false;
       if (telegramEnabled()) {
-        if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${screenReport}`).catch(() => {});
+        if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${screenReport}`).catch(() => { });
       }
     }
   }
@@ -378,7 +378,7 @@ async function shutdown(signal) {
   process.exit(0);
 }
 
-process.on("SIGINT",  () => shutdown("SIGINT"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
 // ═══════════════════════════════════════════
@@ -388,11 +388,11 @@ function formatCandidates(candidates) {
   if (!candidates.length) return "  No eligible pools found right now.";
 
   const lines = candidates.map((p, i) => {
-    const name   = (p.name || "unknown").padEnd(20);
-    const ftvl   = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
-    const vol    = `$${((p.volume_24h || 0) / 1000).toFixed(1)}k`.padStart(8);
+    const name = (p.name || "unknown").padEnd(20);
+    const ftvl = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
+    const vol = `$${((p.volume_24h || 0) / 1000).toFixed(1)}k`.padStart(8);
     const active = `${p.active_pct}%`.padStart(6);
-    const org    = String(p.organic_score).padStart(4);
+    const org = String(p.organic_score).padStart(4);
     return `  [${i + 1}]  ${name}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
   });
 
@@ -444,7 +444,7 @@ if (isTTY) {
       cronStarted = true;
       // Seed timers so countdown starts from now
       timers.managementLastRun = Date.now();
-      timers.screeningLastRun  = Date.now();
+      timers.screeningLastRun = Date.now();
       startCronJobs();
       console.log("Autonomous cycles are now running.\n");
       rl.setPrompt(buildPrompt());
@@ -504,12 +504,12 @@ if (isTTY) {
 
   // Always start autonomous cycles on launch
   launchCron();
-  maybeRunMissedBriefing().catch(() => {});
+  maybeRunMissedBriefing().catch(() => { });
 
   // Telegram bot
   startPolling(async (text) => {
     if (_managementBusy || _screeningBusy || busy) {
-      sendMessage("Agent is busy right now — try again in a moment.").catch(() => {});
+      sendMessage("Agent is busy right now — try again in a moment.").catch(() => { });
       return;
     }
 
@@ -518,7 +518,7 @@ if (isTTY) {
         const briefing = await generateBriefing();
         await sendHTML(briefing);
       } catch (e) {
-        await sendMessage(`Error: ${e.message}`).catch(() => {});
+        await sendMessage(`Error: ${e.message}`).catch(() => { });
       }
       return;
     }
@@ -534,7 +534,7 @@ if (isTTY) {
           return `${i + 1}. ${p.pair} | $${p.total_value_usd} | PnL: ${pnl} | fees: $${p.unclaimed_fees_usd} | ${age}${oor}`;
         });
         await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
       return;
     }
 
@@ -552,7 +552,7 @@ if (isTTY) {
         } else {
           await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
         }
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
       return;
     }
 
@@ -566,7 +566,7 @@ if (isTTY) {
         const pos = positions[idx];
         setPositionInstruction(pos.position, note);
         await sendMessage(`✅ Note set for ${pos.pair}:\n"${note}"`);
-      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
+      } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
       return;
     }
 
@@ -580,7 +580,7 @@ if (isTTY) {
       appendHistory(text, content);
       await sendMessage(content);
     } catch (e) {
-      await sendMessage(`Error: ${e.message}`).catch(() => {});
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
     } finally {
       busy = false;
       rl.setPrompt(buildPrompt());
@@ -799,7 +799,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   // Non-TTY: start immediately
   log("startup", "Non-TTY mode — starting cron cycles immediately.");
   startCronJobs();
-  maybeRunMissedBriefing().catch(() => {});
+  maybeRunMissedBriefing().catch(() => { });
   (async () => {
     try {
       await agentLoop(`
