@@ -190,8 +190,8 @@ When closing, always pass reason= with the rule that triggered it (e.g. "low yie
 If all positions STAY and no fees to claim, just write the report with no tool calls.
 Write ONLY the report below. No preamble, no reasoning, no explanation.
 
-REPORT FORMAT (one per position):
-**[PAIR]** | Age: [X]m | Unclaimed: $[X] | PnL: [X]% | 🟢 IN / 🔴 OOR [X]m | [STAY/CLOSE]
+REPORT FORMAT (one per position, currency: ${config.management.solMode ? "SOL (◎)" : "USD ($)"}):
+**[PAIR]** | Age: [X]m | Val: [value] | Unclaimed: [X] | PnL: [X]% | Yield: [fee_per_tvl_24h]% | 🟢 IN / 🔴 OOR [X]m | [STAY/CLOSE]
 If instruction set: Note: "[instruction text]"
 If close rule triggered: Rule [N]: [reason]
 
