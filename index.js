@@ -11,7 +11,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -150,16 +150,30 @@ export function startCronJobs() {
 
       const screeningCooldownMs = 5 * 60 * 1000;
 
+      // JS trailing TP check — deterministic, no LLM needed to decide
+      const exitAlerts = [];
+      for (const p of positionData) {
+        if (p.pnl_pct == null) continue;
+        const exit = updatePnlAndCheckExits(p.position, p.pnl_pct, config.management);
+        if (exit) {
+          exitAlerts.push(`⚡ HARD EXIT — ${p.pair} (${p.position}): ${exit.reason}`);
+          log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        }
+      }
+
       const { content } = await agentLoop(`
 MANAGEMENT CYCLE — ${positions.length} position(s)
 
 PRE-LOADED POSITION DATA (no fetching needed):
 ${positionBlocks}
-
+${exitAlerts.length > 0 ? `
+HARD EXIT ALERTS (trailing TP triggered — close these immediately, no exceptions):
+${exitAlerts.join("\n")}
+` : ""}
 INSTRUCTION OVERRIDE (check first, before any rule):
 - If a position has an instruction set → it OVERRIDES all rules below. HOLD unless the instruction condition is explicitly met. Do NOT apply rules 1-5 to positions with an instruction.
 
-CLOSE RULES (only for positions with NO instruction):
+CLOSE RULES (only for positions with NO instruction and no exit alert):
 1. pnl_pct <= ${config.management.emergencyPriceDropPct}% → CLOSE (stop loss)
 2. pnl_pct >= ${config.management.takeProfitFeePct}% → CLOSE (take profit)
 3. active_bin > upper_bin + ${config.management.outOfRangeBinsToClose} → CLOSE (pumped far above range)

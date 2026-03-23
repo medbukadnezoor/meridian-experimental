@@ -80,6 +80,8 @@ export function trackPosition({
     closed: false,
     closed_at: null,
     notes: [],
+    peak_pnl_pct: 0,
+    trailing_active: false,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -244,6 +246,47 @@ export function getStateSummary() {
     last_updated: state.lastUpdated,
     recent_events: (state.recentEvents || []).slice(-10),
   };
+}
+
+/**
+ * Check trailing TP and stop loss for a position.
+ * Updates peak_pnl_pct and trailing_active in state.
+ * Returns { action: "TRAILING_TP"|"STOP_LOSS", reason } or null if no exit.
+ */
+export function updatePnlAndCheckExits(position_address, currentPnlPct, mgmtConfig) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return null;
+
+  let changed = false;
+
+  // Track peak PnL
+  if (currentPnlPct > (pos.peak_pnl_pct ?? 0)) {
+    pos.peak_pnl_pct = currentPnlPct;
+    changed = true;
+  }
+
+  // Activate trailing TP once trigger threshold is reached
+  if (mgmtConfig.trailingTakeProfit && !pos.trailing_active && currentPnlPct >= mgmtConfig.trailingTriggerPct) {
+    pos.trailing_active = true;
+    changed = true;
+    log("state", `Position ${position_address} trailing TP activated at ${currentPnlPct}% (peak: ${pos.peak_pnl_pct}%)`);
+  }
+
+  if (changed) save(state);
+
+  // Fire trailing TP exit
+  if (pos.trailing_active) {
+    const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
+    if (dropFromPeak >= mgmtConfig.trailingDropPct) {
+      return {
+        action: "TRAILING_TP",
+        reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
+      };
+    }
+  }
+
+  return null;
 }
 
 // ─── Briefing Tracking ─────────────────────────────────────────

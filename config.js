@@ -56,6 +56,10 @@ export const config = {
     deployAmountSol:       u.deployAmountSol       ?? 0.5,
     gasReserve:            u.gasReserve            ?? 0.2,
     positionSizePct:       u.positionSizePct       ?? 0.35,
+    // Trailing take-profit
+    trailingTakeProfit:    u.trailingTakeProfit    ?? true,
+    trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
+    trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
   },
 
   // ─── Strategy Mapping ───────────────────
