@@ -3,7 +3,7 @@ import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
-import { getMyPositions, getPositionPnl, closePosition } from "./tools/dlmm.js";
+import { getMyPositions, closePosition } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
@@ -136,23 +136,20 @@ export function startCronJobs() {
         runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
       }
 
-      // Snapshot + PnL fetch in parallel for all positions
-      const positionData = await Promise.all(positions.map(async (p) => {
+      // Snapshot positions + load pool memory (PnL already included in getMyPositions)
+      const positionData = positions.map((p) => {
         recordPositionSnapshot(p.pool, p);
-        const pnl = await getPositionPnl({ pool_address: p.pool, position_address: p.position }).catch(() => null);
-        const recall = recallForPool(p.pool);
-        return { ...p, pnl, recall };
-      }));
+        return { ...p, recall: recallForPool(p.pool) };
+      });
 
       // Build pre-loaded position blocks for the LLM
       const positionBlocks = positionData.map((p) => {
-        const pnl = p.pnl;
         const lines = [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
           `  age: ${p.age_minutes ?? "?"}m | in_range: ${p.in_range} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
-          pnl ? `  pnl_pct: ${pnl.pnl_pct}% | pnl_usd: $${pnl.pnl_usd} | unclaimed_fees: $${pnl.unclaimed_fee_usd} | claimed_fees: $${Math.max(0, (pnl.all_time_fees_usd || 0) - (pnl.unclaimed_fee_usd || 0)).toFixed(2)} | value: $${pnl.current_value_usd} | fee_per_tvl_24h: ${pnl.fee_per_tvl_24h ?? "?"}%` : `  pnl: fetch failed`,
-          pnl ? `  bins: lower=${pnl.lower_bin} upper=${pnl.upper_bin} active=${pnl.active_bin}` : null,
+          `  pnl_pct: ${p.pnl_pct}% | pnl_usd: $${p.pnl_usd} | unclaimed_fees: $${p.unclaimed_fees_usd} | claimed_fees: $${p.collected_fees_usd} | value: $${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+          `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
           p.recall ? `  memory: ${p.recall}` : null,
         ].filter(Boolean);

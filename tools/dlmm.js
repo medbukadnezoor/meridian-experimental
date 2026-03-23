@@ -432,8 +432,10 @@ export async function getMyPositions({ force = false } = {}) {
         collected_fees_usd: Math.round(collectedFees * 100) / 100,
         pnl_usd: Math.round(pnlUsd * 100) / 100,
         pnl_pct: Math.round(pnlPct * 100) / 100,
+        fee_per_tvl_24h: p ? Math.round(parseFloat(p.feePerTvl24h || 0) * 100) / 100 : null,
         age_minutes: ageMinutes,
         minutes_out_of_range: minutesOutOfRange(r.position),
+        instruction: tracked?.instruction ?? null,
       };
     });
 
