@@ -346,7 +346,6 @@ export async function getMyPositions({ force = false } = {}) {
   if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
     return _positionsCache;
   }
-  // If a scan is already in progress, wait for it instead of starting another
   if (_positionsInflight) return _positionsInflight;
 
   let walletAddress;
@@ -357,95 +356,72 @@ export async function getMyPositions({ force = false } = {}) {
   }
 
   _positionsInflight = (async () => { try {
-    log("positions", "Scanning positions via getProgramAccounts...");
-    const DLMM_PROGRAM = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
-    const walletPubkey = new PublicKey(walletAddress);
+    // Single portfolio API call — returns all positions with full PnL data
+    log("positions", "Fetching portfolio via Meteora portfolio API...");
+    const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
+    const res = await fetch(portfolioUrl);
+    if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
+    const portfolio = await res.json();
 
-    // Owner field sits at offset 40 (8 discriminator + 32 lb_pair)
-    const accounts = await getConnection().getProgramAccounts(DLMM_PROGRAM, {
-      filters: [{ memcmp: { offset: 40, bytes: walletPubkey.toBase58() } }],
-    });
+    const pools = portfolio.pools || [];
+    log("positions", `Found ${pools.length} pool(s) with open positions`);
 
-    log("positions", `Found ${accounts.length} position account(s)`);
-
-    // Collect raw (pool, position) pairs
-    const raw = [];
-    for (const acc of accounts) {
-      const positionAddress = acc.pubkey.toBase58();
-      const lbPairKey = new PublicKey(acc.account.data.slice(8, 40)).toBase58();
-      // Pair name: use tracked state pool_name if available
-      const tracked = getTrackedPosition(positionAddress);
-      const pair = tracked?.pool_name || lbPairKey.slice(0, 8);
-      raw.push({
-        position: positionAddress,
-        pool: lbPairKey,
-        pair,
-        base_mint: null, // enriched from PnL API below
-        lower_bin: null,
-        upper_bin: null,
-      });
+    // For OOR positions we need bin data (active_bin) — fetch per-pool PnL only for those
+    const oorPools = pools.filter(pool => pool.outOfRange || pool.positionsOutOfRange?.length > 0);
+    const binDataByPool = {};
+    if (oorPools.length > 0) {
+      const pnlMaps = await Promise.all(oorPools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
+      oorPools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
     }
 
-    // Enrich with DLMM PnL API for each unique pool in parallel
-    const uniquePools = [...new Set(raw.map((p) => p.pool))];
-    const pnlMaps = await Promise.all(uniquePools.map((pool) => fetchDlmmPnlForPool(pool, walletAddress)));
-    const pnlByPool = {};
-    uniquePools.forEach((pool, i) => { pnlByPool[pool] = pnlMaps[i]; });
+    const positions = [];
+    for (const pool of pools) {
+      for (const positionAddress of (pool.listPositions || [])) {
+        const tracked = getTrackedPosition(positionAddress);
+        const isOOR = pool.outOfRange || pool.positionsOutOfRange?.includes(positionAddress);
 
-    const positions = raw.map((r) => {
-      const p = pnlByPool[r.pool]?.[r.position] || null;
+        if (isOOR) markOutOfRange(positionAddress);
+        else markInRange(positionAddress);
 
-      const inRange = p ? !p.isOutOfRange : true;
-      if (inRange) markInRange(r.position);
-      else markOutOfRange(r.position);
+        // Bin data: from supplemental PnL call (OOR) or tracked state (in-range)
+        const binData = binDataByPool[pool.poolAddress]?.[positionAddress];
+        const lowerBin  = binData?.lowerBinId      ?? tracked?.bin_range?.min ?? null;
+        const upperBin  = binData?.upperBinId      ?? tracked?.bin_range?.max ?? null;
+        const activeBin = binData?.poolActiveBinId ?? null;
 
-      const lowerBin  = p?.lowerBinId      ?? r.lower_bin;
-      const upperBin  = p?.upperBinId      ?? r.upper_bin;
-      const activeBin = p?.poolActiveBinId ?? null;
+        const ageFromState = tracked?.deployed_at
+          ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
+          : null;
 
-      const unclaimedFees = p ? (parseFloat(p.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(p.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) : 0;
-      const totalValue    = p ? parseFloat(p.unrealizedPnl?.balances || 0) : 0;
-      const collectedFees = p ? parseFloat(p.allTimeFees?.total?.usd || 0) : 0;
-      const pnlUsd        = p?.pnlUsd       ?? 0;
-      const pnlPct        = p?.pnlPctChange ?? 0;
-
-      const tracked = getTrackedPosition(r.position);
-      const ageFromPnlApi = p?.createdAt
-        ? Math.floor((Date.now() - p.createdAt * 1000) / 60000)
-        : null;
-      const ageFromState = tracked?.deployed_at
-        ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
-        : null;
-      const ageMinutes = Math.max(ageFromPnlApi ?? 0, ageFromState ?? 0) || null;
-
-      return {
-        position: r.position,
-        pool: r.pool,
-        pair: r.pair,
-        base_mint: r.base_mint,
-        lower_bin: lowerBin,
-        upper_bin: upperBin,
-        active_bin: activeBin,
-        in_range: inRange,
-        unclaimed_fees_usd: Math.round(unclaimedFees * 100) / 100,
-        total_value_usd: Math.round(totalValue * 100) / 100,
-        collected_fees_usd: Math.round(collectedFees * 100) / 100,
-        pnl_usd: Math.round(pnlUsd * 100) / 100,
-        pnl_pct: Math.round(pnlPct * 100) / 100,
-        fee_per_tvl_24h: p ? Math.round(parseFloat(p.feePerTvl24h || 0) * 100) / 100 : null,
-        age_minutes: ageMinutes,
-        minutes_out_of_range: minutesOutOfRange(r.position),
-        instruction: tracked?.instruction ?? null,
-      };
-    });
+        positions.push({
+          position:           positionAddress,
+          pool:               pool.poolAddress,
+          pair:               tracked?.pool_name || `${pool.tokenX}/${pool.tokenY}`,
+          base_mint:          pool.tokenXMint,
+          lower_bin:          lowerBin,
+          upper_bin:          upperBin,
+          active_bin:         activeBin,
+          in_range:           !isOOR,
+          unclaimed_fees_usd: Math.round(parseFloat(pool.unclaimedFees || 0) * 100) / 100,
+          total_value_usd:    Math.round(parseFloat(pool.balances || 0) * 100) / 100,
+          collected_fees_usd: Math.round((parseFloat(pool.unclaimedFees || 0)) * 100) / 100,
+          pnl_usd:            Math.round(parseFloat(pool.pnl || 0) * 100) / 100,
+          pnl_pct:            Math.round(parseFloat(pool.pnlPctChange || 0) * 100) / 100,
+          fee_per_tvl_24h:    Math.round(parseFloat(pool.feePerTvl24h || 0) * 100) / 100,
+          age_minutes:        ageFromState,
+          minutes_out_of_range: minutesOutOfRange(positionAddress),
+          instruction:        tracked?.instruction ?? null,
+        });
+      }
+    }
 
     const result = { wallet: walletAddress, total_positions: positions.length, positions };
-    syncOpenPositions(positions.map((p) => p.position));
+    syncOpenPositions(positions.map(p => p.position));
     _positionsCache = result;
     _positionsCacheAt = Date.now();
     return result;
   } catch (error) {
-    log("positions_error", `SDK scan failed: ${error.stack || error.message}`);
+    log("positions_error", `Portfolio fetch failed: ${error.stack || error.message}`);
     return { wallet: walletAddress, total_positions: 0, positions: [], error: error.message };
   } finally {
     _positionsInflight = null;
