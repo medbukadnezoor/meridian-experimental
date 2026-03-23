@@ -128,14 +128,6 @@ export function startCronJobs() {
         log("cron", `Management interval adjusted to ${targetInterval}m (max volatility: ${maxVolatility}) — takes effect next restart`);
       }
 
-      // Also trigger screening if under max positions — cooldown 5min to avoid spamming
-      const screeningCooldownMs = 5 * 60 * 1000;
-      if (positions.length < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
-        _screeningLastTriggered = Date.now();
-        log("cron", `Positions (${positions.length}/${config.risk.maxPositions}) — triggering screening in background`);
-        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
-      }
-
       // Snapshot positions + load pool memory (PnL already included in getMyPositions)
       const positionData = positions.map((p) => {
         recordPositionSnapshot(p.pool, p);
@@ -155,6 +147,8 @@ export function startCronJobs() {
         ].filter(Boolean);
         return lines.join("\n");
       }).join("\n\n");
+
+      const screeningCooldownMs = 5 * 60 * 1000;
 
       const { content } = await agentLoop(`
 MANAGEMENT CYCLE — ${positions.length} position(s)
@@ -188,6 +182,15 @@ If close rule triggered: Rule [N]: [reason]
 Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action or "no action"]
       `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048);
       mgmtReport = content;
+
+      // Trigger screening AFTER management completes — uses fresh count so we don't race with a close
+      const afterPositions = await getMyPositions({ force: true }).catch(() => null);
+      const afterCount = afterPositions?.positions?.length ?? 0;
+      if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
+        _screeningLastTriggered = Date.now();
+        log("cron", `Post-management: ${afterCount}/${config.risk.maxPositions} positions — triggering screening`);
+        runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
+      }
     } catch (error) {
       log("cron_error", `Management cycle failed: ${error.message}`);
       mgmtReport = `Management cycle failed: ${error.message}`;
