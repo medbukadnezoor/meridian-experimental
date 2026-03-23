@@ -165,30 +165,31 @@ MANAGEMENT CYCLE — ${positions.length} position(s)
 PRE-LOADED POSITION DATA (no fetching needed):
 ${positionBlocks}
 
-HARD CLOSE RULES — apply in order, first match wins:
-1. instruction set AND condition met → CLOSE (highest priority)
-2. instruction set AND condition NOT met → HOLD, skip remaining rules
-3. pnl_pct <= ${config.management.emergencyPriceDropPct}% → CLOSE (stop loss)
-4. pnl_pct >= ${config.management.takeProfitFeePct}% → CLOSE (take profit)
-5. active_bin > upper_bin + ${config.management.outOfRangeBinsToClose} → CLOSE (pumped far above range)
-6. active_bin > upper_bin AND oor_minutes >= ${config.management.outOfRangeWaitMinutes} → CLOSE (stale above range)
-7. fee_per_tvl_24h < ${config.management.minFeePerTvl24h} AND age_minutes >= 60 → CLOSE (fee yield too low)
+INSTRUCTION OVERRIDE (check first, before any rule):
+- If a position has an instruction set → it OVERRIDES all rules below. HOLD unless the instruction condition is explicitly met. Do NOT apply rules 1-5 to positions with an instruction.
+
+CLOSE RULES (only for positions with NO instruction):
+1. pnl_pct <= ${config.management.emergencyPriceDropPct}% → CLOSE (stop loss)
+2. pnl_pct >= ${config.management.takeProfitFeePct}% → CLOSE (take profit)
+3. active_bin > upper_bin + ${config.management.outOfRangeBinsToClose} → CLOSE (pumped far above range)
+4. active_bin > upper_bin AND oor_minutes >= ${config.management.outOfRangeWaitMinutes} → CLOSE (stale above range)
+5. fee_per_tvl_24h < ${config.management.minFeePerTvl24h} AND age_minutes >= 60 → CLOSE (fee yield too low)
 
 CLAIM RULE: If unclaimed_fee_usd >= ${config.management.minClaimAmount}, call claim_fees. Do not use any other threshold.
 
 INSTRUCTIONS:
 All data is pre-loaded above — do NOT call get_my_positions or get_position_pnl.
-Apply the rules to each position and write your report immediately.
 Only call tools if a position needs to be CLOSED or fees need to be CLAIMED.
 If all positions STAY and no fees to claim, just write the report with no tool calls.
+Write ONLY the report below. No preamble, no reasoning, no explanation.
 
 REPORT FORMAT (one per position):
 **[PAIR]** | Age: [X]m | Unclaimed: $[X] | PnL: [X]% | [STAY/CLOSE]
-Only add: **Rule [N]:** [reason] — if a close rule triggered. Omit rule line if STAY with no rule.
+If instruction set: Note: "[instruction text]"
+If close rule triggered: Rule [N]: [reason]
 
-After all positions, add one summary line:
-💼 [N] positions | $[total_value] | fees today: $[sum_unclaimed] | [any notable action taken]
-      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 4096);
+Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action or "no action"]
+      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 1024);
       mgmtReport = content;
     } catch (error) {
       log("cron_error", `Management cycle failed: ${error.message}`);
