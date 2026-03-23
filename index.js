@@ -266,8 +266,8 @@ Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action 
         : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
 
       // Fetch top candidates, then recon each sequentially with a small delay to avoid 429s
-      const topCandidates = await getTopCandidates({ limit: 5 }).catch(() => null);
-      const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 5);
+      const topCandidates = await getTopCandidates({ limit: 10 }).catch(() => null);
+      const candidates = (topCandidates?.candidates || topCandidates?.pools || []).slice(0, 10);
 
       const allCandidates = [];
       for (const pool of candidates) {
@@ -287,41 +287,22 @@ Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action 
         await new Promise(r => setTimeout(r, 150)); // avoid 429s
       }
 
-      // JS hard filters — no LLM needed for binary rule violations
-      const skipReasons = [];
+      // Only filter blocked launchpads — everything else is for the LLM to judge
       const passing = allCandidates.filter(({ pool, ti }) => {
         const launchpad = ti?.launchpad ?? null;
-        const feesSol = ti?.global_fees_sol;
-        const top10Pct = ti?.audit?.top_holders_pct;
-        const botPct = ti?.audit?.bot_holders_pct;
-
         if (launchpad && config.screening.blockedLaunchpads.includes(launchpad)) {
-          skipReasons.push(`${pool.name}: blocked launchpad (${launchpad})`);
-          return false;
-        }
-        if (feesSol != null && feesSol < config.screening.minTokenFeesSol) {
-          skipReasons.push(`${pool.name}: fees ${feesSol} SOL < ${config.screening.minTokenFeesSol}`);
-          return false;
-        }
-        if (top10Pct != null && top10Pct > config.screening.maxTop10Pct) {
-          skipReasons.push(`${pool.name}: top10 ${top10Pct}% > ${config.screening.maxTop10Pct}%`);
-          return false;
-        }
-        if (botPct != null && botPct > config.screening.maxBundlersPct) {
-          skipReasons.push(`${pool.name}: bots ${botPct}% > ${config.screening.maxBundlersPct}%`);
+          log("screening", `Skipping ${pool.name} — blocked launchpad (${launchpad})`);
           return false;
         }
         return true;
       });
 
-      if (skipReasons.length > 0) log("screening", `Hard-filtered: ${skipReasons.join(" | ")}`);
-
       if (passing.length === 0) {
-        screenReport = `No candidates passed hard filters:\n${skipReasons.map(r => `- ${r}`).join("\n")}`;
+        screenReport = `No candidates available (all blocked by launchpad filter).`;
         return;
       }
 
-      // Pre-fetch active_bin for passing candidates (removes one LLM tool-call step)
+      // Pre-fetch active_bin for all passing candidates in parallel
       const activeBinResults = await Promise.allSettled(
         passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
       );
@@ -353,7 +334,7 @@ SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 
-PRE-LOADED CANDIDATES (${passing.length} passed hard filters):
+PRE-LOADED CANDIDATES (${passing.length} pools):
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
