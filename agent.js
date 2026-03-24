@@ -133,8 +133,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         }
         const result = await executeTool(functionName, functionArgs);
 
-        // Only mark as fired if it actually executed — safety-blocked calls don't count
-        if (ONCE_PER_SESSION.has(functionName) && !result.blocked) firedOnce.add(functionName);
+        // Only lock after a successful execution — failures and safety blocks allow retry
+        if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {
           role: "tool",
