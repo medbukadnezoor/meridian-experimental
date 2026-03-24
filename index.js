@@ -482,7 +482,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           if (sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
-            runManagementCycle().catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
           }
