@@ -101,11 +101,12 @@ export async function runManagementCycle({ silent = false } = {}) {
   if (_managementBusy) return null;
   _managementBusy = true;
   timers.managementLastRun = Date.now();
-  log("cron", `Starting management cycle [model: ${config.llm.managementModel}]`);
+  log("cron", "Starting management cycle");
   let mgmtReport = null;
   let positions = [];
+  const screeningCooldownMs = 5 * 60 * 1000;
+
   try {
-    // Pre-load all positions + PnL in parallel — force fresh to avoid stale cache
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
 
@@ -126,77 +127,143 @@ export async function runManagementCycle({ silent = false } = {}) {
       log("cron", `Management interval adjusted to ${targetInterval}m (max volatility: ${maxVolatility}) — takes effect next restart`);
     }
 
-    // Snapshot positions + load pool memory (PnL already included in getMyPositions)
+    // Snapshot + load pool memory
     const positionData = positions.map((p) => {
       recordPositionSnapshot(p.pool, p);
       return { ...p, recall: recallForPool(p.pool) };
     });
 
-    // Build pre-loaded position blocks for the LLM
-    const positionBlocks = positionData.map((p) => {
-      const lines = [
-        `POSITION: ${p.pair} (${p.position})`,
-        `  pool: ${p.pool}`,
-        `  age: ${p.age_minutes ?? "?"}m | in_range: ${p.in_range} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
-        `  pnl_pct: ${p.pnl_pct}% | pnl_usd: $${p.pnl_usd} | unclaimed_fees: $${p.unclaimed_fees_usd} | claimed_fees: $${p.collected_fees_usd} | value: $${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
-        `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin}`,
-        p.instruction ? `  instruction: "${p.instruction}"` : null,
-        p.recall ? `  memory: ${p.recall}` : null,
-      ].filter(Boolean);
-      return lines.join("\n");
-    }).join("\n\n");
-
-    const screeningCooldownMs = 5 * 60 * 1000;
-
-    // JS trailing TP check — deterministic, no LLM needed to decide
-    const exitAlerts = [];
+    // JS trailing TP check
+    const exitMap = new Map();
     for (const p of positionData) {
       if (p.pnl_pct == null) continue;
       const exit = updatePnlAndCheckExits(p.position, p.pnl_pct, config.management);
       if (exit) {
-        exitAlerts.push(`⚡ HARD EXIT — ${p.pair} (${p.position}): ${exit.reason}`);
+        exitMap.set(p.position, exit.reason);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
     }
 
-    const { content } = await agentLoop(`
-MANAGEMENT CYCLE — ${positions.length} position(s)
+    // ── Deterministic rule checks (no LLM) ──────────────────────────
+    // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
+    const actionMap = new Map();
+    for (const p of positionData) {
+      // Hard exit — highest priority
+      if (exitMap.has(p.position)) {
+        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        continue;
+      }
+      // Instruction-set — pass to LLM, can't parse in JS
+      if (p.instruction) {
+        actionMap.set(p.position, { action: "INSTRUCTION" });
+        continue;
+      }
+      // Rule 1: stop loss
+      if (p.pnl_pct != null && p.pnl_pct <= config.management.emergencyPriceDropPct) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 1, reason: "stop loss" });
+        continue;
+      }
+      // Rule 2: take profit
+      if (p.pnl_pct != null && p.pnl_pct >= config.management.takeProfitFeePct) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 2, reason: "take profit" });
+        continue;
+      }
+      // Rule 3: pumped far above range
+      if (p.active_bin != null && p.upper_bin != null &&
+          p.active_bin > p.upper_bin + config.management.outOfRangeBinsToClose) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 3, reason: "pumped far above range" });
+        continue;
+      }
+      // Rule 4: stale above range
+      if (p.active_bin != null && p.upper_bin != null &&
+          p.active_bin > p.upper_bin &&
+          (p.minutes_out_of_range ?? 0) >= config.management.outOfRangeWaitMinutes) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 4, reason: "OOR" });
+        continue;
+      }
+      // Rule 5: fee yield too low
+      if (p.fee_per_tvl_24h != null &&
+          p.fee_per_tvl_24h < config.management.minFeePerTvl24h &&
+          (p.age_minutes ?? 0) >= 60) {
+        actionMap.set(p.position, { action: "CLOSE", rule: 5, reason: "low yield" });
+        continue;
+      }
+      // Claim rule
+      if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
+        actionMap.set(p.position, { action: "CLAIM" });
+        continue;
+      }
+      actionMap.set(p.position, { action: "STAY" });
+    }
 
-PRE-LOADED POSITION DATA (no fetching needed):
-${positionBlocks}
-${exitAlerts.length > 0 ? `
-HARD EXIT ALERTS (trailing TP triggered — close these immediately, no exceptions):
-${exitAlerts.join("\n")}
-` : ""}
-INSTRUCTION OVERRIDE (check first, before any rule):
-- If a position has an instruction set → it OVERRIDES all rules below. HOLD unless the instruction condition is explicitly met. Do NOT apply rules 1-5 to positions with an instruction.
+    // ── Build JS report ──────────────────────────────────────────────
+    const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
+    const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
-CLOSE RULES (only for positions with NO instruction and no exit alert):
-1. pnl_pct <= ${config.management.emergencyPriceDropPct}% → CLOSE (stop loss)
-2. pnl_pct >= ${config.management.takeProfitFeePct}% → CLOSE (take profit)
-3. active_bin > upper_bin + ${config.management.outOfRangeBinsToClose} → CLOSE (pumped far above range)
-4. active_bin > upper_bin AND oor_minutes >= ${config.management.outOfRangeWaitMinutes} → CLOSE (stale above range)
-5. fee_per_tvl_24h < ${config.management.minFeePerTvl24h} AND age_minutes >= 60 → CLOSE (fee yield too low)
+    const reportLines = positionData.map((p) => {
+      const act = actionMap.get(p.position);
+      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const val = config.management.solMode ? `◎${p.sol_value ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
+      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_sol ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
+      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
+      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      if (p.instruction) line += `\nNote: "${p.instruction}"`;
+      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      return line;
+    });
 
-CLAIM RULE: If unclaimed_fee_usd >= ${config.management.minClaimAmount}, call claim_fees. Do not use any other threshold.
+    const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    const actionSummary = needsAction.length > 0
+      ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
+      : "no action";
 
-INSTRUCTIONS:
-All data is pre-loaded above — do NOT call get_my_positions or get_position_pnl.
-Only call tools if a position needs to be CLOSED or fees need to be CLAIMED.
-When closing, always pass reason= with the rule that triggered it (e.g. "low yield", "stop loss", "trailing TP", "OOR").
-If all positions STAY and no fees to claim, just write the report with no tool calls.
-Write ONLY the report below. No preamble, no reasoning, no explanation.
+    mgmtReport = reportLines.join("\n\n") +
+      `\n\nSummary: 💼 ${positions.length} positions | $${totalValue.toFixed(2)} | fees: $${totalUnclaimed.toFixed(2)} | ${actionSummary}`;
 
-REPORT FORMAT (one per position, currency: ${config.management.solMode ? "SOL (◎)" : "USD ($)"}):
-**[PAIR]** | Age: [X]m | Val: [value] | Unclaimed: [X] | PnL: [X]% | Yield: [fee_per_tvl_24h]% | 🟢 IN / 🔴 OOR [X]m | [STAY/CLOSE]
-If instruction set: Note: "[instruction text]"
-If close rule triggered: Rule [N]: [reason]
+    // ── Call LLM only if action needed ──────────────────────────────
+    const actionPositions = positionData.filter(p => {
+      const a = actionMap.get(p.position);
+      return a.action !== "STAY";
+    });
 
-Summary: 💼 [N] positions | $[total_value] | fees: $[sum_unclaimed] | [action or "no action"]
-      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 4096);
-    mgmtReport = content;
+    if (actionPositions.length > 0) {
+      log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
 
-    // Trigger screening AFTER management completes — uses fresh count so we don't race with a close
+      const actionBlocks = actionPositions.map((p) => {
+        const act = actionMap.get(p.position);
+        return [
+          `POSITION: ${p.pair} (${p.position})`,
+          `  pool: ${p.pool}`,
+          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees_usd: $${p.unclaimed_fees_usd} | value: $${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
+          `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
+          p.instruction ? `  instruction: "${p.instruction}"` : null,
+        ].filter(Boolean).join("\n");
+      }).join("\n\n");
+
+      const { content } = await agentLoop(`
+MANAGEMENT ACTION REQUIRED — ${actionPositions.length} position(s)
+
+${actionBlocks}
+
+RULES:
+- CLOSE: call close_position with position address + reason
+- CLAIM: call claim_fees with position address
+- INSTRUCTION: evaluate the instruction condition. If met → close_position. If not → HOLD, do nothing.
+- ⚡ exit alerts: close immediately, no exceptions
+
+Execute the required actions. Do NOT re-evaluate CLOSE/CLAIM — rules already applied. Just execute.
+After executing, write a brief one-line result per position.
+      `, config.llm.maxSteps, [], "MANAGER", config.llm.managementModel, 2048);
+
+      mgmtReport += `\n\n${content}`;
+    } else {
+      log("cron", "Management: all positions STAY — skipping LLM");
+    }
+
+    // Trigger screening after management
     const afterPositions = await getMyPositions({ force: true }).catch(() => null);
     const afterCount = afterPositions?.positions?.length ?? 0;
     if (afterCount < config.risk.maxPositions && Date.now() - _screeningLastTriggered > screeningCooldownMs) {
