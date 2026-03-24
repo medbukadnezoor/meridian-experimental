@@ -486,7 +486,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
       for (const p of result.positions) {
         if (p.pnl_pct == null) continue;
         const exit = updatePnlAndCheckExits(p.position, p.pnl_pct, config.management);
-        if (exit) log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason}`);
+        if (exit) {
+          log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management immediately`);
+          runManagementCycle().catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
+          break; // management will handle all positions
+        }
       }
     } finally {
       _pnlPollBusy = false;
