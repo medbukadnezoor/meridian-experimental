@@ -572,19 +572,24 @@ export async function closePosition({ position_address }) {
     const txHashes = [];
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
+    const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
     try {
-      log("close", `Step 1: Claiming fees for ${position_address}`);
-      const positionData = await pool.getPosition(positionPubKey);
-      const claimTxs = await pool.claimSwapFee({
-        owner: wallet.publicKey,
-        position: positionData,
-      });
-      if (claimTxs && claimTxs.length > 0) {
-        for (const tx of claimTxs) {
-          const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-          txHashes.push(claimHash);
+      if (recentlyClaimed) {
+        log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+      } else {
+        log("close", `Step 1: Claiming fees for ${position_address}`);
+        const positionData = await pool.getPosition(positionPubKey);
+        const claimTxs = await pool.claimSwapFee({
+          owner: wallet.publicKey,
+          position: positionData,
+        });
+        if (claimTxs && claimTxs.length > 0) {
+          for (const tx of claimTxs) {
+            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+            txHashes.push(claimHash);
+          }
+          log("close", `Step 1 OK: ${txHashes.join(", ")}`);
         }
-        log("close", `Step 1 OK: ${txHashes.join(", ")}`);
       }
     } catch (e) {
       log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
@@ -631,7 +636,7 @@ export async function closePosition({ position_address }) {
       let initialUsd = 0;
       let feesUsd = tracked.total_fees_claimed_usd || 0;
       try {
-        const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=closed&pageSize=50&page=1`;
+        const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
         const res = await fetch(closedUrl);
         if (res.ok) {
           const data = await res.json();
