@@ -19,6 +19,7 @@ import {
   syncOpenPositions,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
+import { isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
@@ -112,6 +113,11 @@ export async function deployPosition({
 
   const activeBinsBelow = bins_below ?? config.strategy.binsBelow;
   const activeBinsAbove = bins_above ?? 0;
+
+  if (isPoolOnCooldown(pool_address)) {
+    log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown (closed for low yield) — skipping`);
+    return { success: false, error: "Pool on cooldown — was recently closed for low yield. Try a different pool." };
+  }
 
   if (process.env.DRY_RUN === "true") {
     const totalBins = activeBinsBelow + activeBinsAbove;
