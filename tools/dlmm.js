@@ -559,6 +559,8 @@ export async function closePosition({ position_address }) {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
   }
 
+  const tracked = getTrackedPosition(position_address);
+
   try {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
