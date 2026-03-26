@@ -30,7 +30,9 @@ export async function discoverPools({
     `fee_active_tvl_ratio>=${s.minFeeActiveTvlRatio}`,
     `base_token_organic_score>=${s.minOrganic}`,
     "quote_token_organic_score>=60",
-  ].join("&&");
+    s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
+    s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
+  ].filter(Boolean).join("&&");
 
   const url = `${POOL_DISCOVERY_BASE}/pools?` +
     `page_size=${page_size}` +
@@ -82,22 +84,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const occupiedPools = new Set(positions.map((p) => p.pool));
   const occupiedMints = new Set(positions.map((p) => p.base_mint).filter(Boolean));
 
-  const { minTokenAgeHours, maxTokenAgeHours } = config.screening;
-
   const eligible = pools
-    .filter((p) => {
-      if (occupiedPools.has(p.pool) || occupiedMints.has(p.base?.mint)) return false;
-      const age = p.token_age_hours;
-      if (minTokenAgeHours != null && (age == null || age < minTokenAgeHours)) {
-        log("screening", `Filtered ${p.name}: token too new (${age}h < min ${minTokenAgeHours}h)`);
-        return false;
-      }
-      if (maxTokenAgeHours != null && (age == null || age > maxTokenAgeHours)) {
-        log("screening", `Filtered ${p.name}: token too old (${age}h > max ${maxTokenAgeHours}h)`);
-        return false;
-      }
-      return true;
-    })
+    .filter((p) => !occupiedPools.has(p.pool) && !occupiedMints.has(p.base?.mint))
     .slice(0, limit);
 
   return {
