@@ -140,8 +140,10 @@ export function reloadScreeningThresholds() {
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
-    if (fresh.timeframe      != null) s.timeframe      = fresh.timeframe;
-    if (fresh.category       != null) s.category       = fresh.category;
+    if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
+    if (fresh.category          != null) s.category          = fresh.category;
+    if (fresh.minTokenAgeHours  !== undefined) s.minTokenAgeHours = fresh.minTokenAgeHours;
+    if (fresh.maxTokenAgeHours  !== undefined) s.maxTokenAgeHours = fresh.maxTokenAgeHours;
   } catch { /* ignore */ }
 }
 
