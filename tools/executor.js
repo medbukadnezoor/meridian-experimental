@@ -247,6 +247,9 @@ const WRITE_TOOLS = new Set([
 export async function executeTool(name, args) {
   const startTime = Date.now();
 
+  // Strip model artifacts like "<|channel|>commentary" appended to tool names
+  name = name.replace(/<.*$/, "").trim();
+
   // ─── Validate tool exists ─────────────────
   const fn = toolMap[name];
   if (!fn) {

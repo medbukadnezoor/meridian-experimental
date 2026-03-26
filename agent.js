@@ -154,7 +154,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       // Execute each tool call in parallel
       const toolResults = await Promise.all(msg.tool_calls.map(async (toolCall) => {
-        const functionName = toolCall.function.name;
+        const functionName = toolCall.function.name.replace(/<.*$/, "").trim();
         let functionArgs;
 
         try {
