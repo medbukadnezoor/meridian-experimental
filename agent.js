@@ -94,6 +94,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
   // Track write tools fired this session — prevent the model from calling the same
   // destructive tool twice (e.g. deploy twice, swap twice after auto-swap)
   const ONCE_PER_SESSION = new Set(["deploy_position", "swap_token", "close_position"]);
+  // These lock after first attempt regardless of success — retrying them is always wrong
+  const NO_RETRY_TOOLS = new Set(["deploy_position"]);
   const firedOnce = new Set();
 
   let emptyStreak = 0;
@@ -170,13 +172,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           return {
             role: "tool",
             tool_call_id: toolCall.id,
-            content: JSON.stringify({ blocked: true, reason: `${functionName} already executed this session. Do not call it again.` }),
+            content: JSON.stringify({ blocked: true, reason: `${functionName} already attempted this session — do not retry. If it failed, report the error and stop.` }),
           };
         }
         const result = await executeTool(functionName, functionArgs);
 
-        // Only lock after a successful execution — failures and safety blocks allow retry
-        if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
+        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // For close/swap: only lock on success so genuine failures can be retried
+        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {
           role: "tool",
