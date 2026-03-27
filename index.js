@@ -126,8 +126,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     // JS trailing TP check
     const exitMap = new Map();
     for (const p of positionData) {
-      if (p.pnl_pct == null) continue;
-      const exit = updatePnlAndCheckExits(p.position, p.pnl_pct, config.management);
+      const exit = updatePnlAndCheckExits(p.position, p, config.management);
       if (exit) {
         exitMap.set(p.position, exit.reason);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
@@ -480,8 +479,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       if (!result?.positions?.length) return;
       for (const p of result.positions) {
-        if (p.pnl_pct == null) continue;
-        const exit = updatePnlAndCheckExits(p.position, p.pnl_pct, config.management);
+        const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;

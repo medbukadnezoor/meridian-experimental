@@ -249,11 +249,15 @@ export function getStateSummary() {
 }
 
 /**
- * Check trailing TP and stop loss for a position.
- * Updates peak_pnl_pct and trailing_active in state.
- * Returns { action: "TRAILING_TP"|"STOP_LOSS", reason } or null if no exit.
+ * Check all exit conditions for a position (trailing TP, stop loss, OOR, low yield).
+ * Updates peak_pnl_pct, trailing_active, and OOR state.
+ * @param {string} position_address
+ * @param {object} positionData - fields from getMyPositions: pnl_pct, in_range, fee_per_tvl_24h
+ * @param {object} mgmtConfig
+ * Returns { action, reason } or null if no exit needed.
  */
-export function updatePnlAndCheckExits(position_address, currentPnlPct, mgmtConfig) {
+export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
+  const { pnl_pct: currentPnlPct, in_range, fee_per_tvl_24h } = positionData;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -261,7 +265,7 @@ export function updatePnlAndCheckExits(position_address, currentPnlPct, mgmtConf
   let changed = false;
 
   // Track peak PnL
-  if (currentPnlPct > (pos.peak_pnl_pct ?? 0)) {
+  if (currentPnlPct != null && currentPnlPct > (pos.peak_pnl_pct ?? 0)) {
     pos.peak_pnl_pct = currentPnlPct;
     changed = true;
   }
@@ -273,9 +277,28 @@ export function updatePnlAndCheckExits(position_address, currentPnlPct, mgmtConf
     log("state", `Position ${position_address} trailing TP activated at ${currentPnlPct}% (peak: ${pos.peak_pnl_pct}%)`);
   }
 
+  // Update OOR state
+  if (in_range === false && !pos.out_of_range_since) {
+    pos.out_of_range_since = new Date().toISOString();
+    changed = true;
+    log("state", `Position ${position_address} marked out of range`);
+  } else if (in_range === true && pos.out_of_range_since) {
+    pos.out_of_range_since = null;
+    changed = true;
+    log("state", `Position ${position_address} back in range`);
+  }
+
   if (changed) save(state);
 
-  // Fire trailing TP exit
+  // ── Stop loss ──────────────────────────────────────────────────
+  if (currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+    return {
+      action: "STOP_LOSS",
+      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+    };
+  }
+
+  // ── Trailing TP ────────────────────────────────────────────────
   if (pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
@@ -284,6 +307,25 @@ export function updatePnlAndCheckExits(position_address, currentPnlPct, mgmtConf
         reason: `Trailing TP: peak ${pos.peak_pnl_pct.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${dropFromPeak.toFixed(2)}% >= ${mgmtConfig.trailingDropPct}%)`,
       };
     }
+  }
+
+  // ── Out of range too long ──────────────────────────────────────
+  if (pos.out_of_range_since) {
+    const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
+    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
+      return {
+        action: "OUT_OF_RANGE",
+        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
+      };
+    }
+  }
+
+  // ── Low yield ──────────────────────────────────────────────────
+  if (fee_per_tvl_24h != null && mgmtConfig.minFeePerTvl24h != null && fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h) {
+    return {
+      action: "LOW_YIELD",
+      reason: `Low yield: fee/TVL ${fee_per_tvl_24h.toFixed(2)}% < min ${mgmtConfig.minFeePerTvl24h}%`,
+    };
   }
 
   return null;
