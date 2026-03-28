@@ -1030,5 +1030,46 @@ Blacklisted tokens are filtered BEFORE the LLM even sees pool candidates.`,
         properties: {}
       }
     }
-  }
+  },
+  {
+    type: "function",
+    function: {
+      name: "block_deployer",
+      description: "Block a deployer wallet address. Any token deployed by this wallet will be hard-filtered from screening before the LLM ever sees it.",
+      parameters: {
+        type: "object",
+        properties: {
+          wallet:  { type: "string", description: "Deployer wallet address (base58)" },
+          label:   { type: "string", description: "Human-readable label (e.g. 'known rugger')" },
+          reason:  { type: "string", description: "Why this deployer is being blocked" },
+        },
+        required: ["wallet"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "unblock_deployer",
+      description: "Remove a deployer wallet from the blocklist.",
+      parameters: {
+        type: "object",
+        properties: {
+          wallet: { type: "string", description: "Deployer wallet address to unblock" },
+        },
+        required: ["wallet"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_blocked_deployers",
+      description: "List all blocked deployer wallets.",
+      parameters: {
+        type: "object",
+        properties: {}
+      }
+    }
+  },
 ];

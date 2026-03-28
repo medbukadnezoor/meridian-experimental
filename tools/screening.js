@@ -1,6 +1,9 @@
 import { config } from "../config.js";
 import { isBlacklisted } from "../token-blacklist.js";
+import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
+
+const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 
@@ -50,18 +53,53 @@ export async function discoverPools({
 
   const condensed = (data.data || []).map(condensePool);
 
-  // Filter blacklisted base tokens
-  const pools = condensed.filter((p) => {
+  // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
+  let pools = condensed.filter((p) => {
     if (isBlacklisted(p.base?.mint)) {
       log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in pool ${p.name}`);
+      return false;
+    }
+    if (p.dev && isDevBlocked(p.dev)) {
+      log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol} in pool ${p.name}`);
       return false;
     }
     return true;
   });
 
   const filtered = condensed.length - pools.length;
-  if (filtered > 0) {
-    log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens`);
+  if (filtered > 0) log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens/devs`);
+
+  // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
+  // where dev is null — but only if the dev blocklist is non-empty (avoid useless calls)
+  const blockedDevs = getBlockedDevs();
+  if (Object.keys(blockedDevs).length > 0) {
+    const missingDev = pools.filter((p) => !p.dev && p.base?.mint);
+    if (missingDev.length > 0) {
+      const devResults = await Promise.allSettled(
+        missingDev.map((p) =>
+          fetch(`${DATAPI_JUP}/assets/search?query=${p.base.mint}`)
+            .then((r) => r.ok ? r.json() : null)
+            .then((d) => {
+              const t = Array.isArray(d) ? d[0] : d;
+              return { pool: p.pool, dev: t?.dev || null };
+            })
+            .catch(() => ({ pool: p.pool, dev: null }))
+        )
+      );
+      const devMap = {};
+      for (const r of devResults) {
+        if (r.status === "fulfilled") devMap[r.value.pool] = r.value.dev;
+      }
+      pools = pools.filter((p) => {
+        const dev = devMap[p.pool];
+        if (dev) p.dev = dev; // enrich in-place
+        if (dev && isDevBlocked(dev)) {
+          log("dev_blocklist", `Filtered blocked deployer (jup) ${dev.slice(0, 8)} token ${p.base?.symbol}`);
+          return false;
+        }
+        return true;
+      });
+    }
   }
 
   return {
@@ -161,6 +199,7 @@ function condensePool(p) {
     token_age_hours: p.token_x?.created_at
       ? Math.floor((Date.now() - p.token_x.created_at) / 3_600_000)
       : null,
+    dev: p.token_x?.dev || null,
 
     // Position health
     active_positions: p.active_positions,
