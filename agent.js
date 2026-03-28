@@ -142,6 +142,25 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
       }
       const msg = response.choices[0].message;
+      // Repair malformed tool call JSON before pushing to history —
+      // the API rejects the next request if history contains invalid JSON args
+      if (msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          if (tc.function?.arguments) {
+            try {
+              JSON.parse(tc.function.arguments);
+            } catch {
+              try {
+                tc.function.arguments = JSON.stringify(JSON.parse(jsonrepair(tc.function.arguments)));
+                log("warn", `Repaired malformed JSON args for ${tc.function.name}`);
+              } catch {
+                tc.function.arguments = "{}";
+                log("error", `Could not repair JSON args for ${tc.function.name} — cleared to {}`);
+              }
+            }
+          }
+        }
+      }
       messages.push(msg);
 
       // If the model didn't call any tools, it's done
