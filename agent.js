@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { jsonrepair } from "jsonrepair";
 import { buildSystemPrompt } from "./prompt.js";
 import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
@@ -163,9 +164,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
         try {
           functionArgs = JSON.parse(toolCall.function.arguments);
-        } catch (parseError) {
-          log("error", `Failed to parse args for ${functionName}: ${parseError.message}`);
-          functionArgs = {};
+        } catch {
+          try {
+            functionArgs = JSON.parse(jsonrepair(toolCall.function.arguments));
+            log("warn", `Repaired malformed JSON args for ${functionName}`);
+          } catch (parseError) {
+            log("error", `Failed to parse args for ${functionName}: ${parseError.message}`);
+            functionArgs = {};
+          }
         }
 
         // Block once-per-session tools from firing a second time
