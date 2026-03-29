@@ -60,6 +60,12 @@ let _screeningBusy = false;  // prevents overlapping screening cycles
 let _screeningLastTriggered = 0; // epoch ms — prevents management from spamming screening
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 
+/** Strip <think>...</think> reasoning blocks that some models leak into output */
+function stripThink(text) {
+  if (!text) return text;
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
 async function runBriefing() {
   log("cron", "Starting morning briefing");
   try {
@@ -281,7 +287,7 @@ After executing, write a brief one-line result per position.
   } finally {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
-      if (mgmtReport) sendMessage(`🔄 Management Cycle\n\n${mgmtReport}`).catch(() => { });
+      if (mgmtReport) sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       for (const p of positions) {
         if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
@@ -446,7 +452,7 @@ STEPS:
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
-      if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${screenReport}`).catch(() => { });
+      if (screenReport) sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
     }
   }
   return screenReport;
@@ -748,7 +754,7 @@ if (isTTY) {
       const agentRole = isDeployRequest ? "SCREENER" : "GENERAL";
       const { content } = await agentLoop(text, config.llm.maxSteps, sessionHistory, agentRole, config.llm.generalModel);
       appendHistory(text, content);
-      await sendMessage(content);
+      await sendMessage(stripThink(content));
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => { });
     } finally {
