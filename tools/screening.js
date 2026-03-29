@@ -129,28 +129,35 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price
   if (process.env.OKX_API_KEY && eligible.length > 0) {
     const { getAdvancedInfo, getPriceInfo } = await import("./okx.js");
+    const { getClusterList } = await import("./okx.js");
     const okxResults = await Promise.allSettled(
       eligible.map((p) => p.base?.mint
-        ? Promise.all([getAdvancedInfo(p.base.mint), getPriceInfo(p.base.mint)])
-        : Promise.resolve([null, null])
+        ? Promise.all([getAdvancedInfo(p.base.mint), getPriceInfo(p.base.mint), getClusterList(p.base.mint)])
+        : Promise.resolve([null, null, []])
       )
     );
     for (let i = 0; i < eligible.length; i++) {
       const r = okxResults[i];
       if (r.status !== "fulfilled") continue;
-      const [adv, price] = r.value;
+      const [adv, price, clusters] = r.value;
       if (adv) {
-        eligible[i].risk_level     = adv.risk_level;
-        eligible[i].bundle_pct     = adv.bundle_pct;
-        eligible[i].sniper_pct     = adv.sniper_pct;
-        eligible[i].suspicious_pct = adv.suspicious_pct;
-        eligible[i].new_wallet_pct = adv.new_wallet_pct;
-        // Also check creator against dev blocklist
+        eligible[i].risk_level      = adv.risk_level;
+        eligible[i].bundle_pct      = adv.bundle_pct;
+        eligible[i].sniper_pct      = adv.sniper_pct;
+        eligible[i].suspicious_pct  = adv.suspicious_pct;
+        eligible[i].new_wallet_pct  = adv.new_wallet_pct;
+        eligible[i].smart_money_buy = adv.smart_money_buy;  // smartMoneyBuy tag
         if (adv.creator && !eligible[i].dev) eligible[i].dev = adv.creator;
       }
       if (price) {
         eligible[i].price_vs_ath_pct = price.price_vs_ath_pct;
         eligible[i].ath              = price.ath;
+      }
+      if (clusters?.length) {
+        // Surface KOL presence and top cluster trend for LLM
+        eligible[i].kol_in_clusters      = clusters.some((c) => c.has_kol);
+        eligible[i].top_cluster_trend    = clusters[0]?.trend ?? null;      // buy|sell|neutral
+        eligible[i].top_cluster_hold_pct = clusters[0]?.holding_pct ?? null;
       }
     }
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)

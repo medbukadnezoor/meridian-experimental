@@ -27,47 +27,66 @@ export async function getTokenInfo({ query }) {
   const tokens = Array.isArray(data) ? data : [data];
   if (!tokens.length) return { found: false, query };
 
-  return {
-    found: true,
-    query,
-    results: tokens.slice(0, 5).map((t) => ({
-      mint: t.id,
-      name: t.name,
-      symbol: t.symbol,
-      mcap: t.mcap,
-      price: t.usdPrice,
-      liquidity: t.liquidity,
-      holders: t.holderCount,
-      organic_score: t.organicScore,
-      organic_label: t.organicScoreLabel,
-      launchpad: t.launchpad,
-      graduated: !!t.graduatedPool,
-      // Global fees paid by traders (priority + jito tips) in SOL.
-      // Low value = bundled txs or scam token. Minimum threshold: ~30 SOL.
-      global_fees_sol: t.fees != null ? parseFloat(t.fees.toFixed(2)) : null,
-      audit: t.audit ? {
-        mint_disabled: t.audit.mintAuthorityDisabled,
-        freeze_disabled: t.audit.freezeAuthorityDisabled,
-        top_holders_pct: t.audit.topHoldersPercentage?.toFixed(2),
-        bot_holders_pct: t.audit.botHoldersPercentage?.toFixed(2),
-        dev_migrations: t.audit.devMigrations,
-      } : null,
-      stats_1h: t.stats1h ? {
-        price_change: t.stats1h.priceChange?.toFixed(2),
-        buy_vol: t.stats1h.buyVolume?.toFixed(0),
-        sell_vol: t.stats1h.sellVolume?.toFixed(0),
-        buyers: t.stats1h.numOrganicBuyers,
-        net_buyers: t.stats1h.numNetBuyers,
-      } : null,
-      stats_24h: t.stats24h ? {
-        price_change: t.stats24h.priceChange?.toFixed(2),
-        buy_vol: t.stats24h.buyVolume?.toFixed(0),
-        sell_vol: t.stats24h.sellVolume?.toFixed(0),
-        buyers: t.stats24h.numOrganicBuyers,
-        net_buyers: t.stats24h.numNetBuyers,
-      } : null,
-    })),
-  };
+  const results = tokens.slice(0, 5).map((t) => ({
+    mint: t.id,
+    name: t.name,
+    symbol: t.symbol,
+    mcap: t.mcap,
+    price: t.usdPrice,
+    liquidity: t.liquidity,
+    holders: t.holderCount,
+    organic_score: t.organicScore,
+    organic_label: t.organicScoreLabel,
+    launchpad: t.launchpad,
+    graduated: !!t.graduatedPool,
+    global_fees_sol: t.fees != null ? parseFloat(t.fees.toFixed(2)) : null,
+    audit: t.audit ? {
+      mint_disabled: t.audit.mintAuthorityDisabled,
+      freeze_disabled: t.audit.freezeAuthorityDisabled,
+      top_holders_pct: t.audit.topHoldersPercentage?.toFixed(2),
+      bot_holders_pct: t.audit.botHoldersPercentage?.toFixed(2),
+      dev_migrations: t.audit.devMigrations,
+    } : null,
+    stats_1h: t.stats1h ? {
+      price_change: t.stats1h.priceChange?.toFixed(2),
+      buy_vol: t.stats1h.buyVolume?.toFixed(0),
+      sell_vol: t.stats1h.sellVolume?.toFixed(0),
+      buyers: t.stats1h.numOrganicBuyers,
+      net_buyers: t.stats1h.numNetBuyers,
+    } : null,
+    stats_24h: t.stats24h ? {
+      price_change: t.stats24h.priceChange?.toFixed(2),
+      buy_vol: t.stats24h.buyVolume?.toFixed(0),
+      sell_vol: t.stats24h.sellVolume?.toFixed(0),
+      buyers: t.stats24h.numOrganicBuyers,
+      net_buyers: t.stats24h.numNetBuyers,
+    } : null,
+  }));
+
+  // Enrich first result with OKX smart money + risk data (only if key configured)
+  if (process.env.OKX_API_KEY && results[0]?.mint) {
+    const { getAdvancedInfo, getClusterList } = await import("./okx.js");
+    const [adv, clusters] = await Promise.all([
+      getAdvancedInfo(results[0].mint).catch(() => null),
+      getClusterList(results[0].mint).catch(() => []),
+    ]);
+    if (adv) {
+      results[0].risk_level      = adv.risk_level;
+      results[0].bundle_pct      = adv.bundle_pct;
+      results[0].sniper_pct      = adv.sniper_pct;
+      results[0].suspicious_pct  = adv.suspicious_pct;
+      results[0].new_wallet_pct  = adv.new_wallet_pct;
+      results[0].smart_money_buy = adv.smart_money_buy;
+      results[0].tags            = adv.tags;
+    }
+    if (clusters?.length) {
+      results[0].kol_in_clusters   = clusters.some((c) => c.has_kol);
+      results[0].top_cluster_trend = clusters[0]?.trend ?? null;
+      results[0].clusters          = clusters;
+    }
+  }
+
+  return { found: true, query, results };
 }
 
 /**
