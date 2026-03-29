@@ -125,8 +125,6 @@ export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
     ath:              maxPrice,
     atl:              parseFloat(d.minPrice || 0),
     price_vs_ath_pct: maxPrice > 0 ? parseFloat(((price / maxPrice) * 100).toFixed(1)) : null,
-    volume_24h:       parseFloat(d.volume24H || 0),
-    price_change_24h: parseFloat(d.priceChange24H || 0),
   };
 }
 
