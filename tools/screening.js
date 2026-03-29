@@ -160,6 +160,22 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         eligible[i].top_cluster_hold_pct = clusters[0]?.holding_pct ?? null;
       }
     }
+    // ATH filter — drop pools where price is too close to ATH
+    const athFilter = config.screening.athFilterPct;
+    if (athFilter != null) {
+      const threshold = 100 + athFilter; // e.g. -20 → threshold = 80 (price must be <= 80% of ATH)
+      const before = eligible.length;
+      eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+        if (p.price_vs_ath_pct == null) return true; // no data → don't filter
+        if (p.price_vs_ath_pct > threshold) {
+          log("screening", `ATH filter: dropped ${p.name} — ${p.price_vs_ath_pct}% of ATH (limit: ${threshold}%)`);
+          return false;
+        }
+        return true;
+      }));
+      if (eligible.length < before) log("screening", `ATH filter removed ${before - eligible.length} pool(s)`);
+    }
+
     // Drop any pools whose creator is on the dev blocklist (caught via advanced-info)
     const before = eligible.length;
     const filtered = eligible.filter((p) => {
