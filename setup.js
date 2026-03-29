@@ -237,6 +237,15 @@ const screeningIntervalMin = await askNum(
   { min: 5 }
 );
 
+// ─── OKX API (optional — enables bundle/cluster analysis + ATH data) ──────────
+console.log("\n── OKX API (optional) ────────────────────────");
+console.log("   Enables: bundle/cluster analysis, ATH price data");
+console.log("   Get keys at: https://www.okx.com/web3/build");
+
+const okxApiKey     = await ask("OKX API Key     (leave blank to skip)", process.env.OKX_API_KEY ? "*** (already set)" : "");
+const okxSecretKey  = okxApiKey && !okxApiKey.startsWith("***") ? await ask("OKX Secret Key ", "") : "";
+const okxPassphrase = okxApiKey && !okxApiKey.startsWith("***") ? await ask("OKX Passphrase  ", "") : "";
+
 // ─── LLM ──────────────────────────────────────────────────────────────────────
 console.log("\n── LLM ───────────────────────────────────────");
 
@@ -276,6 +285,21 @@ const userConfig = {
 };
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(userConfig, null, 2));
+
+// Write OKX keys to .env (only if provided and not already set)
+if (okxApiKey && !okxApiKey.startsWith("***") && okxSecretKey && okxPassphrase) {
+  const envPath = path.join(__dirname, ".env");
+  let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
+  const setEnvVar = (content, key, value) => {
+    const re = new RegExp(`^${key}=.*$`, "m");
+    return re.test(content) ? content.replace(re, `${key}=${value}`) : content + `\n${key}=${value}`;
+  };
+  envContent = setEnvVar(envContent, "OKX_API_KEY", okxApiKey);
+  envContent = setEnvVar(envContent, "OKX_SECRET_KEY", okxSecretKey);
+  envContent = setEnvVar(envContent, "OKX_PASSPHRASE", okxPassphrase);
+  fs.writeFileSync(envPath, envContent.trimStart());
+  console.log("OKX API keys saved to .env");
+}
 
 const presetName = preset ? preset.label : "Custom";
 

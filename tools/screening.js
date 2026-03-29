@@ -126,6 +126,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     .filter((p) => !occupiedPools.has(p.pool) && !occupiedMints.has(p.base?.mint))
     .slice(0, limit);
 
+  // Enrich with ATH data from OKX (price_vs_ath_pct) — only when key is configured
+  if (process.env.OKX_API_KEY && eligible.length > 0) {
+    const { getPriceInfo } = await import("./okx.js");
+    const priceResults = await Promise.allSettled(
+      eligible.map((p) => p.base?.mint ? getPriceInfo(p.base.mint) : Promise.resolve(null))
+    );
+    for (let i = 0; i < eligible.length; i++) {
+      const r = priceResults[i];
+      if (r.status === "fulfilled" && r.value) {
+        eligible[i].price_vs_ath_pct = r.value.price_vs_ath_pct;
+        eligible[i].ath = r.value.ath;
+      }
+    }
+  }
+
   return {
     candidates: eligible,
     total_screened: pools.length,

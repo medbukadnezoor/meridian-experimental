@@ -110,42 +110,12 @@ export async function getTokenHolders({ mint, limit = 20 }) {
   const realHolders = mapped.filter((h) => !h.is_pool);
   const top10Pct = realHolders.slice(0, 10).reduce((s, h) => s + (Number(h.pct) || 0), 0);
 
-  // ─── Bundler Detection ────────────────────────────────────────
-  // common_funder: 2+ wallets funded by same address
-  const funderGroups = {};
-  for (const h of realHolders) {
-    if (h.funding?.address) {
-      (funderGroups[h.funding.address] ||= []).push(h.address);
-    }
+  // ─── Bundle / Cluster Analysis (OKX) ─────────────────────────
+  let clusterData = null;
+  if (process.env.OKX_API_KEY) {
+    const { getClusterOverview } = await import("./okx.js");
+    clusterData = await getClusterOverview(mint).catch(() => null);
   }
-  const commonFunderSet = new Set(
-    Object.values(funderGroups).filter((g) => g.length >= 2).flat()
-  );
-
-  // funded_same_window: funded within ±5000 slots of any other holder
-  const SLOT_WINDOW = 5000;
-  const withSlots = realHolders.filter((h) => h.funding?.slot);
-  const sorted = [...withSlots].sort((a, b) => a.funding.slot - b.funding.slot);
-  const sameWindowSet = new Set();
-  for (let i = 0; i < sorted.length; i++) {
-    for (let j = i + 1; j < sorted.length; j++) {
-      if (sorted[j].funding.slot - sorted[i].funding.slot <= SLOT_WINDOW) {
-        sameWindowSet.add(sorted[i].address);
-        sameWindowSet.add(sorted[j].address);
-      } else break;
-    }
-  }
-
-  const bundlers = realHolders
-    .map((h) => {
-      const reasons = [];
-      if (commonFunderSet.has(h.address)) reasons.push("common_funder");
-      if (sameWindowSet.has(h.address)) reasons.push("funded_same_window");
-      return reasons.length ? { address: h.address, balance: h.amount, percentage: h.pct, reasons, slot: h.funding?.slot } : null;
-    })
-    .filter(Boolean);
-
-  const totalBundlersPct = bundlers.reduce((s, b) => s + (Number(b.percentage) || 0), 0);
 
   // ─── Smart Wallet / KOL Cross-reference ──────────────────────
   // Use targeted holders endpoint — only returns matching wallets, no noise
@@ -213,8 +183,11 @@ export async function getTokenHolders({ mint, limit = 20 }) {
     total_fetched: holders.length,
     showing: mapped.length,
     top_10_real_holders_pct: top10Pct.toFixed(2),
-    bundlers_pct_in_top_100: totalBundlersPct.toFixed(4),
-    bundlers,
+    // OKX cluster analysis — more accurate than slot-window heuristics
+    rug_pull_pct:          clusterData?.rug_pull_pct         ?? null,
+    same_fund_source_pct:  clusterData?.same_fund_source_pct ?? null,
+    new_wallet_pct:        clusterData?.new_wallet_pct       ?? null,
+    cluster_concentration: clusterData?.cluster_concentration ?? null,
     smart_wallets_holding: smartWalletsHolding,
     holders: mapped,
   };
