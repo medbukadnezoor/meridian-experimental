@@ -11,7 +11,7 @@
  */
 import { config } from "./config.js";
 
-export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null) {
+export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, weightsSummary = null) {
   const s = config.screening;
 
   // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
@@ -122,7 +122,7 @@ DEPLOY RULES:
 - Bin steps must be [80-125].
 - Pick ONE pool. Deploy or explain why none qualify.
 
-${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
+${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}
 `;
   } else if (agentType === "MANAGER") {
     basePrompt += `

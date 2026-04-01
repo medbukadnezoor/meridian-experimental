@@ -16,6 +16,8 @@ import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { stageSignals } from "./signal-tracker.js";
+import { getWeightsSummary } from "./signal-weights.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -410,7 +412,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         pool.dev_sold_all       ? "dev_sold_all(bullish)" : null,
       ].filter(Boolean).join(", ");
 
-      return [
+      const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
@@ -423,7 +425,25 @@ export async function runScreeningCycle({ silent = false } = {}) {
         n?.narrative ? `  narrative: ${n.narrative.slice(0, 500)}` : `  narrative: none`,
         mem ? `  memory: ${mem}` : null,
       ].filter(Boolean).join("\n");
+
+      // Stage signals for Darwinian weighting — captured before LLM decides
+      if (config.darwin?.enabled) {
+        stageSignals(pool.pool, {
+          organic_score:         pool.organic_score         ?? null,
+          fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
+          volume:                pool.volume_window         ?? null,
+          mcap:                  pool.mcap                  ?? null,
+          holder_count:          ti?.holders                ?? null,
+          smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
+          narrative_quality:     n?.narrative ? "present" : "absent",
+          volatility:            pool.volatility            ?? null,
+        });
+      }
+
+      return block;
     });
+
+    const weightsSummary = config.darwin?.enabled ? getWeightsSummary() : null;
 
     const { content } = await agentLoop(`
 SCREENING CYCLE
