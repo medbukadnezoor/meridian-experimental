@@ -111,6 +111,7 @@ RISK SIGNALS (guidelines — use judgment):
 - bundle_pct from OKX = secondary context only, not a hard filter
 - rugpull flag from OKX → major negative score penalty and default to SKIP; only override if smart wallets are present and conviction is otherwise high
 - wash trading flag from OKX → treat as disqualifying even if other metrics look attractive
+- PVP symbol conflict (same exact symbol across multiple mints) → major negative. Avoid unless the setup is exceptional and clearly stronger than the competing symbol variants.
 - no narrative + no smart wallets → skip
 
 NARRATIVE QUALITY (your main judgment call):
@@ -157,6 +158,8 @@ SWAP AFTER CLOSE: After any close_position, immediately swap base tokens back to
 PARALLEL FETCH RULE: When deploying to a specific pool, call get_pool_detail, check_smart_wallets_on_pool, get_token_holders, and get_token_narrative in a single parallel batch — all four in one step. Do NOT call them sequentially. Then decide and deploy.
 
 TOP LPERS RULE: If the user asks about top LPers, LP behavior, or wants to add top LPers to the smart-wallet list, you MUST call study_top_lpers or get_top_lpers first. Do NOT substitute token holders for top LPers. Only add wallets after you have identified them from the LPers study result.
+
+PVP RULE: Treat \`pvp: HIGH\` as a major negative. It means another mint with the same exact symbol also has a real active pool with meaningful TVL, holders, and fees. Avoid these by default unless the current candidate is clearly stronger.
 `;
   }
 

@@ -6,6 +6,87 @@ import { log } from "../logger.js";
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const PVP_SHORTLIST_LIMIT = 2;
+const PVP_RIVAL_LIMIT = 2;
+const PVP_MIN_ACTIVE_TVL = 5_000;
+const PVP_MIN_HOLDERS = 500;
+const PVP_MIN_GLOBAL_FEES_SOL = 30;
+
+function normalizeSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase();
+}
+
+function scoreCandidate(pool) {
+  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
+  const organic = Number(pool.organic_score || 0);
+  const volume = Number(pool.volume_window || 0);
+  const holders = Number(pool.holders || 0);
+  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+async function searchAssetsBySymbol(symbol) {
+  const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(symbol)}`);
+  if (!res.ok) throw new Error(`assets/search ${res.status}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [data];
+}
+
+async function findRivalPool(mint) {
+  const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${PVP_MIN_ACTIVE_TVL}`)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`rival pool search ${res.status}`);
+  const data = await res.json();
+  const pools = Array.isArray(data?.data) ? data.data : [];
+  return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
+}
+
+async function enrichPvpRisk(pools) {
+  const shortlist = [...pools]
+    .sort((a, b) => scoreCandidate(b) - scoreCandidate(a))
+    .slice(0, PVP_SHORTLIST_LIMIT);
+
+  if (shortlist.length === 0) return;
+
+  const symbolCache = new Map();
+
+  await Promise.all(shortlist.map(async (pool) => {
+    const symbol = normalizeSymbol(pool.base?.symbol);
+    const ownMint = pool.base?.mint;
+    if (!symbol || !ownMint) return;
+
+    let assets = symbolCache.get(symbol);
+    if (!assets) {
+      assets = await searchAssetsBySymbol(symbol).catch(() => []);
+      symbolCache.set(symbol, assets);
+    }
+
+    const rivalAssets = assets
+      .filter((asset) => normalizeSymbol(asset?.symbol) === symbol && asset?.id && asset.id !== ownMint)
+      .sort((a, b) => Number(b?.liquidity || 0) - Number(a?.liquidity || 0))
+      .slice(0, PVP_RIVAL_LIMIT);
+
+    for (const rival of rivalAssets) {
+      const rivalHolders = Number(rival?.holderCount || 0);
+      const rivalFees = Number(rival?.fees || 0);
+      if (rivalHolders < PVP_MIN_HOLDERS || rivalFees < PVP_MIN_GLOBAL_FEES_SOL) continue;
+
+      const rivalPool = await findRivalPool(rival.id).catch(() => null);
+      if (!rivalPool) continue;
+
+      pool.is_pvp = true;
+      pool.pvp_risk = "high";
+      pool.pvp_symbol = pool.base?.symbol || symbol;
+      pool.pvp_rival_name = rival?.name || pool.pvp_symbol;
+      pool.pvp_rival_mint = rival.id;
+      pool.pvp_rival_pool = rivalPool.address;
+      pool.pvp_rival_tvl = round(Number(rivalPool.tvl || 0));
+      pool.pvp_rival_holders = rivalHolders;
+      pool.pvp_rival_fees = Number(rivalFees.toFixed(2));
+      log("screening", `PVP guard: ${pool.name} has active rival ${pool.pvp_rival_name} (${rival.id.slice(0, 8)})`);
+      break;
+    }
+  }));
+}
 
 
 
@@ -129,6 +210,10 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const eligible = pools
     .filter((p) => !occupiedPools.has(p.pool) && !occupiedMints.has(p.base?.mint))
     .slice(0, limit);
+
+  if (config.screening.avoidPvpSymbols && eligible.length > 0) {
+    await enrichPvpRisk(eligible);
+  }
 
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
   if (eligible.length > 0) {
