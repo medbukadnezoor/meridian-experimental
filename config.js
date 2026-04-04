@@ -11,6 +11,20 @@ const u = fs.existsSync(USER_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
   : {};
 
+export function normalizeOptionalString(value) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+export const INTERNAL_FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
+
+export function resolveFallbackModel(configuredFallbackModel) {
+  const normalizedFallbackModel = normalizeOptionalString(configuredFallbackModel);
+  if (normalizedFallbackModel) return normalizedFallbackModel;
+  return INTERNAL_FALLBACK_MODEL;
+}
+
 // Apply wallet/RPC from user-config if not already in env
 if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
 if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
@@ -22,6 +36,8 @@ if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 
 const indicatorUserConfig = u.chartIndicators ?? {};
+
+const fallbackModel = normalizeOptionalString(u.fallbackModel);
 
 export const config = {
   // ─── Risk Limits ─────────────────────────
@@ -108,6 +124,7 @@ export const config = {
     managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    fallbackModel,
   },
 
   // ─── Darwinian Signal Weighting ───────
