@@ -49,6 +49,7 @@ function isAdjustedWinRateExcludedReason(reason) {
     text.includes("oor");
 }
 
+
 function setPoolCooldown(entry, hours, reason) {
   const cooldownUntil = new Date(Date.now() + hours * 60 * 60 * 1000).toISOString();
   entry.cooldown_until = cooldownUntil;
