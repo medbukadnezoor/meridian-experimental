@@ -327,7 +327,7 @@ export function startPolling(onMessage) {
   if (!TOKEN) return;
   _polling = true;
   poll(onMessage); // fire-and-forget
-  log("telegram", "Bot polling started");
+  log("telegram", `Bot polling started — authorized chat: ${chatId ?? "NONE (messages will be rejected until TELEGRAM_CHAT_ID is set)"}`);
 }
 
 export function stopPolling() {
