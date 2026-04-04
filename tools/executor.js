@@ -187,13 +187,7 @@ const toolMap = {
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
       healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
-      // models
-      managementModel: ["llm", "managementModel"],
-      screeningModel: ["llm", "screeningModel"],
-      generalModel: ["llm", "generalModel"],
-      temperature: ["llm", "temperature"],
-      maxTokens: ["llm", "maxTokens"],
-      maxSteps: ["llm", "maxSteps"],
+      // model routing is operator-only — not LLM-mutable
       // strategy
       strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "binsBelow"],
