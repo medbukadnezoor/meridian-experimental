@@ -152,9 +152,20 @@ Free-form chat persists session history (last 10 exchanges), so you can have a c
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) and copy the token
 2. Add `TELEGRAM_BOT_TOKEN=<token>` to your `.env`
-3. Start the agent, then send **any message** to your bot
+3. Set the exact Telegram chat and allowed controller user IDs in `.env`
 
-On first message, the agent auto-registers your chat ID and begins sending notifications. No manual chat ID configuration needed.
+Meridian no longer auto-registers the first chat for safety. You must set:
+
+```env
+TELEGRAM_BOT_TOKEN=<token>
+TELEGRAM_CHAT_ID=<target chat id>
+TELEGRAM_ALLOWED_USER_IDS=<comma-separated Telegram user ids allowed to control the bot>
+```
+
+Security notes:
+- If `TELEGRAM_CHAT_ID` is not set, inbound Telegram control is ignored.
+- If the target chat is a group/supergroup and `TELEGRAM_ALLOWED_USER_IDS` is empty, inbound control is ignored.
+- Notifications still go to the configured chat, but command/control is limited to the allowed user IDs.
 
 **Notifications sent:**
 - After every management cycle: full agent report (reasoning + decisions)
@@ -163,7 +174,7 @@ On first message, the agent auto-registers your chat ID and begins sending notif
 - On deploy: pair, amount, position address, tx hash
 - On close: pair and PnL
 
-You can also chat with the agent via Telegram using the same free-form interface as the REPL: `"check wallet 7tB8..."`, `"who are the top LPers in pool ABC..."`, `"close all positions"`, etc.
+You can also chat with the agent via Telegram using the same free-form interface as the REPL: `"check wallet 7tB8..."`, `"who are the top LPers in pool ABC..."`, `"close all positions"`, etc. Only explicitly allowed Telegram user IDs can issue commands.
 
 ---
 
