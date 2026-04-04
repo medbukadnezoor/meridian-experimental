@@ -154,6 +154,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   _trailingDropConfirmTimers.set(positionAddress, timer);
 }
 
+
 async function runBriefing() {
   log("cron", "Starting morning briefing");
   try {
