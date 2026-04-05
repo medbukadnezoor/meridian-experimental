@@ -194,6 +194,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      let providerIgnore = ["Parasail", "Nebius", "Together"];
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -204,6 +205,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             tool_choice: toolChoice,
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
+            ...(providerIgnore.length > 0 ? { provider: { ignore: providerIgnore } } : {}),
           });
         } catch (error) {
           if (providerMode === "system" && isSystemRoleError(error)) {
@@ -216,6 +218,13 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
             toolChoice = "auto";
             log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+            attempt -= 1;
+            continue;
+          }
+          if (providerIgnore.length > 0 && /400|Provider returned error/i.test(String(error?.message || error))) {
+            log("agent", "Provider ignore list caused 400 — retrying without provider filter");
+            providerIgnore = [];
+            toolChoice = "auto";
             attempt -= 1;
             continue;
           }
