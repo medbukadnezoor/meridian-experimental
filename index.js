@@ -1634,7 +1634,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
       await agentLoop(`
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
-      `, config.llm.maxSteps, [], "SCREENER");
+      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel);
     } catch (e) {
       log("startup_error", e.message);
     }
