@@ -125,6 +125,13 @@ export const config = {
     screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
     generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
     fallbackModel,
+    // Per-role endpoint overrides — null falls back to global llmBaseUrl / llmApiKey
+    screeningBaseUrl: u.screeningBaseUrl ?? null,
+    screeningApiKey:  u.screeningApiKey  ?? null,
+    managementBaseUrl: u.managementBaseUrl ?? null,
+    managementApiKey:  u.managementApiKey  ?? null,
+    generalBaseUrl: u.generalBaseUrl ?? null,
+    generalApiKey:  u.generalApiKey  ?? null,
   },
 
   // ─── Darwinian Signal Weighting ───────

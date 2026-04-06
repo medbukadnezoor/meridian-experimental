@@ -91,13 +91,34 @@ import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
 
-// Supports OpenRouter (default) or any OpenAI-compatible local server (e.g. LM Studio)
-// To use LM Studio: set LLM_BASE_URL=http://localhost:1234/v1 and LLM_API_KEY=lm-studio in .env
-const client = new OpenAI({
-  baseURL: process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1",
-  apiKey: process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY,
-  timeout: 5 * 60 * 1000,
-});
+// Supports OpenRouter (default) or any OpenAI-compatible endpoint (e.g. LM Studio, DashScope).
+// Per-role endpoints can be set via screeningBaseUrl/screeningApiKey etc. in user-config.json.
+// Falls back to the global LLM_BASE_URL / LLM_API_KEY for any role without an override.
+const _clientCache = new Map();
+function getClient(agentType = "GENERAL") {
+  const role = (agentType || "GENERAL").toUpperCase();
+  if (_clientCache.has(role)) return _clientCache.get(role);
+
+  const llmCfg = config.llm;
+  const globalUrl = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
+  const globalKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
+
+  let baseURL, apiKey;
+  if (role === "SCREENER") {
+    baseURL = llmCfg.screeningBaseUrl  || globalUrl;
+    apiKey  = llmCfg.screeningApiKey   || globalKey;
+  } else if (role === "MANAGER") {
+    baseURL = llmCfg.managementBaseUrl || globalUrl;
+    apiKey  = llmCfg.managementApiKey  || globalKey;
+  } else {
+    baseURL = llmCfg.generalBaseUrl    || globalUrl;
+    apiKey  = llmCfg.generalApiKey     || globalKey;
+  }
+
+  const c = new OpenAI({ baseURL, apiKey, timeout: 5 * 60 * 1000 });
+  _clientCache.set(role, c);
+  return c;
+}
 
 const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
 
@@ -198,7 +219,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          response = await client.chat.completions.create({
+          response = await getClient(agentType).chat.completions.create({
             model: usedModel,
             messages,
             tools: getToolsForRole(agentType, goal),
