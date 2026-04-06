@@ -71,8 +71,10 @@ export async function checkSmartWalletsOnPool({ pool_address }) {
 
   const { getWalletPositions } = await import("./tools/dlmm.js");
 
-  const results = await Promise.all(
-    wallets.map(async (wallet) => {
+  const results = [];
+  for (let i = 0; i < wallets.length; i += 5) {
+    const batch = wallets.slice(i, i + 5);
+    const batchResults = await Promise.all(batch.map(async (wallet) => {
       try {
         const cached = _cache.get(wallet.address);
         if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
@@ -84,8 +86,9 @@ export async function checkSmartWalletsOnPool({ pool_address }) {
       } catch {
         return { wallet, positions: [] };
       }
-    })
-  );
+    }));
+    results.push(...batchResults);
+  }
 
   const inPool = results
     .filter((r) => r.positions.some((p) => p.pool === pool_address))
