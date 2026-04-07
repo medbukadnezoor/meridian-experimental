@@ -127,6 +127,7 @@ export const config = {
     url: u.hiveMindUrl ?? DEFAULT_HIVEMIND_URL,
     apiKey: u.hiveMindApiKey ?? "",
     agentId: u.agentId ?? null,
+    pullMode: u.hiveMindPullMode ?? "auto",
   },
 };
 

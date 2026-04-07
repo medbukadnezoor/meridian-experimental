@@ -83,5 +83,6 @@
   "agentId": "",
   "telegramChatId": "",
   "hiveMindUrl": "",
-  "hiveMindApiKey": ""
+  "hiveMindApiKey": "",
+  "hiveMindPullMode": "auto"
 }

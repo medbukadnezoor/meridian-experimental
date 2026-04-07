@@ -337,6 +337,10 @@ const FIELD_SECTIONS = [
       { key: "agentId", label: "Agent ID (leave blank to auto-generate on startup)", type: "string" },
       { key: "telegramChatId", label: "Telegram chat ID", type: "string" },
       { key: "hiveMindApiKey", label: "HiveMind API key", type: "string", preserveExistingMasked: true },
+      { key: "hiveMindPullMode", label: "HiveMind pull mode", type: "choice", choices: [
+        { key: "auto", label: "auto — pull shared lessons/presets automatically" },
+        { key: "manual", label: "manual — only pull when explicitly requested" },
+      ]},
     ],
   },
 ];
@@ -426,6 +430,7 @@ Highlights:
   Dry run:     ${updates.dryRun}
   Agent ID:    ${updates.agentId || "(auto-generate on startup)"}
   HiveMind:    ${DEFAULT_HIVEMIND_URL}${updates.hiveMindApiKey ? " (API key configured)" : " (API key not set)"}
+  Pull mode:   ${updates.hiveMindPullMode}
 
 Run "npm start" to launch the agent.
 `);
