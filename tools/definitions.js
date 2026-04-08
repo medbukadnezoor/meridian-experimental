@@ -416,6 +416,29 @@ Responds with what changed before restarting in 3 seconds.`,
     }
   },
 
+  {
+    type: "function",
+    function: {
+      name: "get_recent_decisions",
+      description: `Get the recent structured decision log for deployments, closes, skips, and no-deploy outcomes.
+Use this when the user asks explanatory questions like:
+- why did you deploy that position?
+- why did you close that pool?
+- why didn't you deploy anything?
+
+This is the preferred tool for answering "why did you..." questions because it returns the agent's recorded reasoning without requiring unrelated live trading actions.`,
+      parameters: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description: "How many recent decisions to return. Default 6."
+          }
+        }
+      }
+    }
+  },
+
   // ═══════════════════════════════════════════
   //  SMART WALLET TOOLS
   // ═══════════════════════════════════════════
