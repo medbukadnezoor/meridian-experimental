@@ -5,7 +5,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates, rankCandidatesByDarwin } from "./tools/screening.js";
+import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -586,8 +586,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
       const darwinContext = Array.isArray(pool.darwin_top_signals) && pool.darwin_top_signals.length > 0
-        ? `  darwin: ${pool.darwin_score ?? "?"}/100 | top drivers ${pool.darwin_top_signals.map((signal) => `${signal.signal}=${signal.value}`).join(", ")}`
-        : `  darwin: ${pool.darwin_score ?? "?"}/100`;
+        ? `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}% | top drivers ${pool.darwin_top_signals.map((signal) => `${signal.signal}=${signal.value}`).join(", ")}`
+        : `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}%`;
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
@@ -606,24 +606,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ].filter(Boolean).join("\n");
 
       if (config.darwin?.enabled) {
-        stageSignals(pool.pool, {
-          organic_score:         pool.organic_score         ?? null,
-          fee_tvl_ratio:         pool.fee_active_tvl_ratio  ?? null,
-          volume:                pool.volume_window         ?? null,
-          mcap:                  pool.mcap                  ?? null,
-          holder_count:          ti?.holders                ?? null,
-          smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
-          narrative_quality:     n?.narrative ? "present" : "absent",
-          study_win_rate:        pool.study_win_rate        ?? null,
-          hive_consensus:        pool.hive_consensus        ?? null,
-          volatility:            pool.volatility            ?? null,
-          ath_proximity:         pool.price_vs_ath_pct      ?? null,
-          volume_trend:          pool.volume_trend          ?? null,
-          change_1h:             priceChange                ?? null,
-          candle_price_range:    pool.candle_price_range    ?? null,
-          okx_signal_present:    (pool.smart_money_buy === true || pool.kol_in_clusters === true),
-          token_age_hours:       pool.token_age_hours       ?? null,
-        });
+        stageSignals(pool.pool, pool.darwin_signal_snapshot || getCandidateSignalSnapshot(pool));
       }
 
       return block;
@@ -1048,6 +1031,9 @@ async function deployLatestCandidate(index) {
   const candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
+  }
+  if (config.darwin?.enabled && candidate.pool) {
+    stageSignals(candidate.pool, candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate));
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const binsBelow = Math.max(35, Math.min(90, Math.round(35 + ((Number(candidate.volatility) || 0) / 5) * 55)));

@@ -592,8 +592,6 @@ export function getCandidateSignalSnapshot(candidate = {}) {
     holder_count: c.holders ?? c.holder_count ?? null,
     smart_wallets_present: c._smartWalletCount != null ? c._smartWalletCount > 0 : c.smart_wallets_present ?? null,
     narrative_quality: c.narrative_quality ?? null,
-    study_win_rate: c.study_win_rate ?? null,
-    hive_consensus: c.hive_consensus ?? null,
     volatility: c.volatility ?? null,
     ath_proximity: c.price_vs_ath_pct ?? c.ath_proximity ?? null,
     volume_trend: volumeTrend,
@@ -608,17 +606,22 @@ export function rankCandidatesByDarwin(candidates = []) {
   return candidates
     .map((candidate, index) => {
       const normalized = normalizeCandidateForUi(candidate);
-      const darwin = scoreSignalSnapshot(getCandidateSignalSnapshot(normalized), { topN: 3 });
+      const darwinSignalSnapshot = getCandidateSignalSnapshot(normalized);
+      const darwin = scoreSignalSnapshot(darwinSignalSnapshot, { topN: 3 });
       return {
         ...normalized,
         darwin_score: darwin.score_pct,
+        darwin_observed_score: darwin.observed_score_pct,
         darwin_weight_coverage: darwin.coverage,
+        darwin_coverage_pct: darwin.coverage_pct,
         darwin_top_signals: darwin.topSignals,
+        darwin_signal_snapshot: darwinSignalSnapshot,
         _darwin_sort_index: index,
       };
     })
     .sort((a, b) =>
       (b.darwin_score ?? 0) - (a.darwin_score ?? 0)
+      || (b.darwin_coverage_pct ?? 0) - (a.darwin_coverage_pct ?? 0)
       || (b.fee_active_tvl_ratio ?? 0) - (a.fee_active_tvl_ratio ?? 0)
       || (b.volume_window ?? b.volume ?? 0) - (a.volume_window ?? a.volume ?? 0)
       || (b.organic_score ?? 0) - (a.organic_score ?? 0)

@@ -11,15 +11,15 @@
 
 import { log } from "./logger.js";
 
-// In-memory staging area — cleared after retrieval or after 10 minutes
+// In-memory staging area — cleared after retrieval or after 30 minutes
 const _staged = new Map();
-const STAGE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const STAGE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Stage signals for a pool during screening.
  * Called after candidate data is loaded, before the LLM decides.
  * @param {string} poolAddress
- * @param {object} signals — { organic_score, fee_tvl_ratio, volume, mcap, holder_count, smart_wallets_present, narrative_quality, study_win_rate, hive_consensus, volatility, ath_proximity, volume_trend, change_1h, candle_price_range, okx_signal_present, token_age_hours }
+ * @param {object} signals — { organic_score, fee_tvl_ratio, volume, mcap, holder_count, smart_wallets_present, narrative_quality, volatility, ath_proximity, volume_trend, change_1h, candle_price_range, okx_signal_present, token_age_hours }
  */
 export function stageSignals(poolAddress, signals) {
   _staged.set(poolAddress, {
