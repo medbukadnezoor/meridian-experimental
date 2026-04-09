@@ -26,8 +26,6 @@ const SIGNAL_NAMES = [
   "holder_count",
   "smart_wallets_present",
   "narrative_quality",
-  "study_win_rate",
-  "hive_consensus",
   "volatility",
   // Extended Darwin signals — derived from already-fetched data, no new API calls needed
   "ath_proximity",
@@ -46,8 +44,6 @@ const DEFAULT_DIRECTIONS = {
   holder_count: "higher",
   smart_wallets_present: "higher",
   narrative_quality: "higher",
-  study_win_rate: "higher",
-  hive_consensus: "higher",
   volatility: "lower",
   ath_proximity: "lower",
   volume_trend: "higher",
@@ -59,13 +55,23 @@ const DEFAULT_DIRECTIONS = {
 const BOOLEAN_SIGNALS = new Set(["smart_wallets_present", "okx_signal_present"]);
 const CATEGORICAL_SIGNALS = new Set(["narrative_quality", "volume_trend"]);
 
+function sanitizeWeights(rawWeights = {}) {
+  return Object.fromEntries(SIGNAL_NAMES.map((signal) => [signal, rawWeights?.[signal] ?? 1.0]));
+}
+
+function sanitizeDirections(rawDirections = {}) {
+  return Object.fromEntries(
+    SIGNAL_NAMES.map((signal) => [signal, rawDirections?.[signal] ?? DEFAULT_DIRECTIONS[signal] ?? "higher"])
+  );
+}
+
 // ─── Persistence ─────────────────────────────────────────────────
 
 export function loadWeights() {
   if (!fs.existsSync(WEIGHTS_FILE)) {
     const initial = {
-      weights: { ...DEFAULT_WEIGHTS },
-      directions: { ...DEFAULT_DIRECTIONS },
+      weights: sanitizeWeights(),
+      directions: sanitizeDirections(),
       calibration: {},
       last_recalc: null,
       recalc_count: 0,
@@ -78,8 +84,8 @@ export function loadWeights() {
 
   try {
     const data = JSON.parse(fs.readFileSync(WEIGHTS_FILE, "utf8"));
-    data.weights = { ...DEFAULT_WEIGHTS, ...(data.weights || {}) };
-    data.directions = { ...DEFAULT_DIRECTIONS, ...(data.directions || {}) };
+    data.weights = sanitizeWeights(data.weights || {});
+    data.directions = sanitizeDirections(data.directions || {});
     if (!data.calibration || typeof data.calibration !== "object") data.calibration = {};
     if (!Array.isArray(data.history)) data.history = [];
     if (typeof data.recalc_count !== "number") data.recalc_count = 0;
@@ -88,8 +94,8 @@ export function loadWeights() {
   } catch (err) {
     log("signal_weights_error", `Failed to read signal-weights.json: ${err.message}`);
     return {
-      weights: { ...DEFAULT_WEIGHTS },
-      directions: { ...DEFAULT_DIRECTIONS },
+      weights: sanitizeWeights(),
+      directions: sanitizeDirections(),
       calibration: {},
       last_recalc: null,
       recalc_count: 0,
@@ -269,7 +275,8 @@ export function scoreSignalSnapshot(snapshot = {}, opts = {}) {
   const contributions = [];
 
   let weightedSum = 0;
-  let totalWeight = 0;
+  let observedWeight = 0;
+  const totalPossibleWeight = SIGNAL_NAMES.reduce((sum, signal) => sum + (weights[signal] ?? 1.0), 0);
 
   for (const signal of SIGNAL_NAMES) {
     const value = snapshot?.[signal];
@@ -291,19 +298,28 @@ export function scoreSignalSnapshot(snapshot = {}, opts = {}) {
     });
 
     weightedSum += contribution;
-    totalWeight += weight;
+    observedWeight += weight;
   }
 
   contributions.sort((a, b) => b.contribution - a.contribution);
 
-  const normalizedScore = totalWeight > 0 ? weightedSum / totalWeight : 0.5;
+  const missingWeight = Math.max(0, totalPossibleWeight - observedWeight);
+  const neutralContribution = missingWeight * 0.5;
+  const normalizedScore = totalPossibleWeight > 0
+    ? (weightedSum + neutralContribution) / totalPossibleWeight
+    : 0.5;
+  const observedScore = observedWeight > 0 ? weightedSum / observedWeight : 0.5;
   const topN = opts.topN ?? 4;
 
   return {
     score: normalizedScore,
     score_pct: Math.round(normalizedScore * 1000) / 10,
-    totalWeight: Math.round(totalWeight * 1000) / 1000,
+    observed_score: observedScore,
+    observed_score_pct: Math.round(observedScore * 1000) / 10,
+    totalWeight: Math.round(observedWeight * 1000) / 1000,
+    total_possible_weight: Math.round(totalPossibleWeight * 1000) / 1000,
     coverage: contributions.length,
+    coverage_pct: totalPossibleWeight > 0 ? Math.round((observedWeight / totalPossibleWeight) * 1000) / 10 : 0,
     topSignals: contributions.slice(0, topN),
     contributions,
   };
@@ -530,7 +546,6 @@ function getBaseSignalScore(signal, value, calibration = {}) {
 
   switch (signal) {
     case "organic_score":
-    case "study_win_rate":
       return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, 0, 100);
     case "fee_tvl_ratio":
       return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, 0, 5);
@@ -554,8 +569,6 @@ function getBaseSignalScore(signal, value, calibration = {}) {
       return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, -50, 50);
     case "candle_price_range":
       return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, 0, 25);
-    case "hive_consensus":
-      return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, 0, 1);
     default:
       return bounds ? normalizeLinear(value, bounds.low, bounds.high) : normalizeLinear(value, 0, 1);
   }

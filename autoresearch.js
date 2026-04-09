@@ -60,6 +60,7 @@ export function refreshAutoresearch(perfData = [], cfg = {}) {
   const now = new Date().toISOString();
   const environment = getEnvironmentSnapshot(cfg);
   let changed = false;
+  const blockedProposalKeys = new Set();
 
   const remainingTrials = [];
   for (const trial of state.activeTrials) {
@@ -79,14 +80,20 @@ export function refreshAutoresearch(perfData = [], cfg = {}) {
       changed = true;
       continue;
     }
+    blockedProposalKeys.add(getTrialKey(trial));
     remainingTrials.push(trial);
   }
   state.activeTrials = remainingTrials;
 
+  for (const trial of state.history || []) {
+    if (!environmentChangedSince(trial.environment_snapshot, environment)) {
+      blockedProposalKeys.add(getTrialKey(trial));
+    }
+  }
+
   const recentPerf = filterRecentPerformance(perfData, ar.lookbackDays ?? 45);
-  const existingKnobs = new Set(state.activeTrials.map((trial) => trial.knob));
   const proposals = buildTrialProposals(recentPerf, cfg)
-    .filter((proposal) => !existingKnobs.has(proposal.knob))
+    .filter((proposal) => !blockedProposalKeys.has(getTrialKey(proposal)))
     .slice(0, Math.max(0, (ar.maxActiveTrials ?? 3) - state.activeTrials.length));
 
   for (const proposal of proposals) {
@@ -112,6 +119,7 @@ export function refreshAutoresearch(perfData = [], cfg = {}) {
     changed = true;
   }
 
+  const stillActiveTrials = [];
   for (const trial of state.activeTrials) {
     const metrics = evaluateTrial(trial, perfData, cfg);
     if (!deepEqual(metrics, trial.metrics)) {
@@ -129,7 +137,29 @@ export function refreshAutoresearch(perfData = [], cfg = {}) {
     }
     trial.metrics = metrics;
     trial.last_evaluated_at = now;
+
+    if (metrics.recommendation !== "waiting") {
+      const completed = {
+        ...trial,
+        status: "completed",
+        completed_at: now,
+        final_recommendation: metrics.recommendation,
+        metrics,
+      };
+      state.history.unshift(completed);
+      appendAutoresearchEvent("trial_completed", {
+        trial_id: completed.id,
+        knob: completed.knob,
+        candidate_value: completed.candidate_value,
+        recommendation: metrics.recommendation,
+      });
+      changed = true;
+      continue;
+    }
+
+    stillActiveTrials.push(trial);
   }
+  state.activeTrials = stillActiveTrials;
 
   if (changed || state.lastRefreshAt == null) {
     state.mode = "shadow";
@@ -342,13 +372,20 @@ function evaluateTrial(trial, perfData, cfg = {}) {
   };
 
   const ar = cfg.autoresearch || {};
+  const minClosesPerTrial = ar.minClosesPerTrial ?? 12;
   const minEvaluable = ar.minEvaluableCloses ?? 8;
   const minRejected = ar.minRejectedCloses ?? 3;
   const minWinDelta = ar.minAbsoluteWinRateDeltaPct ?? 8;
   const minPnlDelta = ar.minAbsolutePnlDeltaPct ?? 0.75;
 
+  if (metrics.total_closes_since_start < minClosesPerTrial) {
+    metrics.recommendation_reason = `Need ${minClosesPerTrial} closes since trial start; have ${metrics.total_closes_since_start}.`;
+    return metrics;
+  }
+
   if (metrics.evaluable_closes < minEvaluable) {
-    metrics.recommendation_reason = `Need ${minEvaluable} evaluable closes; have ${metrics.evaluable_closes}.`;
+    metrics.recommendation = "inconclusive";
+    metrics.recommendation_reason = `Reached ${metrics.total_closes_since_start} closes but only ${metrics.evaluable_closes} were evaluable.`;
     return metrics;
   }
 
@@ -503,6 +540,10 @@ function recommendationPriority(recommendation) {
     default:
       return 1;
   }
+}
+
+function getTrialKey(trial = {}) {
+  return `${trial.knob}:${JSON.stringify(trial.live_value ?? null)}:${JSON.stringify(trial.candidate_value ?? null)}`;
 }
 
 function percentileFromValues(values, pct) {
