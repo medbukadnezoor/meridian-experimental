@@ -1,5 +1,42 @@
 # Changelog
 
+## [v1.0.4] — 2026-04-09 — Darwin sparse-data hotfix + attribution hardening
+
+### Fixed
+- **Sparse-data Darwin ranking no longer over-rewards partial candidates**:
+  - `scoreSignalSnapshot()` now scores against the full active signal surface and treats missing signals as neutral instead of omitting their weight.
+  - `rankCandidatesByDarwin()` now carries `darwin_coverage_pct` and uses it as a tie-breaker.
+- **Manual `/screen` -> `/deploy` attribution gap closed**:
+  - cached operator-reviewed candidates now restage their Darwin snapshot before deploy
+  - operator deployments stay in the `signal_snapshot` learning path instead of dropping out with null attribution
+- **Shadow autoresearch trial lifecycle completed**:
+  - trials now move from `activeTrials` into history once they become `recommend_apply`, `recommend_reject`, or `inconclusive`
+  - same-environment duplicate proposals are blocked from immediately respawning
+
+### Changed
+- **Dead Darwin inputs removed from active scoring/staging**:
+  - `study_win_rate` and `hive_consensus` are no longer treated as live Darwin signals until they are implemented for real
+  - weight loading now sanitizes stale on-disk signal keys to the active signal surface
+- **Signal staging TTL increased**:
+  - in-memory staged screening signals now live for 30 minutes instead of 10 to reduce silent attribution loss during slow manual or congested deploy paths
+
+### Docs / operator context
+- Added tracked `AGENTS.md` with:
+  - safety protocol (`node scripts/verify-patches.js` before restart, `bash scripts/backup-state.sh` before rebase)
+  - current hotfix summary and follow-up priorities
+  - pointers to `CHANGELOG.md`, `docs/hivemind-reference.md`, and key runtime modules
+- Version metadata aligned:
+  - `package.json` bumped to `1.0.4`
+  - changelog now reflects the hotfix after `feat: add Darwin ranking and shadow autoresearch` (`5c8f15c`)
+
+### Verification
+- `node --check autoresearch.js`
+- `node --check signal-weights.js`
+- `node --check tools/screening.js`
+- `node --check index.js`
+- `node test/test-fallback-model.js`
+- `node scripts/verify-patches.js` → 12/12 checks passed
+
 ## [v1.0.3] — 2026-04-09 — Darwin ranking + shadow autoresearch
 
 ### Added
