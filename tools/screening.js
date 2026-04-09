@@ -4,6 +4,7 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
+import { scoreSignalSnapshot } from "../signal-weights.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -449,8 +450,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  const ranked = rankCandidatesByDarwin(eligible);
+
   return {
-    candidates: eligible,
+    candidates: ranked,
+    total_eligible: ranked.length,
     total_screened: pools.length,
     filtered_examples: filteredOut.slice(0, 3),
   };
@@ -547,6 +551,9 @@ function condensePool(p) {
     price_trend: p.price_trend,
     min_price: p.min_price,
     max_price: p.max_price,
+    candle_price_range: (p.min_price > 0 && p.max_price > 0)
+      ? fix((p.max_price - p.min_price) / p.min_price * 100, 2)
+      : null,
 
     // Activity trends
     volume_change_pct: fix(p.volume_change_pct, 1),
@@ -554,6 +561,70 @@ function condensePool(p) {
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
   };
+}
+
+export function normalizeCandidateForUi(candidate) {
+  if (!candidate) return {};
+  return {
+    ...candidate,
+    pool: candidate.pool ?? candidate.pool_address ?? candidate.address,
+    volume: candidate.volume ?? candidate.volume_window ?? null,
+    fee_tvl_ratio: candidate.fee_tvl_ratio ?? candidate.fee_active_tvl_ratio ?? null,
+    holder_count: candidate.holder_count ?? candidate.holders ?? candidate.base_token_holders ?? null,
+  };
+}
+
+export function getCandidateSignalSnapshot(candidate = {}) {
+  const c = normalizeCandidateForUi(candidate);
+  const okxSignalPresent = c.okx_signal_present ?? (c.smart_money_buy === true || c.kol_in_clusters === true);
+  const volumeTrend = c.volume_trend ?? (() => {
+    const change = c.volume_change_pct;
+    if (change == null) return null;
+    if (change > 10) return "increasing";
+    if (change < -10) return "decreasing";
+    return "stable";
+  })();
+  return {
+    organic_score: c.organic_score ?? c.base?.organic ?? null,
+    fee_tvl_ratio: c.fee_active_tvl_ratio ?? c.fee_tvl_ratio ?? null,
+    volume: c.volume_window ?? c.volume ?? null,
+    mcap: c.mcap ?? null,
+    holder_count: c.holders ?? c.holder_count ?? null,
+    smart_wallets_present: c._smartWalletCount != null ? c._smartWalletCount > 0 : c.smart_wallets_present ?? null,
+    narrative_quality: c.narrative_quality ?? null,
+    study_win_rate: c.study_win_rate ?? null,
+    hive_consensus: c.hive_consensus ?? null,
+    volatility: c.volatility ?? null,
+    ath_proximity: c.price_vs_ath_pct ?? c.ath_proximity ?? null,
+    volume_trend: volumeTrend,
+    okx_signal_present: okxSignalPresent,
+    change_1h: c.change_1h ?? c.price_change ?? c.price_change_pct ?? null,
+    candle_price_range: c.candle_price_range ?? null,
+    token_age_hours: c.token_age_hours ?? null,
+  };
+}
+
+export function rankCandidatesByDarwin(candidates = []) {
+  return candidates
+    .map((candidate, index) => {
+      const normalized = normalizeCandidateForUi(candidate);
+      const darwin = scoreSignalSnapshot(getCandidateSignalSnapshot(normalized), { topN: 3 });
+      return {
+        ...normalized,
+        darwin_score: darwin.score_pct,
+        darwin_weight_coverage: darwin.coverage,
+        darwin_top_signals: darwin.topSignals,
+        _darwin_sort_index: index,
+      };
+    })
+    .sort((a, b) =>
+      (b.darwin_score ?? 0) - (a.darwin_score ?? 0)
+      || (b.fee_active_tvl_ratio ?? 0) - (a.fee_active_tvl_ratio ?? 0)
+      || (b.volume_window ?? b.volume ?? 0) - (a.volume_window ?? a.volume ?? 0)
+      || (b.organic_score ?? 0) - (a.organic_score ?? 0)
+      || (a._darwin_sort_index ?? 0) - (b._darwin_sort_index ?? 0)
+    )
+    .map(({ _darwin_sort_index, ...candidate }) => candidate);
 }
 
 function round(n) {

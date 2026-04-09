@@ -5,7 +5,7 @@ import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates } from "./tools/screening.js";
+import { getTopCandidates, rankCandidatesByDarwin } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -21,6 +21,7 @@ import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
+import { formatAutoresearchStatus } from "./autoresearch.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -522,17 +523,47 @@ export async function runScreeningCycle({ silent = false } = {}) {
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
 
+    const enrichedPassing = passing.map(({ pool, sw, n, ti, mem }, i) => {
+      const priceChange = ti?.stats_1h?.price_change;
+      const activeBin = activeBinResults[i]?.status === "fulfilled" ? activeBinResults[i].value?.binId : null;
+      const volumeTrend = (() => {
+        const change = pool.volume_change_pct;
+        if (change == null) return null;
+        if (change > 10) return "increasing";
+        if (change < -10) return "decreasing";
+        return "stable";
+      })();
+      const rankedPool = {
+        ...pool,
+        _smartWalletCount: sw?.in_pool?.length || 0,
+        holder_count: ti?.holders ?? null,
+        narrative_quality: n?.narrative ? "present" : "absent",
+        volume_trend: volumeTrend,
+        change_1h: priceChange ?? null,
+        token_age_hours: pool.token_age_hours ?? null,
+      };
+      return { pool: rankedPool, sw, n, ti, mem, activeBin };
+    });
+
+    const rankedCandidates = rankCandidatesByDarwin(enrichedPassing.map((entry) => entry.pool));
+    const detailMap = new Map(enrichedPassing.map((entry) => [entry.pool.pool, entry]));
+    setLatestCandidates(rankedCandidates);
+
     // Build compact candidate blocks
-    const candidateBlocks = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const candidateBlocks = rankedCandidates.map((pool) => {
+      const detail = detailMap.get(pool.pool);
+      const sw = detail?.sw;
+      const n = detail?.n;
+      const ti = detail?.ti;
+      const mem = detail?.mem;
+      const activeBin = detail?.activeBin ?? null;
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
       const feesSol = ti?.global_fees_sol ?? "?";
       const launchpad = ti?.launchpad ?? null;
       const priceChange = ti?.stats_1h?.price_change;
       const netBuyers = ti?.stats_1h?.net_buyers;
-      const activeBin = activeBinResults[i]?.status === "fulfilled" ? activeBinResults[i].value?.binId : null;
 
-      // OKX signals
       const okxParts = [
         pool.risk_level     != null ? `risk=${pool.risk_level}`               : null,
         pool.bundle_pct     != null ? `bundle=${pool.bundle_pct}%`            : null,
@@ -554,23 +585,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const pvpLine = pool.is_pvp
         ? `  pvp: HIGH — rival ${pool.pvp_rival_name || pool.pvp_symbol} (${pool.pvp_rival_mint?.slice(0, 8)}...) has pool ${pool.pvp_rival_pool?.slice(0, 8)}..., tvl=$${pool.pvp_rival_tvl}, holders=${pool.pvp_rival_holders}, fees=${pool.pvp_rival_fees}SOL`
         : null;
+      const darwinContext = Array.isArray(pool.darwin_top_signals) && pool.darwin_top_signals.length > 0
+        ? `  darwin: ${pool.darwin_score ?? "?"}/100 | top drivers ${pool.darwin_top_signals.map((signal) => `${signal.signal}=${signal.value}`).join(", ")}`
+        : `  darwin: ${pool.darwin_score ?? "?"}/100`;
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
+        darwinContext,
         pvpLine,
         okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
         okxTags  ? `  tags: ${okxTags}` : null,
         pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
-        `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map(w => w.name).join(", ")})` : ""}`,
+        `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map((wallet) => wallet.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
         n?.narrative ? `  narrative_untrusted: ${sanitizeUntrustedPromptText(n.narrative, 500)}` : `  narrative_untrusted: none`,
         mem ? `  memory_untrusted: ${sanitizeUntrustedPromptText(mem, 500)}` : null,
       ].filter(Boolean).join("\n");
 
-      // Stage signals for Darwinian weighting — captured before LLM decides
       if (config.darwin?.enabled) {
         stageSignals(pool.pool, {
           organic_score:         pool.organic_score         ?? null,
@@ -580,7 +614,15 @@ export async function runScreeningCycle({ silent = false } = {}) {
           holder_count:          ti?.holders                ?? null,
           smart_wallets_present: (sw?.in_pool?.length ?? 0) > 0,
           narrative_quality:     n?.narrative ? "present" : "absent",
+          study_win_rate:        pool.study_win_rate        ?? null,
+          hive_consensus:        pool.hive_consensus        ?? null,
           volatility:            pool.volatility            ?? null,
+          ath_proximity:         pool.price_vs_ath_pct      ?? null,
+          volume_trend:          pool.volume_trend          ?? null,
+          change_1h:             priceChange                ?? null,
+          candle_price_range:    pool.candle_price_range    ?? null,
+          okx_signal_present:    (pool.smart_money_buy === true || pool.kol_in_clusters === true),
+          token_age_hours:       pool.token_age_hours       ?? null,
         });
       }
 
@@ -594,7 +636,8 @@ SCREENING CYCLE
 ${strategyBlock}
 Positions: ${prePositions.total_positions}/${config.risk.maxPositions} | SOL: ${currentBalance.sol.toFixed(3)} | Deploy: ${deployAmount} SOL
 
-PRE-LOADED CANDIDATES (${passing.length} pools):
+PRE-LOADED CANDIDATES (${rankedCandidates.length} pools):
+Darwin score is a learned 0-100 ranking across this shortlist. Higher means stronger fit to historically winning signal patterns. Use it as a ranking aid, not a hard deploy rule.
 ${candidateBlocks.join("\n\n")}
 
 STEPS:
@@ -812,16 +855,17 @@ function formatCandidates(candidates) {
 
   const lines = candidates.map((p, i) => {
     const name = (p.name || "unknown").padEnd(20);
+    const darwin = `${Math.round(p.darwin_score ?? 0)}`.padStart(6);
     const ftvl = `${p.fee_active_tvl_ratio ?? p.fee_tvl_ratio}%`.padStart(8);
     const vol = `$${((p.volume_window || 0) / 1000).toFixed(1)}k`.padStart(8);
     const active = `${p.active_pct}%`.padStart(6);
     const org = String(p.organic_score).padStart(4);
-    return `  [${i + 1}]  ${name}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
+    return `  [${i + 1}]  ${name}  darwin:${darwin}  fee/aTVL:${ftvl}  vol:${vol}  in-range:${active}  organic:${org}`;
   });
 
   return [
-    "  #   pool                  fee/aTVL     vol    in-range  organic",
-    "  " + "─".repeat(68),
+    "  #   pool                  darwin  fee/aTVL     vol    in-range  organic",
+    "  " + "─".repeat(78),
     ...lines,
   ].join("\n");
 }
@@ -902,7 +946,8 @@ function describeLatestCandidates(limit = 5) {
     const vol = pool.volume_window ?? pool.volume_24h ?? "?";
     const active = pool.active_pct ?? "?";
     const organic = pool.organic_score ?? "?";
-    return `${i + 1}. ${pool.name} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
+    const darwin = pool.darwin_score != null ? ` | darwin ${pool.darwin_score}/100` : "";
+    return `${i + 1}. ${pool.name}${darwin} | fee/aTVL ${feeTvl}% | vol $${vol} | in-range ${active}% | organic ${organic}`;
   });
   const age = _latestCandidatesAt ? new Date(_latestCandidatesAt).toLocaleString("en-US", { hour12: false }) : "unknown";
   return `Latest candidates (${_latestCandidates.length}) — updated ${age}\n\n${lines.join("\n")}`;
@@ -933,6 +978,8 @@ function formatConfigSnapshot() {
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
+    `Darwin: ${config.darwin.enabled ? "enabled" : "disabled"} | floor ${config.darwin.weightFloor} | ceiling ${config.darwin.weightCeiling} | per-signal min ${config.darwin.perSignalMinSamples}`,
+    `Autoresearch: ${config.autoresearch.enabled ? config.autoresearch.mode : "disabled"} | trials ${config.autoresearch.maxActiveTrials} | min evaluable ${config.autoresearch.minEvaluableCloses}`,
     `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
   ].join("\n");
 }
@@ -967,6 +1014,7 @@ function formatHelpText() {
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
     "/briefing — morning briefing",
+    "/autoresearch — shadow autoresearch status",
     "/hive — HiveMind sync status",
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
@@ -983,7 +1031,8 @@ async function runDeterministicScreen(limit = 5) {
     const lines = candidates.map((pool, i) => {
       const feeTvl = pool.fee_active_tvl_ratio ?? pool.fee_tvl_ratio ?? "?";
       const vol = pool.volume_window ?? pool.volume_24h ?? "?";
-      return `${i + 1}. ${pool.name} | ${pool.pool}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
+      const darwin = pool.darwin_score != null ? ` | darwin ${pool.darwin_score}/100` : "";
+      return `${i + 1}. ${pool.name} | ${pool.pool}${darwin}\n   fee/aTVL ${feeTvl}% | vol $${vol} | organic ${pool.organic_score ?? "?"}`;
     });
     return `Top candidates (${candidates.length})\n\n${lines.join("\n")}`;
   }
@@ -1065,6 +1114,11 @@ async function telegramHandler(msg) {
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
+    return;
+  }
+
+  if (text === "/autoresearch") {
+    await sendMessage(formatAutoresearchStatus(config)).catch(() => {});
     return;
   }
 
@@ -1418,6 +1472,7 @@ Commands:
   /status        Refresh wallet + positions
   /candidates    Refresh top pool list
   /briefing      Show morning briefing (last 24h)
+  /autoresearch  Show shadow autoresearch status
   /learn         Study top LPers from the best current pool and save lessons
   /learn <addr>  Study top LPers from a specific pool address
   /thresholds    Show current screening thresholds + performance stats
@@ -1498,6 +1553,12 @@ Commands:
       return;
     }
 
+    if (input === "/autoresearch") {
+      console.log(`\n${formatAutoresearchStatus(config)}\n`);
+      rl.prompt();
+      return;
+    }
+
     if (input === "/candidates") {
       await runBusy(async () => {
         const { candidates, total_eligible, total_screened } = await getTopCandidates({ limit: 5 });
@@ -1530,6 +1591,8 @@ Commands:
       } else {
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }
+      console.log(`\n  Darwin: ${config.darwin.enabled ? "enabled" : "disabled"} | per-signal min ${config.darwin.perSignalMinSamples}`);
+      console.log(`  Autoresearch: ${config.autoresearch.enabled ? config.autoresearch.mode : "disabled"}`);
       console.log();
       rl.prompt();
       return;

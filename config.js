@@ -136,14 +136,32 @@ export const config = {
 
   // ─── Darwinian Signal Weighting ───────
   darwin: {
-    enabled:        u.darwinEnabled     ?? true,
-    windowDays:     u.darwinWindowDays  ?? 60,
-    recalcEvery:    u.darwinRecalcEvery ?? 5,    // recalc every N closes
-    boostFactor:    u.darwinBoost       ?? 1.05,
-    decayFactor:    u.darwinDecay       ?? 0.95,
-    weightFloor:    u.darwinFloor       ?? 0.3,
-    weightCeiling:  u.darwinCeiling     ?? 2.5,
-    minSamples:     u.darwinMinSamples  ?? 10,
+    enabled:               u.darwinEnabled               ?? true,
+    windowDays:            u.darwinWindowDays            ?? 60,
+    recalcEvery:           u.darwinRecalcEvery           ?? 5,    // recalc every N closes
+    boostFactor:           u.darwinBoost                 ?? 1.05,
+    decayFactor:           u.darwinDecay                 ?? 0.95,
+    weightFloor:           u.darwinFloor                 ?? 0.3,
+    weightCeiling:         u.darwinCeiling               ?? 2.5,
+    minSamples:            u.darwinMinSamples            ?? 10,
+    perSignalMinSamples:   u.darwinPerSignalMinSamples   ?? 12,
+    minAbsLiftToAdjust:    u.darwinMinAbsLiftToAdjust    ?? 0.05,
+    strongLiftThreshold:   u.darwinStrongLiftThreshold   ?? 0.2,
+    calibrationMinSamples: u.darwinCalibrationMinSamples ?? 20,
+    meanReversionRate:     u.darwinMeanReversionRate     ?? 0.02,
+  },
+
+  // ─── Shadow Autoresearch ───────────────
+  autoresearch: {
+    enabled:                    u.autoresearchEnabled                    ?? true,
+    mode:                       u.autoresearchMode                       ?? "shadow",
+    maxActiveTrials:            u.autoresearchMaxActiveTrials            ?? 3,
+    minClosesPerTrial:          u.autoresearchMinClosesPerTrial          ?? 12,
+    minEvaluableCloses:         u.autoresearchMinEvaluableCloses         ?? 8,
+    minRejectedCloses:          u.autoresearchMinRejectedCloses          ?? 3,
+    minAbsoluteWinRateDeltaPct: u.autoresearchMinAbsoluteWinRateDeltaPct ?? 8,
+    minAbsolutePnlDeltaPct:     u.autoresearchMinAbsolutePnlDeltaPct     ?? 0.75,
+    lookbackDays:               u.autoresearchLookbackDays               ?? 45,
   },
 
   // ─── Common Token Mints ────────────────

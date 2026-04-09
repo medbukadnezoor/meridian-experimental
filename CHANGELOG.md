@@ -1,5 +1,37 @@
 # Changelog
 
+## [v1.0.3] — 2026-04-09 — Darwin ranking + shadow autoresearch
+
+### Added
+- **Darwin candidate scoring and ranking**:
+  - `scoreSignalSnapshot()` and `rankCandidatesByDarwin()` in `signal-weights.js` / `tools/screening.js`
+  - Darwin scores are now surfaced in screening output and cached candidate lists
+- **Shadow autoresearch subsystem**:
+  - new `autoresearch.js`
+  - separate `autoresearch-state.json` runtime state (gitignored)
+  - JSONL event log under `logs/autoresearch-YYYY-MM-DD.jsonl`
+  - `/autoresearch` command in both Telegram and REPL
+  - morning briefing line summarizing shadow-trial status
+
+### Changed
+- **Signal persistence fixed**:
+  - deploy path now stores the staged `signal_snapshot` into `state.json`
+  - close-side performance records now carry that same snapshot into `lessons.json`
+- **Darwin learning made direction-aware**:
+  - weights now persist `directions` and `calibration`
+  - candidate scoring uses learned weights plus calibrated signal normalization
+- **Threshold evolution mismatch fixed**:
+  - `lessons.js` now evolves `minFeeActiveTvlRatio` instead of the stale `minFeeTvlRatio` key
+  - removed the nonfunctional `maxVolatility` evolution path from live mutation logic
+- **Candidate staging expanded**:
+  - shadow-learning metadata now includes `token_age_hours`
+  - screening caches now preserve Darwin ranking order for operator review
+
+### Operational notes
+- Shadow autoresearch is **read-only**: it evaluates counterfactual screening filters but does **not** mutate live config.
+- Existing historical closes mostly predate persisted signal snapshots, so shadow trials will start cold and become meaningful after new closes accumulate.
+- No bot restart was performed as part of this patch set; the running process continues using the previously loaded code until manually restarted.
+
 ## [v1.0.2] — 2026-04-08 — Rebase onto upstream 4959d10 (HiveMind + Telegram commands + Discord signals)
 
 ### Rebase summary
