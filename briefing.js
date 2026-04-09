@@ -1,6 +1,8 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
+import { config } from "./config.js";
+import { getAutoresearchBriefingSummary } from "./autoresearch.js";
 
 const STATE_FILE = "./state.json";
 const LESSONS_FILE = "./lessons.json";
@@ -48,6 +50,7 @@ export async function generateBriefing() {
     lessonsLast24h.length > 0
       ? lessonsLast24h.map(l => `• ${l.rule}`).join("\n")
       : "• No new lessons recorded overnight.",
+    getAutoresearchBriefingSummary(config),
     "",
     `<b>Current Portfolio:</b>`,
     `📂 Open Positions: ${openPositions.length}`,

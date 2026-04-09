@@ -21,6 +21,7 @@ import {
 import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
+import { getAndClearStagedSignals } from "../signal-tracker.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -311,6 +312,7 @@ export async function deployPosition({
     log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
 
     _positionsCacheAt = 0;
+    const signalSnapshot = getAndClearStagedSignals(pool_address);
     trackPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
@@ -325,6 +327,7 @@ export async function deployPosition({
       amount_x: finalAmountX,
       active_bin: activeBin.binId,
       initial_value_usd,
+      signal_snapshot: signalSnapshot,
     });
 
   const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
@@ -1017,6 +1020,7 @@ export async function closePosition({ position_address, reason }) {
         minutes_in_range: minutesHeld - minutesOOR,
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
+        signal_snapshot: tracked.signal_snapshot || null,
       });
 
       return {
