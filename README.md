@@ -9,7 +9,7 @@
 - **Screens pools** — continuously scans Meteora DLMM pools against configurable thresholds (fee/TVL ratio, organic score, holder count, market cap, bin step, etc.) to surface high-quality opportunities
 - **Manages positions** — opens, monitors, and closes LP positions autonomously; decides to STAY, CLOSE, or REDEPLOY based on live PnL, yield, and range data
 - **Claims fees** — tracks unclaimed fees per position and claims when thresholds are met
-- **Learns from performance** — studies top LPers in target pools, saves structured lessons, and evolves screening thresholds based on closed position history
+- **Learns from performance** — studies top LPers, saves structured lessons, ranks candidates with Darwin signal scoring, and runs shadow autoresearch on screening thresholds without mutating live config
 - **Monitors any wallet** — look up open DLMM positions and top LPers for any Solana wallet or pool address
 - **Telegram chat** — full agent chat via Telegram, plus cycle reports and out-of-range alerts sent automatically
 
@@ -138,6 +138,7 @@ After startup, an interactive prompt is available. The prompt shows a live count
 | `/learn <pool_address>` | Study top LPers from a specific pool address |
 | `<wallet_address>` | Ask the agent to check any wallet's positions or a pool's top LPers |
 | `/thresholds` | Show current screening thresholds and closed-position performance stats |
+| `/autoresearch` | Show shadow autoresearch trials and whether any threshold changes look promising |
 | `/evolve` | Trigger threshold evolution from performance data (requires 5+ closed positions) |
 | `/stop` | Graceful shutdown |
 | `<anything else>` | Free-form chat — ask the agent questions, request actions, analyze pools |
@@ -193,6 +194,14 @@ Saved lessons are injected into subsequent agent cycles as part of the system co
 After at least 5 positions have been closed, `/evolve` analyzes the performance record (win rate, average PnL, fee yields) and adjusts the screening thresholds in `user-config.json` accordingly. Changes take effect immediately — no restart needed. The rationale for each change is printed to the console.
 
 Use `/thresholds` to see current values alongside performance stats.
+
+### Darwin ranking
+
+Screening now persists the deploy-time signal snapshot in `state.json`, recalculates direction-aware Darwin weights, and ranks the candidate shortlist before the screener model makes the final deploy call. Darwin is a ranking aid, not a hard deploy rule.
+
+### Shadow autoresearch (`/autoresearch`)
+
+Shadow autoresearch evaluates counterfactual screening rules such as tighter organic, volume, ATH, and token-age filters against recent closes. It keeps its own `autoresearch-state.json` plus JSONL logs under `logs/`, and in shadow mode it never mutates live config. The goal is to surface profit-improving changes without destabilizing the live runner.
 
 ---
 
