@@ -175,7 +175,8 @@ function isSystemRoleError(error) {
 
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
-  return /tool_choice/i.test(message) && /required/i.test(message);
+  // DashScope thinking mode rejects tool_choice set to "required" or "object"
+  return /tool_choice/i.test(message) && (/required/i.test(message) || /object/i.test(message) || /thinking mode/i.test(message));
 }
 
 /**
@@ -235,15 +236,17 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       for (let attempt = 0; attempt < 3; attempt++) {
         let startTime = Date.now();
         try {
-          response = await getClient(agentType).chat.completions.create({
+          const callParams = {
             model: usedModel,
             messages,
             tools: getToolsForRole(agentType, goal),
-            tool_choice: toolChoice,
             temperature: config.llm.temperature,
             max_tokens: maxOutputTokens ?? config.llm.maxTokens,
             ...(providerIgnore.length > 0 ? { provider: { ignore: providerIgnore } } : {}),
-          });
+          };
+          // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
+          if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          response = await getClient(agentType).chat.completions.create(callParams);
           logApiActivity({
             agent: agentType,
             model: usedModel,
@@ -269,9 +272,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
-          if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
-            toolChoice = "auto";
-            log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
+          if (isToolChoiceRequiredError(error)) {
+            // DashScope thinking mode rejects tool_choice in any explicit form — omit the parameter entirely
+            toolChoice = undefined;
+            log("agent", `Provider rejected tool_choice (thinking mode) — retrying without tool_choice parameter`);
             attempt -= 1;
             continue;
           }

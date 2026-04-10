@@ -11,6 +11,8 @@ const u = fs.existsSync(USER_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
   : {};
 
+const indicatorUserConfig = u.chartIndicators ?? {};
+
 export function normalizeOptionalString(value) {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -182,12 +184,14 @@ export const config = {
     pullMode: u.hiveMindPullMode ?? "auto",
   },
 
+  // ─── Agent Meridian API ───────────────
   api: {
     url: u.agentMeridianApiUrl ?? process.env.AGENT_MERIDIAN_API_URL ?? DEFAULT_AGENT_MERIDIAN_API_URL,
     publicApiKey: u.publicApiKey ?? process.env.PUBLIC_API_KEY ?? "",
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
   },
 
+  // ─── Chart Indicator Confirmations ────
   indicators: {
     enabled: indicatorUserConfig.enabled ?? false,
     entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",

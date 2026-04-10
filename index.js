@@ -22,6 +22,7 @@ import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnable
 import { appendDecision } from "./decision-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
+import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -99,17 +100,22 @@ async function confirmExitIndicator(position, closeReason) {
   if (!position?.base_mint) {
     return { confirmed: true, skipped: true, reason: "Missing base mint for indicator lookup" };
   }
-  const confirmation = await confirmIndicatorPreset({
-    mint: position.base_mint,
-    side: "exit",
-  });
-  if (!confirmation.confirmed) {
-    log(
-      "indicators",
-      `Exit confirmation rejected for ${position.pair} (${closeReason}): ${confirmation.reason}`,
-    );
+  try {
+    const confirmation = await confirmIndicatorPreset({
+      mint: position.base_mint,
+      side: "exit",
+    });
+    if (!confirmation.confirmed) {
+      log(
+        "indicators",
+        `Exit confirmation rejected for ${position.pair} (${closeReason}): ${confirmation.reason}`,
+      );
+    }
+    return confirmation;
+  } catch (err) {
+    log("indicators", `Exit indicator error for ${position.pair}: ${err.message} — allowing exit`);
+    return { confirmed: true, skipped: true, reason: `API error: ${err.message}` };
   }
-  return confirmation;
 }
 
 function schedulePeakConfirmation(positionAddress) {
@@ -247,7 +253,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
-      // Hard exit — highest priority
+      // Hard exit — highest priority (with optional indicator gate)
       if (exitMap.has(p.position)) {
         const indicatorConfirmation = await confirmExitIndicator(p, exitMap.get(p.position));
         if (!indicatorConfirmation.confirmed) {

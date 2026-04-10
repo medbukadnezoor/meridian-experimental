@@ -5,6 +5,7 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
+import { confirmIndicatorPreset } from "./chart-indicators.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -411,6 +412,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
   }
 
+  // Chart indicator entry confirmation — filters candidates that don't meet the entry preset
+  // Falls back gracefully (confirmed: true) if API is unavailable or config.indicators.enabled is false
   if (config.indicators.enabled && eligible.length > 0) {
     const confirmations = await Promise.all(
       eligible.map(async (pool) => {
