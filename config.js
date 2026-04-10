@@ -10,6 +10,8 @@ const u = fs.existsSync(USER_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
   : {};
 
+const indicatorUserConfig = u.chartIndicators ?? {};
+
 export function normalizeOptionalString(value) {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
@@ -175,6 +177,28 @@ export const config = {
     apiKey: u.hiveMindApiKey ?? "",
     agentId: u.agentId ?? null,
     pullMode: u.hiveMindPullMode ?? "auto",
+  },
+
+  // ─── Agent Meridian API ───────────────
+  api: {
+    url: u.agentMeridianApiUrl ?? "https://api.agentmeridian.xyz/api",
+    publicApiKey: u.publicApiKey ?? null,
+    lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  // ─── Chart Indicator Confirmations ────
+  indicators: {
+    enabled: indicatorUserConfig.enabled ?? false,
+    entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
+    exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
+    rsiLength: indicatorUserConfig.rsiLength ?? 2,
+    intervals: Array.isArray(indicatorUserConfig.intervals)
+      ? indicatorUserConfig.intervals
+      : ["5_MINUTE", "15_MINUTE"],
+    candles: indicatorUserConfig.candles ?? 298,
+    rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
+    rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
+    requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
   },
 };
 

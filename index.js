@@ -20,6 +20,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
+import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -88,6 +89,31 @@ function sanitizeUntrustedPromptText(text, maxLen = 500) {
     .trim()
     .slice(0, maxLen);
   return cleaned ? JSON.stringify(cleaned) : null;
+}
+
+async function confirmExitIndicator(position, closeReason) {
+  if (!config.indicators.enabled) {
+    return { confirmed: true, skipped: true, reason: "Indicators disabled" };
+  }
+  if (!position?.base_mint) {
+    return { confirmed: true, skipped: true, reason: "Missing base mint for indicator lookup" };
+  }
+  try {
+    const confirmation = await confirmIndicatorPreset({
+      mint: position.base_mint,
+      side: "exit",
+    });
+    if (!confirmation.confirmed) {
+      log(
+        "indicators",
+        `Exit confirmation rejected for ${position.pair} (${closeReason}): ${confirmation.reason}`,
+      );
+    }
+    return confirmation;
+  } catch (err) {
+    log("indicators", `Exit indicator error for ${position.pair}: ${err.message} — allowing exit`);
+    return { confirmed: true, skipped: true, reason: `API error: ${err.message}` };
+  }
 }
 
 function schedulePeakConfirmation(positionAddress) {
@@ -225,8 +251,13 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
-      // Hard exit — highest priority
+      // Hard exit — highest priority (with optional indicator gate)
       if (exitMap.has(p.position)) {
+        const indicatorConfirmation = await confirmExitIndicator(p, exitMap.get(p.position));
+        if (!indicatorConfirmation.confirmed) {
+          actionMap.set(p.position, { action: "STAY", indicatorHold: indicatorConfirmation.reason });
+          continue;
+        }
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
         continue;
       }
@@ -238,6 +269,11 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
+        if (!indicatorConfirmation.confirmed) {
+          actionMap.set(p.position, { action: "STAY", indicatorHold: indicatorConfirmation.reason });
+          continue;
+        }
         actionMap.set(p.position, closeRule);
         continue;
       }
