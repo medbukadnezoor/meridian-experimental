@@ -300,6 +300,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
+      if (act.indicatorHold) line += `\n📊 Indicator hold: ${act.indicatorHold}`;
       return line;
     });
 
