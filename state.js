@@ -419,6 +419,24 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
+  // ── Early dump detection (young position losing fast) ─────────
+  const earlyDumpPct = mgmtConfig.earlyDumpPct ?? null;        // e.g. -2
+  const earlyDumpMaxAgeMin = mgmtConfig.earlyDumpMaxAgeMin ?? 30;
+  if (
+    earlyDumpPct != null &&
+    !pnl_pct_suspicious &&
+    currentPnlPct != null &&
+    currentPnlPct <= earlyDumpPct
+  ) {
+    const { age_minutes: ageMin } = positionData;
+    if (ageMin != null && ageMin <= earlyDumpMaxAgeMin) {
+      return {
+        action: "STOP_LOSS",
+        reason: `Early dump: PnL ${currentPnlPct.toFixed(2)}% <= ${earlyDumpPct}% within first ${ageMin}m (limit: ${earlyDumpMaxAgeMin}m)`,
+      };
+    }
+  }
+
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {

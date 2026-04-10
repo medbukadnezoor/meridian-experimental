@@ -4,6 +4,48 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 
 ---
 
+## ⚠️ MANDATORY SAFETY PROTOCOLS — READ BEFORE ANY ACTION
+
+**This bot runs with real SOL on Solana mainnet. These steps are non-negotiable.**
+
+### BEFORE restarting the bot (`node index.js`)
+
+Run patch verification first. If it fails, STOP and fix before proceeding:
+```bash
+node scripts/verify-patches.js
+```
+All checks must show ✅. If any show ❌, do not restart the bot.
+
+### BEFORE any `git rebase`
+
+Both steps are required, in order:
+```bash
+# 1. Tag current HEAD
+git tag -a vX.Y.Z-pre-rebase -m "Pre-rebase snapshot $(date +%Y-%m-%d)"
+
+# 2. Back up runtime state
+bash scripts/backup-state.sh pre-rebase-$(date +%Y%m%d)
+```
+Then rebase. Then immediately: `node scripts/verify-patches.js`
+
+### MANDATORY patches — must survive every rebase
+
+| Patch | File | Why |
+|-------|------|-----|
+| Stop-loss 6h cooldown on pool + mint | `pool-memory.js` | Bot re-enters dumping tokens immediately without this |
+| OPERATOR COMMAND Telegram wrapping | `index.js` | Prompt injection hardening — upstream keeps removing this |
+| `managementModel`/`screeningModel`/`generalModel` ABSENT from CONFIG_MAP | `tools/executor.js` | **Security**: LLM cannot mutate its own model routing |
+
+> Upstream (yunus-0x/meridian) has actively reversed all 3 of these patches. Assume every rebase will drop them.
+
+### NEVER without explicit operator instruction
+- Add model keys to `CONFIG_MAP` in `tools/executor.js`
+- Force-push to `experimental`
+- Restart the bot after a failed `verify-patches.js`
+- Modify `user-config.json` model fields without operator approval
+
+---
+
 ## Architecture Overview
 
 ```
