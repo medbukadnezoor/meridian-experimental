@@ -174,6 +174,8 @@ const toolMap = {
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
+      earlyDumpPct: ["management", "earlyDumpPct"],
+      earlyDumpMaxAgeMin: ["management", "earlyDumpMaxAgeMin"],
       solMode: ["management", "solMode"],
       minSolToOpen: ["management", "minSolToOpen"],
       deployAmountSol: ["management", "deployAmountSol"],

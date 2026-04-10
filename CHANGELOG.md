@@ -1,6 +1,48 @@
 # Changelog
 
-## [v1.0.4] — 2026-04-09 — Darwin sparse-data hotfix + attribution hardening
+## [v1.0.5] — 2026-04-10 — April 10 forensic analysis fixes (exit & re-entry hardening)
+
+### Context
+Forensic analysis of 15 closed positions on April 10 revealed -$6.90 net loss (Meteora API).
+Root cause: stop-loss exits totalled -$11.82, driven by re-entry into dumping tokens and
+cooldown/exit timing bugs. Three structural problems identified and fixed.
+
+### Fixed
+- **Stop-loss bypasses 10min management cooldown**: Stop-loss triggers now call
+  `executeTool("close_position")` directly from the 30s PnL poller — no cooldown wait,
+  no LLM roundtrip. Eliminates the 0.15%-0.6% additional bleed observed in positions like
+  Iroha (triggered at -5.22%, closed at -5.37%). Also applies to deterministic close Rule 1.
+  Files: `index.js`
+- **Low-yield cooldown bug**: Was `deploy.close_reason === "low yield"` (exact match) but
+  actual reasons are `"Trailing TP: Low yield: fee/TVL 3.00% < min 7% (age: 60m)"`. Changed
+  to `/low.yield/i` regex, consistent with stop-loss matching. The cooldown was **silently
+  broken** — never fired for any of the 30+ low-yield closes in pool-memory.json.
+  Files: `pool-memory.js`
+
+### Added
+- **Early dump detection**: New exit rule in `state.js` — if PnL ≤ `earlyDumpPct` (-3%)
+  within the first `earlyDumpMaxAgeMin` (30) minutes, fires as action=STOP_LOSS (bypasses
+  cooldown). Would have caught Tortellini at ~-3% instead of -5.61%, saving ~$1.50.
+  Config: `earlyDumpPct`, `earlyDumpMaxAgeMin` in `config.js` and `executor.js` CONFIG_MAP.
+- **Anti-chase cooldown**: 2h pool cooldown after "pumped far above range" exits.
+  49-SOL closed +4.56% as "pumped far above range", redeployed 6 minutes later,
+  stopped out at -5.12%. This cooldown prevents that pattern.
+  Files: `pool-memory.js`
+
+### Changed
+- **Stop-loss cooldown 6h → 12h**: Iroha hit stop-loss, waited 6h for cooldown to expire,
+  deployed again, hit stop-loss again. 12h is more appropriate for meme token rotations.
+  Files: `pool-memory.js`
+- `/config` display now shows early dump status and "stop-loss bypasses cooldown ✓".
+  Files: `index.js`
+
+### Verification
+- `node --check index.js` ✓
+- `node --check state.js` ✓
+- `node --check config.js` ✓
+- `node --check tools/executor.js` ✓
+- `node --check pool-memory.js` ✓
+
 
 ### Fixed
 - **Sparse-data Darwin ranking no longer over-rewards partial candidates**:

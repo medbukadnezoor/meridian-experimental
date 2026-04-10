@@ -775,6 +775,30 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
+          // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
+          const isStopLoss = exit.action === "STOP_LOSS";
+          if (isStopLoss) {
+            log("state", `[PnL poll] URGENT stop-loss: ${p.pair} — ${exit.reason} — closing directly (no cooldown, no LLM)`);
+            _pollTriggeredAt = Date.now();
+            (async () => {
+              try {
+                const result = await executeTool("close_position", {
+                  position_address: p.position,
+                  reason: `Trailing TP: ${exit.reason}`,
+                });
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("state", `[PnL poll] Direct stop-loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Direct stop-loss close error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              }
+            })();
+            break;
+          }
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
           if (sinceLastTrigger >= cooldownMs) {
@@ -788,6 +812,31 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          // Rule 1 (stop loss) is time-critical — bypass indicator check and cooldown, close directly
+          const isStopLossRule = closeRule.rule === 1;
+          if (isStopLossRule) {
+            log("state", `[PnL poll] URGENT deterministic stop-loss: ${p.pair} — Rule 1: ${closeRule.reason} — closing directly`);
+            _pollTriggeredAt = Date.now();
+            (async () => {
+              try {
+                const result = await executeTool("close_position", {
+                  position_address: p.position,
+                  reason: `Trailing TP: ${closeRule.reason}`,
+                });
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("cron_error", `Direct deterministic stop-loss failed for ${p.pair}: ${result?.error ?? "unknown"}`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Direct deterministic stop-loss error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              }
+            })();
+            break;
+          }
+          // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
           const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
           if (!indicatorConfirmation.confirmed) {
             log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
@@ -955,7 +1004,8 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.binsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
+    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses cooldown ✓`,
+    `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
     `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,

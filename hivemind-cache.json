@@ -1,0 +1,162 @@
+{
+  "sharedLessons": [
+    {
+      "id": "1775813457215",
+      "rule": "PREFER: Iroha-SOL-type pools (volatility=1.87, bin_step=100) with strategy=\"spot\" — 100% in-range efficiency, PnL +2.14%.",
+      "tags": [
+        "efficient",
+        "spot"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.27,
+      "created_at": "2026-04-10T09:30:57.215Z"
+    },
+    {
+      "id": "1775813743014",
+      "rule": "PREFER: milkers-SOL-type pools (volatility=1.95, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +6.51%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.27,
+      "created_at": "2026-04-10T09:35:43.014Z"
+    },
+    {
+      "id": "1775795805352",
+      "rule": "PREFER: Iroha-SOL-type pools (volatility=0.44, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +3.48%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.07,
+      "created_at": "2026-04-10T04:36:45.352Z"
+    },
+    {
+      "id": "1775787679561",
+      "rule": "PREFER: Tortellini-SOL-type pools (volatility=2.46, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +0.48%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 56.97,
+      "created_at": "2026-04-10T02:21:19.561Z"
+    },
+    {
+      "id": "1775756131815",
+      "rule": "PREFER: Rise-SOL-type pools (volatility=8.7, bin_step=80) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +5.44%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 56.61,
+      "created_at": "2026-04-09T17:35:31.815Z"
+    },
+    {
+      "id": "1775746685888",
+      "rule": "PREFER: 49-SOL-type pools (volatility=2.99, bin_step=100) with strategy=\"bid_ask\" — 97.8% in-range efficiency, PnL +4.42%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 56.5,
+      "created_at": "2026-04-09T14:58:05.888Z"
+    },
+    {
+      "id": "1775764154729",
+      "rule": "PREFER: NEU-SOL-type pools (volatility=3.72, bin_step=125) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +7.25%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 55.7,
+      "created_at": "2026-04-09T19:49:14.729Z"
+    },
+    {
+      "id": "1775675541064",
+      "rule": "PREFER: BabyTrump-SOL-type pools (volatility=2.8, bin_step=125) with strategy=\"bid_ask\" — 95.8% in-range efficiency, PnL +2.28%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 55.67,
+      "created_at": "2026-04-08T19:12:21.064Z"
+    },
+    {
+      "id": "1775792907827",
+      "rule": "PREFER: BURNIE-SOL-type pools (volatility=1.33, bin_step=100) with strategy=\"spot\" — 100% in-range efficiency, PnL +1.75%.",
+      "tags": [
+        "efficient",
+        "spot"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 48.03,
+      "created_at": "2026-04-10T03:48:27.827Z"
+    },
+    {
+      "id": "1775791376280",
+      "rule": "PREFER: GENZ-SOL-type pools (volatility=3.15, bin_step=100) with strategy=\"bid_ask\" — 94% in-range efficiency, PnL +3.44%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 44.02,
+      "created_at": "2026-04-10T03:22:56.280Z"
+    },
+    {
+      "id": "1775712234932",
+      "rule": "PREFER: PETRO-SOL-type pools (volatility=0.7, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +2.79%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 43.1,
+      "created_at": "2026-04-09T05:23:54.932Z"
+    },
+    {
+      "id": "1775671990329",
+      "rule": "PREFER: Downald-SOL-type pools (volatility=4.36, bin_step=100) with strategy=\"spot\" — 100% in-range efficiency, PnL +1.67%.",
+      "tags": [
+        "efficient",
+        "spot"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 41.63,
+      "created_at": "2026-04-08T18:13:10.329Z"
+    }
+  ],
+  "presets": [],
+  "pulledAt": "2026-04-10T09:44:26.688Z"
+}

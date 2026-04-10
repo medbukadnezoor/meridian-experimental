@@ -1,0 +1,6 @@
+Meridian state backup
+Label:   pre-rebase-20260408-2246
+Date:    Wed Apr  8 22:46:34 WIB 2026
+GitHEAD: 7d0d1ce
+GitBranch: experimental
+Files:   5 backed up

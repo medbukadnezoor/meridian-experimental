@@ -99,6 +99,9 @@ export const config = {
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    // Early dump detection — close young positions losing fast
+    earlyDumpPct:          u.earlyDumpPct          ?? null,  // e.g. -2 — PnL threshold for young positions (null = disabled)
+    earlyDumpMaxAgeMin:    u.earlyDumpMaxAgeMin    ?? 30,    // only trigger if position is younger than this (minutes)
     // SOL mode — positions, PnL, and balances reported in SOL instead of USD
     solMode:               u.solMode               ?? false,
   },
