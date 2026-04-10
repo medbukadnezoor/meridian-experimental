@@ -150,21 +150,31 @@ export function recordPoolDeploy(poolAddress, deployData) {
   }
 
   // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
-  if (deploy.close_reason === "low yield") {
+  // Match any reason containing "low yield" (reasons look like "Trailing TP: Low yield: fee/TVL 3.00% < min 7%")
+  if (deploy.close_reason && /low.yield/i.test(deploy.close_reason)) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy for 6h
+  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy for 12h
+  // (6h was too short — Iroha hit SL, waited 6h, deployed again, hit SL again)
   if (deploy.close_reason && /stop.loss/i.test(deploy.close_reason)) {
-    const cooldownHours = 6;
+    const cooldownHours = 12;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "stop loss");
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "stop loss");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (stop loss close)`);
     if (entry.base_mint && mintCooldownUntil) {
       log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (stop loss close)`);
     }
+  }
+
+  // Anti-chase cooldown — don't redeploy immediately after momentum exhaustion exit
+  // (49-SOL closed +4.56% as "pumped far above range", redeployed 6min later, stopped out -5.12%)
+  if (deploy.close_reason && /pumped.far.above.range/i.test(deploy.close_reason)) {
+    const cooldownHours = 2;
+    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "pumped far above range");
+    log("pool-memory", `Anti-chase cooldown set for ${entry.name} until ${cooldownUntil} (pumped far above range)`);
   }
 
   const oorTriggerCount = config.management.oorCooldownTriggerCount ?? 3;
