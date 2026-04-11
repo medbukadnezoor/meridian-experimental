@@ -270,23 +270,19 @@ export async function deployPosition({
     activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
   }
 
-  // ── bid_ask protocol constraints ────────────────────────────────────
-  // 1. bid_ask requires bins on BOTH sides. bins_above=0 causes Rust u16 overflow
-  //    in Meteora's InitializePosition (N*(N+1) computation overflows when one side is 0).
-  //    Auto-mirror to make it symmetric rather than failing silently.
-  // 2. bid_ask cannot use the wide-range path (createExtendedEmptyPosition does not
-  //    support BidAsk strategy type). Hard-cap at 69 total bins.
-  if (activeStrategy === 'bid_ask') {
-    if (activeBinsAbove === 0) {
-      activeBinsAbove = activeBinsBelow;
-      log("deploy", `[bid_ask] bins_above was 0 — mirrored to ${activeBinsAbove} (bid_ask requires symmetric range)`);
-    }
-    const totalBidAsk = activeBinsBelow + activeBinsAbove;
-    if (totalBidAsk > 69) {
-      const half = Math.floor(69 / 2); // 34
-      activeBinsBelow = half;
-      activeBinsAbove = half + 1;      // 35 — 69 total, stays in standard path
-      log("deploy", `[bid_ask] Clamped from ${totalBidAsk} to 69 bins (${half}+${half + 1}) — wide-range path unsupported for bid_ask`);
+  // ── Bin count sanity guard ───────────────────────────────────────────
+  // Prevent LLM hallucinations sending absurd bin counts (690, 6910, etc.)
+  // which cause Rust integer overflow in Meteora's InitializePosition.
+  // Note: single-sided bid_ask (bins_above=0) is fully valid — the SDK
+  // handles it natively via toWeightBidAsk(). Do NOT force symmetry.
+  const MAX_BINS = 200; // well within Meteora's 1400-bin position limit
+  {
+    const total = activeBinsBelow + activeBinsAbove;
+    if (total > MAX_BINS) {
+      const ratio = activeBinsAbove > 0 ? activeBinsAbove / total : 0;
+      activeBinsBelow = Math.min(activeBinsBelow, Math.floor(MAX_BINS * (1 - ratio)));
+      activeBinsAbove = Math.min(activeBinsAbove, MAX_BINS - activeBinsBelow);
+      log("deploy", `[guard] Clamped bins from ${total} to ${activeBinsBelow + activeBinsAbove} (max ${MAX_BINS}) — likely LLM hallucination`);
     }
   }
   // ────────────────────────────────────────────────────────────────────
