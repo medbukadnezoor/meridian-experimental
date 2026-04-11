@@ -5,7 +5,6 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
-import { confirmIndicatorPreset } from "./chart-indicators.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
