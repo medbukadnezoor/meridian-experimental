@@ -270,6 +270,27 @@ export async function deployPosition({
     activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
   }
 
+  // ── bid_ask protocol constraints ────────────────────────────────────
+  // 1. bid_ask requires bins on BOTH sides. bins_above=0 causes Rust u16 overflow
+  //    in Meteora's InitializePosition (N*(N+1) computation overflows when one side is 0).
+  //    Auto-mirror to make it symmetric rather than failing silently.
+  // 2. bid_ask cannot use the wide-range path (createExtendedEmptyPosition does not
+  //    support BidAsk strategy type). Hard-cap at 69 total bins.
+  if (activeStrategy === 'bid_ask') {
+    if (activeBinsAbove === 0) {
+      activeBinsAbove = activeBinsBelow;
+      log("deploy", `[bid_ask] bins_above was 0 — mirrored to ${activeBinsAbove} (bid_ask requires symmetric range)`);
+    }
+    const totalBidAsk = activeBinsBelow + activeBinsAbove;
+    if (totalBidAsk > 69) {
+      const half = Math.floor(69 / 2); // 34
+      activeBinsBelow = half;
+      activeBinsAbove = half + 1;      // 35 — 69 total, stays in standard path
+      log("deploy", `[bid_ask] Clamped from ${totalBidAsk} to 69 bins (${half}+${half + 1}) — wide-range path unsupported for bid_ask`);
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────
+
   if (process.env.DRY_RUN === "true") {
     const totalBins = activeBinsBelow + activeBinsAbove;
     return {
