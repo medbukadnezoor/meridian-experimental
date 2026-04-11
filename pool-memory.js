@@ -157,10 +157,11 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy for 12h
+  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy soon
+  // Duration configurable via config.management.stopLossCooldownHours (default: 12h)
   // (6h was too short — Iroha hit SL, waited 6h, deployed again, hit SL again)
   if (deploy.close_reason && /stop.loss/i.test(deploy.close_reason)) {
-    const cooldownHours = 12;
+    const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "stop loss");
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "stop loss");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (stop loss close)`);
