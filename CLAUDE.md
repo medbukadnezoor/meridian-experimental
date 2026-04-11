@@ -71,6 +71,14 @@ The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of 
 `single_sided_reseed` = EXIT strategy (token→SOL, high bins_above).
 `sol_dca_accumulator` = ENTRY strategy (SOL→token, bins_below=69, bins_above=0, bid_ask). Currently used as the active primary strategy.
 
+### Chart indicator philosophy (mean-reversion style)
+The active strategy is a passive accumulator (wide downside bins, tight stop-loss, small trailing TP). Indicator config is tuned accordingly:
+
+- **Entry** `entryPreset: rsi_reversal` — only allows new deploys when RSI ≤ 25 (deep oversold). Prevents chasing momentum or deploying into a pump. Correct behaviour for "buy weakness" accumulation.
+- **Exit** `exitPreset: null` — **disabled intentionally**. When null, `confirmIndicatorPreset()` returns `confirmed: true` unconditionally, meaning indicators never gate trailing TP, stop-loss, or OOR closes. This prevents the common failure mode where `supertrend_break` blocks exits during the exact conditions they're needed.
+- **Why not `supertrend_break` for exit?** Supertrend exit is a momentum-following gate — it fires on trend breaks, not on mean-reversion profit targets. It was blocking trailing TP and OOR closes in live Telegram reports. Not suitable for this style.
+- **Available presets (in codebase):** `supertrend_break`, `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`. (Note: some Telegram-mentioned presets like `bb_plus_rsi`, `fibo_reclaim` are NOT yet implemented.)
+
 > Upstream (yunus-0x/meridian) has actively reversed all 3 of these patches. Assume every rebase will drop them.
 
 ### NEVER without explicit operator instruction
@@ -170,6 +178,12 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
+| chartIndicators.entryPreset | indicators | rsi_reversal |
+| chartIndicators.exitPreset | indicators | null (disabled) |
+| chartIndicators.rsiOversold | indicators | 25 |
+| chartIndicators.rsiOverbought | indicators | 80 |
+
+**Per-role LLM override fields** (`managementBaseUrl`, `managementApiKey`, `generalBaseUrl`, `generalApiKey`) default to `null`. When null, the role falls back to the global `llmBaseUrl` + `llmApiKey`. Set them only if you want a specific role to use a different provider or model endpoint.
 
 **`computeDeployAmount(walletSol)`** — scales position size with wallet balance (compounding). Formula: `clamp(deployable × positionSizePct, floor=deployAmountSol, ceil=maxDeployAmount)`.
 
