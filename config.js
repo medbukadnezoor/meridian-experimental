@@ -37,8 +37,6 @@ if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 
-const indicatorUserConfig = u.chartIndicators ?? {};
-
 const fallbackModel = normalizeOptionalString(u.fallbackModel);
 
 export const config = {
