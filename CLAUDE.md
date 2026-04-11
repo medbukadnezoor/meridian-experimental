@@ -8,25 +8,47 @@ Autonomous DLMM liquidity provider agent for Meteora pools on Solana.
 
 **This bot runs with real SOL on Solana mainnet. These steps are non-negotiable.**
 
-### BEFORE restarting the bot (`node index.js`)
+### Bot runs on VPS — NOT locally
 
-Run patch verification first. If it fails, STOP and fix before proceeding:
+The bot runs under PM2 on VPS `ohox` (43.156.182.93). **Do NOT run `node index.js` locally on Mac.**
+
+```bash
+# To restart the bot (pull latest code + restart):
+ssh ohox mp
+
+# To restart without pulling (e.g. after config change already on VPS):
+ssh ohox "mr"
+
+# To check logs:
+ssh ohox "ml"
+```
+
+### BEFORE pushing code changes
+
+Run patch verification on Mac first. If it fails, STOP and fix before pushing:
 ```bash
 node scripts/verify-patches.js
 ```
-All checks must show ✅. If any show ❌, do not restart the bot.
+All checks must show ✅. If any show ❌, do not push or restart.
 
 ### BEFORE any `git rebase`
 
-Both steps are required, in order:
+All steps required, in order:
 ```bash
-# 1. Tag current HEAD
+# 1. Rsync live state from VPS back to Mac (Darwin weights live on VPS, not in git)
+rsync -avz ubuntu@ohox:~/meridian/signal-weights.json \
+            ubuntu@ohox:~/meridian/lessons.json \
+            ubuntu@ohox:~/meridian/pool-memory.json \
+            ./
+
+# 2. Tag current HEAD
 git tag -a vX.Y.Z-pre-rebase -m "Pre-rebase snapshot $(date +%Y-%m-%d)"
 
-# 2. Back up runtime state
+# 3. Back up runtime state
 bash scripts/backup-state.sh pre-rebase-$(date +%Y%m%d)
 ```
 Then rebase. Then immediately: `node scripts/verify-patches.js`
+Then push and deploy: `git push private experimental && ssh ohox mp`
 
 ### MANDATORY patches — must survive every rebase
 
@@ -35,6 +57,15 @@ Then rebase. Then immediately: `node scripts/verify-patches.js`
 | Stop-loss 6h cooldown on pool + mint | `pool-memory.js` | Bot re-enters dumping tokens immediately without this |
 | OPERATOR COMMAND Telegram wrapping | `index.js` | Prompt injection hardening — upstream keeps removing this |
 | `managementModel`/`screeningModel`/`generalModel` ABSENT from CONFIG_MAP | `tools/executor.js` | **Security**: LLM cannot mutate its own model routing |
+
+### Bin count guard (v1.0.7) — `tools/dlmm.js`
+The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of "69") which causes a Rust integer overflow in Meteora's `InitializePosition`. A general max-bins clamp (≤200 total) is applied after the `downside_pct` block — it preserves the `bins_above/bins_below` ratio and does NOT force symmetry. Single-sided `bid_ask` (`bins_above=0`) is **valid** and the SDK handles it natively via `toWeightBidAsk()`.
+
+### Strategy library vs user-config (architecture note)
+`strategy-library.json` takes full precedence over `user-config.json`'s `strategy` field. `index.js` calls `getActiveStrategy()` and injects the active entry into the screener system prompt as `ACTIVE STRATEGY: <name> — LP: <type>`. The LLM always uses the library entry. Changing `strategy` in `user-config.json` has **no effect** while a library strategy is active.
+
+`single_sided_reseed` = EXIT strategy (token→SOL, high bins_above).
+`sol_dca_accumulator` (proposed, not yet in library) = ENTRY strategy (SOL→token, bins_below=62, bins_above=0, bid_ask).
 
 > Upstream (yunus-0x/meridian) has actively reversed all 3 of these patches. Assume every rebase will drop them.
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## [v1.0.7] — 2026-04-11 — Bin count guard + strategy library clarification
+
+### Context
+Two bugs were diagnosed and fixed in this session:
+1. The LLM occasionally hallucinates large bin counts (690, 6910) by adding a spurious trailing zero to "69". This caused a Rust integer overflow (`attempt to multiply with overflow`) in Meteora's `InitializePosition` when the position object was constructed on-chain.
+2. The bot was deploying `spot` positions instead of the intended `bid_ask` because `strategy-library.json` (active: `custom_ratio_spot`) takes precedence over `user-config.json`'s `strategy` field in the screener prompt. The strategy library entry beats the config field every time.
+
+### Fixed
+- **Bin count guard in `tools/dlmm.js`**: General max-bins clamp (≤200 total bins) added after the `downside_pct` block. Preserves the `bins_above/bins_below` ratio when clamping. Does NOT force symmetry — single-sided `bid_ask` (`bins_above=0`) is valid and supported by the Meteora SDK (`toWeightBidAsk()` handles `maxBinId == activeId` natively by setting `diffMaxWeight = 0`). An earlier wrong fix that forced `bins_above = bins_below` was identified and reverted (`dd2eff8` → `3a07e36`).
+
+### Clarified (docs + strategy library)
+- **Strategy selection conflict**: `index.js` calls `getActiveStrategy()` from `strategy-library.json` and injects the result into the screener system prompt as `ACTIVE STRATEGY: <name> — LP: <type>`. This overrides the `user-config.json` `strategy` field. To deploy `bid_ask`, the active strategy in the library must be set to a `bid_ask`-type strategy (e.g. `single_sided_reseed`), not through `user-config.json`.
+- **`single_sided_reseed` is an EXIT strategy** (token → SOL), not an entry/accumulation strategy. For SOL→token accumulation during drawdowns, use a `bid_ask`-type strategy with 50-69 bins below. LP Army consensus: this captures max fee income on mean-reversion bounces, which is the dominant profitability pattern in volatile memecoins.
+- **`sol_dca_accumulator` proposal**: A new strategy type built on `bid_ask` with `bins_above=0` (or ≤5 bins above for asymmetric cover), `bins_below=55-69`, deploying only the SOL side. Named after the DCA accumulation pattern. Not yet in strategy-library.json — can be added as a new entry with `lp_strategy: "bid_ask"`, `bins_below: 62`, `bins_above: 0`.
+
+### Verification
+- `node --check tools/dlmm.js` ✓
+- `node scripts/verify-patches.js` — all checks passed before push
+
+---
+
 ## [v1.0.6] — 2026-04-11 — LP Army config experiment + GMGN Phase 1 enrichment
 
 ### Context
