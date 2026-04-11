@@ -164,7 +164,9 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | gasReserve | management | 0.2 |
 | positionSizePct | management | 0.35 |
 | minSolToOpen | management | 0.55 |
-| outOfRangeWaitMinutes | management | 30 |
+| outOfRangeWaitMinutes | management | 180 |
+| outOfRangeHardCloseMinutes | management | 240 |
+| outOfRangeBinsToClose | management | 50 |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | 30 |
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
