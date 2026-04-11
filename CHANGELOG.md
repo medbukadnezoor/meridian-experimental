@@ -1,5 +1,59 @@
 # Changelog
 
+## [v1.0.9] — 2026-04-12 — Upstream rebase: decision log, server indicators, relay fallback
+
+### Adopted from upstream (yunus-0x/meridian experimental branch)
+
+- **Decision log** (`decision-log.js`): records last 100 deploy/skip/close decisions with
+  reason, risks, and rejected candidates. Injected into system prompt so LLM can reference
+  its own history. Adds `get_recent_decisions` tool — answers "why did you skip?" / "why
+  did you close?" via Telegram without requiring an LLM call.
+
+- **Server-backed chart indicator confirmations** (`tools/chart-indicators.js`): fetches
+  RSI, Bollinger Bands, and Supertrend from Agent Meridian `/api/chart-indicators/{mint}`
+  (server-cached, 30min refresh). Evaluates entry/exit presets against live data.
+  - Entry gate applied in `getTopCandidates()` — filters candidates that don't meet preset.
+  - Exit gate applied in management cycle before deterministic close rules fire.
+  - Stop-loss hard-closes bypass the indicator gate entirely (time-critical).
+  - OOR hard-close uses `indicatorPolicy: "bypass"` to skip indicator gate at timeout.
+  - With `exitPreset: null` (current config), exits are always confirmed — no behavior change.
+  - API failures fall back to `confirmed: true` gracefully.
+  - Adds `requireAllIntervals` config key (default false): require RSI on ALL intervals vs any.
+
+- **Agent Meridian relay fallback** (`bc873bb`): `getPositionPnl` and `getMyPositions` relay
+  calls now wrapped in try/catch — transient relay errors fall through to Meteora SDK path
+  instead of hard-erroring. `lpAgentRelayEnabled: false` in config means no behavior change.
+
+- **`indicatorPolicy` on close rules**: hard OOR and stop-loss rules now carry
+  `indicatorPolicy: "bypass"` so they aren't blocked by exit indicator gates even if
+  exitPreset is later enabled.
+
+- **`urgent` flag on close rules** (PnL poll): non-management-cycle close rules can carry
+  `urgent: true` to bypass the management-cycle poll cooldown.
+
+### Merge conflict resolutions
+- Indicator entry filter + Darwin ranking combined in `getTopCandidates()`: indicators filter
+  first, then Darwin ranks the survivors.
+- Stop-loss in PnL poll still bypasses indicator check and poll cooldown (fast path preserved).
+- All formatting conflicts resolved in favour of upstream style.
+
+### Verification
+- `node scripts/verify-patches.js` — 12/12 ✅
+- All mandatory patches survive the rebase.
+
+---
+
+## [v1.0.8] — 2026-04-12 — All LLM roles on qwen3.6-plus/DashScope + configurable SL cooldown
+
+- All three roles (screener, manager, general) now route to qwen3.6-plus via DashScope
+  Singapore endpoint. VPS user-config updated.
+- Stop-loss cooldown extracted from hardcoded 12h to configurable `stopLossCooldownHours`
+  in user-config (default 12h, no behavior change at current value).
+- `CLAUDE.md` corrections: OOR hard close 20m → 240m, lessons.js ghost bug removed,
+  cooldown architecture documented.
+
+---
+
 ## [v1.0.7] — 2026-04-11 — Bin count guard + strategy library clarification
 
 ### Context
