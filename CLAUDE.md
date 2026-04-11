@@ -31,6 +31,9 @@ node scripts/verify-patches.js
 ```
 All checks must show ✅. If any show ❌, do not push or restart.
 
+**Authentication for `git push`**: 
+Use the `GITHUB_PERSONAL_ACCESS_TOKEN` stored in the workspace-level `.env` file (`/Users/user/Trading Project Files/DLMM/.env`). If prompted for a password during `git push`, use this PAT instead of your account password.
+
 ### BEFORE any `git rebase`
 
 All steps required, in order:
