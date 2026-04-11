@@ -150,6 +150,39 @@ export function minutesOutOfRange(position_address) {
   return Math.floor(ms / 60000);
 }
 
+export function getOutOfRangeExitPolicy(minutesOOR, mgmtConfig = {}) {
+  const softMinutes = Number(mgmtConfig.outOfRangeWaitMinutes ?? 30);
+  if (!Number.isFinite(minutesOOR) || !Number.isFinite(softMinutes) || minutesOOR < softMinutes) {
+    return null;
+  }
+
+  const rawHardMinutes = mgmtConfig.outOfRangeHardCloseMinutes;
+  const parsedHardMinutes = rawHardMinutes == null ? null : Number(rawHardMinutes);
+  const hardMinutes = Number.isFinite(parsedHardMinutes) && parsedHardMinutes >= softMinutes
+    ? parsedHardMinutes
+    : null;
+
+  if (hardMinutes != null && minutesOOR >= hardMinutes) {
+    return {
+      stage: "hard",
+      urgent: true,
+      indicatorPolicy: "bypass",
+      softMinutes,
+      hardMinutes,
+      reason: `Out of range for ${minutesOOR}m (soft ${softMinutes}m, hard ${hardMinutes}m)`,
+    };
+  }
+
+  return {
+    stage: "soft",
+    urgent: false,
+    indicatorPolicy: "confirm",
+    softMinutes,
+    hardMinutes,
+    reason: `Out of range for ${minutesOOR}m (limit: ${softMinutes}m)`,
+  };
+}
+
 /**
  * Record a fee claim event.
  */
@@ -463,10 +496,15 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   // ── Out of range too long ──────────────────────────────────────
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
-    if (minutesOOR >= mgmtConfig.outOfRangeWaitMinutes) {
+    const oorExit = getOutOfRangeExitPolicy(minutesOOR, mgmtConfig);
+    if (oorExit) {
       return {
         action: "OUT_OF_RANGE",
-        reason: `Out of range for ${minutesOOR}m (limit: ${mgmtConfig.outOfRangeWaitMinutes}m)`,
+        reason: oorExit.reason,
+        oor_stage: oorExit.stage,
+        urgent: oorExit.urgent,
+        indicatorPolicy: oorExit.indicatorPolicy,
+        minutes_out_of_range: minutesOOR,
       };
     }
   }

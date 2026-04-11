@@ -286,6 +286,7 @@ const FIELD_SECTIONS = [
       { key: "autoSwapAfterClaim", label: "Auto swap after claim? (true/false)", type: "boolean" },
       { key: "outOfRangeBinsToClose", label: "Bins above range to force close", type: "number", min: 0 },
       { key: "outOfRangeWaitMinutes", label: "Minutes OOR before close", type: "number", min: 1 },
+      { key: "outOfRangeHardCloseMinutes", label: "Hard OOR close minutes (or null)", type: "number", min: 1, nullable: true },
       { key: "oorCooldownTriggerCount", label: "OOR cooldown trigger count", type: "number", min: 1 },
       { key: "oorCooldownHours", label: "OOR cooldown hours", type: "number", min: 1 },
       { key: "minVolumeToRebalance", label: "Min volume to rebalance", type: "number", min: 0 },

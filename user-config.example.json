@@ -48,6 +48,7 @@
   "autoSwapAfterClaim": false,
   "outOfRangeBinsToClose": 10,
   "outOfRangeWaitMinutes": 30,
+  "outOfRangeHardCloseMinutes": null,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 12,
   "minVolumeToRebalance": 1000,

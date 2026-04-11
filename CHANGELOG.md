@@ -1,5 +1,55 @@
 # Changelog
 
+## [v1.0.6] — 2026-04-11 — LP Army config experiment + GMGN Phase 1 enrichment
+
+### Context
+LP Army strategy research (badattrading methodology + 5-hypothesis corpus) translated into
+concrete config changes. OKX enrichment was confirmed unreliable, so GMGN API was wired in
+as the primary token risk enrichment source. Darwin signal set expanded from 15 to 17.
+
+### Added
+- **`tools/gmgn.js`**: New module fetching `token_top_traders` from GMGN Agent API.
+  Computes 10 risk signals per token: `top10_concentration_pct`, `bluechip_count`,
+  `bundler_count`, `fresh_wallet_count`, `sandwich_bot_count`, `suspicious_count`,
+  `whale_count`, `diamond_hands_count`, `smart_tool_tags[]`, `named_holder_count`.
+  Auth: `X-APIKEY` header + per-request UUID `client_id`. Never throws — returns null on
+  any error. Called in the 4-way parallel `Promise.allSettled` per candidate (alongside
+  smartWallets / narrative / tokenInfo). Key from `.env` GMGN_API_KEY.
+- **GMGN candidate block line**: Every screened pool now shows:
+  `gmgn: top10=X%, bluechip=N, bundler=N⚠, fresh_wallets=N, tools=[axiom,photon]`
+  or `gmgn: unavailable` if the API fails.
+- **2 new Darwin signals**: `gmgn_bluechip_present` (boolean, direction=higher) and
+  `gmgn_bundler_present` (boolean, direction=lower). Both start at 1.000 neutral.
+  Flows through `getCandidateSignalSnapshot` → `rankCandidatesByDarwin` → `stageSignals`.
+- **Hard-filter: mint authority enabled** (Phase 0): Tokens with `mint_disabled === false`
+  are hard-rejected before the LLM sees them. Data already available from Jupiter audit.
+  (`index.js` ~line 506)
+- **Hard-filter: freeze authority enabled** (Phase 0): Same for `freeze_disabled === false`.
+
+### Changed
+- **`minFeeActiveTvlRatio`: 0.05 → 0.15** — LP Army HYP-SEL-002 crowding filter.
+  Eliminates thin-TVL pools where fee dilution is already advanced.
+- **`maxPositions`: 2 → 4** — Accelerates Darwin learning (more concurrent positions =
+  more closes per week). Target: 25-35 closes/week for faster weight convergence.
+- **`minBinStep`: 80 → 100** — Proxy for LP Army HYP-SEL-001 (5-10% base fee preference
+  for memecoins). No direct base_fee filter exists yet; binStep 100 correlates with higher
+  base fees. Note: `minBinStep` changed post-v1.0.5 in `user-config.json` only.
+- **`outOfRangeHardCloseMinutes`: 20** — Enables hard OOR exit path already built in
+  `state.js`. When set, OOR positions bypass the LLM and close immediately at 20 minutes.
+
+### GMGN coverage notes (for future phases)
+- ✅ Bluechip/quality holder detection, bundler presence, fresh wallet (sniper proxy),
+     top10 concentration, smart tool presence (photon, padre, axiom, bullx, trojan)
+- ❌ Insider/sniper/team % → DevsNightmarePro (Telegram CLI only, Phase 3)
+- ❌ Cluster/BubbleMaps structure → InsightX (Phase 2, `tools/insightx.js`)
+- ❌ Exchange-funded wallets → Helius
+
+### Verification
+- All 12 `verify-patches.js` checks pass
+- `node --check` clean on all 5 modified files
+
+---
+
 ## [v1.0.5] — 2026-04-10 — April 10 forensic analysis fixes (exit & re-entry hardening)
 
 ### Context
