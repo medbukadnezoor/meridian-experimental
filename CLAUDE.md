@@ -57,10 +57,10 @@ Then push and deploy: `git push private experimental && ssh ohox mp`
 
 | Patch | File | Why |
 |-------|------|-----|
-| Stop-loss 6h cooldown on pool + mint | `pool-memory.js` | Bot re-enters dumping tokens immediately without this |
+| Stop-loss 12h cooldown on pool + mint | `pool-memory.js` | Bot re-enters dumping tokens immediately without this. Now also configurable via `stopLossCooldownHours` in user-config. |
 | OPERATOR COMMAND Telegram wrapping | `index.js` | Prompt injection hardening — upstream keeps removing this |
 | `managementModel`/`screeningModel`/`generalModel` ABSENT from CONFIG_MAP | `tools/executor.js` | **Security**: LLM cannot mutate its own model routing |
-| Qwen DashScope `tool_choice` rejection fix | `agent.js` | DashScope API natively rejects `required` tool choice for all Qwen models, causing unnecessary 1s round-trip penalties and API errors before auto-retry |
+| Qwen DashScope `tool_choice` rejection fix | `agent.js` | DashScope thinking mode rejects `tool_choice: "required"`. Code drops parameter on error and retries — confirmed working. 25 screener "errors" in logs are expected retry events, not failures. |
 
 ### Bin count guard (v1.0.7) — `tools/dlmm.js`
 The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of "69") which causes a Rust integer overflow in Meteora's `InitializePosition`. A general max-bins clamp (≤200 total) is applied after the `downside_pct` block — it preserves the `bins_above/bins_below` ratio and does NOT force symmetry. Single-sided `bid_ask` (`bins_above=0`) is **valid** and the SDK handles it natively via `toWeightBidAsk()`.
@@ -332,5 +332,6 @@ Not required for normal operation.
 
 ## Known Issues / Tech Debt
 
-- `lessons.js evolveThresholds()` evolves `maxVolatility` + `minFeeTvlRatio` (wrong key names — should be `minFeeActiveTvlRatio`; `maxVolatility` doesn't exist in config at all). The evolution is a no-op for those keys.
-- `get_wallet_positions` tool (dlmm.js) is in definitions.js but not in MANAGER_TOOLS or SCREENER_TOOLS — only available in GENERAL role.
+- `lessons.js evolveThresholds()` — code is CORRECT (uses `minFeeActiveTvlRatio` and `minOrganic`). The previous "wrong key names" bug is fixed. Old CLAUDE.md documentation was stale. What it actually does: every 5 closes, nudges `minFeeActiveTvlRatio` and `minOrganic` up when winners consistently separate from losers. Max 20% per step; writes to user-config.json and applies immediately.
+- `get_wallet_positions` tool — only available in GENERAL role (not in SCREENER_TOOLS or MANAGER_TOOLS). This is intentional: the autonomous agents use `getMyPositions()` (on-chain LP positions) not wallet balance lookups. Not blocking normal operation.
+- Stop-loss cooldown (12h), low-yield cooldown (4h), anti-chase cooldown (2h) are hardcoded in `pool-memory.js`. They are NOT user-config keys. `stopLossCooldownHours` has been added to make the stop-loss cooldown configurable.
