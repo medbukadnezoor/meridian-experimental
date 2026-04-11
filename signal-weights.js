@@ -33,6 +33,9 @@ const SIGNAL_NAMES = [
   "change_1h",
   "candle_price_range",
   "okx_signal_present",
+  // GMGN-derived signals — populated when GMGN API is available
+  "gmgn_bluechip_present",
+  "gmgn_bundler_present",
 ];
 
 const DEFAULT_WEIGHTS = Object.fromEntries(SIGNAL_NAMES.map((signal) => [signal, 1.0]));
@@ -48,11 +51,13 @@ const DEFAULT_DIRECTIONS = {
   ath_proximity: "lower",
   volume_trend: "higher",
   change_1h: "higher",
-  candle_price_range: "lower",
-  okx_signal_present: "higher",
+  candle_price_range:    "lower",
+  okx_signal_present:    "higher",
+  gmgn_bluechip_present: "higher",  // bluechip holder = quality signal
+  gmgn_bundler_present:  "lower",   // bundler in supply = risk signal
 };
 
-const BOOLEAN_SIGNALS = new Set(["smart_wallets_present", "okx_signal_present"]);
+const BOOLEAN_SIGNALS = new Set(["smart_wallets_present", "okx_signal_present", "gmgn_bluechip_present", "gmgn_bundler_present"]);
 const CATEGORICAL_SIGNALS = new Set(["narrative_quality", "volume_trend"]);
 
 function sanitizeWeights(rawWeights = {}) {

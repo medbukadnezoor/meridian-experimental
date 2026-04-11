@@ -116,6 +116,7 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `category` | `trending` | Pool category filter for screening |
 | `takeProfitPct` | `5` | Close position when PnL reaches this % threshold |
 | `outOfRangeWaitMinutes` | `30` | Minutes a position can be out of range before alerting / acting |
+| `outOfRangeHardCloseMinutes` | `null` | Optional hard OOR cap that bypasses indicator confirmation once reached |
 
 ---
 
@@ -172,6 +173,7 @@ Security notes:
 - After every management cycle: full agent report (reasoning + decisions)
 - After every screening cycle: full agent report (what it found, whether it deployed)
 - When a position goes out of range past `outOfRangeWaitMinutes`
+- When a position reaches `outOfRangeHardCloseMinutes`, the bot escalates to a hard OOR close path and skips indicator vetoes
 - On deploy: pair, amount, position address, tx hash
 - On close: pair and PnL
 

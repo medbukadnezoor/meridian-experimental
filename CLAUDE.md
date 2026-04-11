@@ -140,10 +140,26 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 ## Position Lifecycle
 
-1. **Deploy**: `deploy_position` → executor safety checks → `trackPosition()` in state.js → Telegram notify
+1. **Deploy**: 5-tool parallel fetch (see below) → SCREENER decides → `deploy_position` → executor safety checks → `trackPosition()` in state.js → Telegram notify
 2. **Monitor**: management cron → `getMyPositions()` → `getPositionPnl()` → OOR detection → pool-memory snapshots
 3. **Close**: `close_position` → `recordPerformance()` in lessons.js → auto-swap base token to SOL → Telegram notify
 4. **Learn**: `evolveThresholds()` runs on performance data → updates config.screening → persists to user-config.json
+
+---
+
+## Screener Parallel Fetch (prompt.js — GENERAL role)
+
+Before every deploy, the SCREENER calls **5 tools in a single parallel batch** (not sequentially):
+
+| Tool | Purpose |
+|------|---------|
+| `get_pool_detail` | Current TVL, volume, fee/TVL, bin step, volatility |
+| `check_smart_wallets_on_pool` | Are tracked smart wallets active here? |
+| `get_token_holders` | Holder distribution, global fees, organic score |
+| `get_token_narrative` | Is there a real story? Narrative quality signal |
+| `study_top_lpers` | Winner positioning: avg hold time, range width, scalper vs holder dominance, suggested_range |
+
+`study_top_lpers` data is used as a **prior** to calibrate `bins_below` and strategy choice. It does NOT override the formula or lessons. If it returns an error, the deploy proceeds on the remaining four signals.
 
 ---
 

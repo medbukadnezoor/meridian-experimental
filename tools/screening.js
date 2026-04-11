@@ -588,20 +588,23 @@ export function getCandidateSignalSnapshot(candidate = {}) {
     return "stable";
   })();
   return {
-    organic_score: c.organic_score ?? c.base?.organic ?? null,
-    fee_tvl_ratio: c.fee_active_tvl_ratio ?? c.fee_tvl_ratio ?? null,
-    volume: c.volume_window ?? c.volume ?? null,
-    mcap: c.mcap ?? null,
-    holder_count: c.holders ?? c.holder_count ?? null,
+    organic_score:         c.organic_score ?? c.base?.organic ?? null,
+    fee_tvl_ratio:         c.fee_active_tvl_ratio ?? c.fee_tvl_ratio ?? null,
+    volume:                c.volume_window ?? c.volume ?? null,
+    mcap:                  c.mcap ?? null,
+    holder_count:          c.holders ?? c.holder_count ?? null,
     smart_wallets_present: c._smartWalletCount != null ? c._smartWalletCount > 0 : c.smart_wallets_present ?? null,
-    narrative_quality: c.narrative_quality ?? null,
-    volatility: c.volatility ?? null,
-    ath_proximity: c.price_vs_ath_pct ?? c.ath_proximity ?? null,
-    volume_trend: volumeTrend,
-    okx_signal_present: okxSignalPresent,
-    change_1h: c.change_1h ?? c.price_change ?? c.price_change_pct ?? null,
-    candle_price_range: c.candle_price_range ?? null,
-    token_age_hours: c.token_age_hours ?? null,
+    narrative_quality:     c.narrative_quality ?? null,
+    volatility:            c.volatility ?? null,
+    ath_proximity:         c.price_vs_ath_pct ?? c.ath_proximity ?? null,
+    volume_trend:          volumeTrend,
+    okx_signal_present:    okxSignalPresent,
+    change_1h:             c.change_1h ?? c.price_change ?? c.price_change_pct ?? null,
+    candle_price_range:    c.candle_price_range ?? null,
+    token_age_hours:       c.token_age_hours ?? null,
+    // GMGN-derived signals — populated when GMGN API is available
+    gmgn_bluechip_present: c.gmgn_bluechip_present ?? null,
+    gmgn_bundler_present:  c.gmgn_bundler_present  ?? null,
   };
 }
 

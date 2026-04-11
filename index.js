@@ -11,11 +11,12 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
+import { fetchGmgnTokenRisk } from "./tools/gmgn.js";
 import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
@@ -244,7 +245,7 @@ export async function runManagementCycle({ silent = false } = {}) {
           }
           continue;
         }
-        exitMap.set(p.position, exit.reason);
+        exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
     }
@@ -255,15 +256,24 @@ export async function runManagementCycle({ silent = false } = {}) {
     for (const p of positionData) {
       // Hard exit — highest priority (with optional indicator gate)
       if (exitMap.has(p.position)) {
-        const indicatorConfirmation = await confirmExitIndicator(p, exitMap.get(p.position));
-        if (!indicatorConfirmation.confirmed) {
-          actionMap.set(p.position, {
-            action: "STAY",
-            indicatorHold: indicatorConfirmation.reason,
-          });
-          continue;
+        const exit = exitMap.get(p.position);
+        if ((exit.indicatorPolicy ?? "confirm") !== "bypass") {
+          const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
+          if (!indicatorConfirmation.confirmed) {
+            log(
+              "indicators",
+              `Exit indicator hold for ${p.pair} (${p.position.slice(0, 8)}) — requested close "${exit.reason}" blocked: ${indicatorConfirmation.reason}`,
+            );
+            actionMap.set(p.position, { action: "STAY", indicatorHold: indicatorConfirmation.reason });
+            continue;
+          }
+        } else {
+          log(
+            "indicators",
+            `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${exit.reason}`,
+          );
         }
-        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exit.reason });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -274,13 +284,21 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
-        const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
-        if (!indicatorConfirmation.confirmed) {
-          actionMap.set(p.position, {
-            action: "STAY",
-            indicatorHold: indicatorConfirmation.reason,
-          });
-          continue;
+        if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
+          const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
+          if (!indicatorConfirmation.confirmed) {
+            log(
+              "indicators",
+              `Rule-based exit indicator hold for ${p.pair} (${p.position.slice(0, 8)}) — requested close "${closeRule.reason}" blocked: ${indicatorConfirmation.reason}`,
+            );
+            actionMap.set(p.position, { action: "STAY", indicatorHold: indicatorConfirmation.reason });
+            continue;
+          }
+        } else {
+          log(
+            "indicators",
+            `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${closeRule.reason}`,
+          );
         }
         actionMap.set(p.position, closeRule);
         continue;
@@ -305,7 +323,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
+      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
@@ -336,7 +354,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         return [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Exit trigger: ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
@@ -465,17 +483,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
     const allCandidates = [];
     for (const pool of candidates) {
       const mint = pool.base?.mint;
-      const [smartWallets, narrative, tokenInfo] = await Promise.allSettled([
+      const [smartWallets, narrative, tokenInfo, gmgnRisk] = await Promise.allSettled([
         checkSmartWalletsOnPool({ pool_address: pool.pool }),
         mint ? getTokenNarrative({ mint }) : Promise.resolve(null),
         mint ? getTokenInfo({ query: mint }) : Promise.resolve(null),
+        mint ? fetchGmgnTokenRisk(mint) : Promise.resolve(null),
       ]);
       allCandidates.push({
         pool,
-        sw: smartWallets.status === "fulfilled" ? smartWallets.value : null,
-        n: narrative.status === "fulfilled" ? narrative.value : null,
-        ti: tokenInfo.status === "fulfilled" ? tokenInfo.value?.results?.[0] : null,
-        mem: recallForPool(pool.pool),
+        sw:   smartWallets.status === "fulfilled" ? smartWallets.value               : null,
+        n:    narrative.status    === "fulfilled" ? narrative.value                  : null,
+        ti:   tokenInfo.status    === "fulfilled" ? tokenInfo.value?.results?.[0]    : null,
+        gmgn: gmgnRisk.status     === "fulfilled" ? gmgnRisk.value                   : null,
+        mem:  recallForPool(pool.pool),
       });
       await new Promise(r => setTimeout(r, 150)); // avoid 429s
     }
@@ -501,6 +521,18 @@ export async function runScreeningCycle({ silent = false } = {}) {
         filteredOut.push({ name: pool.name, reason: `bot holders ${botPct}% > ${maxBotHoldersPct}%` });
         return false;
       }
+      const mintDisabled = ti?.audit?.mint_disabled;
+      if (mintDisabled === false) {
+        log("screening", `Audit filter: dropped ${pool.name} — mint authority still enabled`);
+        filteredOut.push({ name: pool.name, reason: "mint authority still enabled" });
+        return false;
+      }
+      const freezeDisabled = ti?.audit?.freeze_disabled;
+      if (freezeDisabled === false) {
+        log("screening", `Audit filter: dropped ${pool.name} — freeze authority still enabled`);
+        filteredOut.push({ name: pool.name, reason: "freeze authority still enabled" });
+        return false;
+      }
       return true;
     });
 
@@ -514,7 +546,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
         .join("\n");
       screenReport = combinedExamples
         ? `No candidates available.\nFiltered examples:\n${combinedExamples}`
-        : `No candidates available (all filtered by launchpad / holder-quality rules).`;
+        : `No candidates available (all filtered by launchpad / holder-quality / contract-safety rules).`;
       appendDecision({
         type: "no_deploy",
         actor: "SCREENER",
@@ -530,7 +562,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
     );
 
-    const enrichedPassing = passing.map(({ pool, sw, n, ti, mem }, i) => {
+    const enrichedPassing = passing.map(({ pool, sw, n, ti, gmgn, mem }, i) => {
       const priceChange = ti?.stats_1h?.price_change;
       const activeBin = activeBinResults[i]?.status === "fulfilled" ? activeBinResults[i].value?.binId : null;
       const volumeTrend = (() => {
@@ -542,14 +574,17 @@ export async function runScreeningCycle({ silent = false } = {}) {
       })();
       const rankedPool = {
         ...pool,
-        _smartWalletCount: sw?.in_pool?.length || 0,
-        holder_count: ti?.holders ?? null,
-        narrative_quality: n?.narrative ? "present" : "absent",
-        volume_trend: volumeTrend,
-        change_1h: priceChange ?? null,
-        token_age_hours: pool.token_age_hours ?? null,
+        _smartWalletCount:    sw?.in_pool?.length || 0,
+        holder_count:         ti?.holders ?? null,
+        narrative_quality:    n?.narrative ? "present" : "absent",
+        volume_trend:         volumeTrend,
+        change_1h:            priceChange ?? null,
+        token_age_hours:      pool.token_age_hours ?? null,
+        // GMGN Darwin booleans — flow into getCandidateSignalSnapshot → Darwin scoring
+        gmgn_bluechip_present: gmgn?.bluechip_present ?? null,
+        gmgn_bundler_present:  gmgn?.bundler_present  ?? null,
       };
-      return { pool: rankedPool, sw, n, ti, mem, activeBin };
+      return { pool: rankedPool, sw, n, ti, gmgn, mem, activeBin };
     });
 
     const rankedCandidates = rankCandidatesByDarwin(enrichedPassing.map((entry) => entry.pool));
@@ -559,10 +594,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
     // Build compact candidate blocks
     const candidateBlocks = rankedCandidates.map((pool) => {
       const detail = detailMap.get(pool.pool);
-      const sw = detail?.sw;
-      const n = detail?.n;
-      const ti = detail?.ti;
-      const mem = detail?.mem;
+      const sw   = detail?.sw;
+      const n    = detail?.n;
+      const ti   = detail?.ti;
+      const gmgn = detail?.gmgn;
+      const mem  = detail?.mem;
       const activeBin = detail?.activeBin ?? null;
       const botPct = ti?.audit?.bot_holders_pct ?? "?";
       const top10Pct = ti?.audit?.top_holders_pct ?? "?";
@@ -605,6 +641,19 @@ export async function runScreeningCycle({ silent = false } = {}) {
         okxParts ? `  okx: ${okxParts}` : okxUnavailable ? `  okx: unavailable` : null,
         okxTags  ? `  tags: ${okxTags}` : null,
         pool.price_vs_ath_pct != null ? `  ath: price_vs_ath=${pool.price_vs_ath_pct}%${pool.top_cluster_trend ? `, top_cluster=${pool.top_cluster_trend}` : ""}` : null,
+        (() => {
+          if (!gmgn) return `  gmgn: unavailable`;
+          const parts = [
+            `top10=${gmgn.top10_concentration_pct}%`,
+            gmgn.bluechip_count   > 0 ? `bluechip=${gmgn.bluechip_count}`       : null,
+            gmgn.bundler_count    > 0 ? `bundler=${gmgn.bundler_count}⚠`        : null,
+            gmgn.fresh_wallet_count > 0 ? `fresh_wallets=${gmgn.fresh_wallet_count}` : null,
+            gmgn.sandwich_bot_count > 0 ? `sandwich_bot=${gmgn.sandwich_bot_count}` : null,
+            gmgn.suspicious_count > 0 ? `suspicious=${gmgn.suspicious_count}⚠`  : null,
+            gmgn.smart_tool_tags.length > 0 ? `tools=[${gmgn.smart_tool_tags.join(",")}]` : null,
+          ].filter(Boolean).join(", ");
+          return `  gmgn: ${parts}`;
+        })(),
         `  smart_wallets: ${sw?.in_pool?.length ?? 0} present${sw?.in_pool?.length ? ` → CONFIDENCE BOOST (${sw.in_pool.map((wallet) => wallet.name).join(", ")})` : ""}`,
         activeBin != null ? `  active_bin: ${activeBin}` : null,
         priceChange != null ? `  1h: price${priceChange >= 0 ? "+" : ""}${priceChange}%, net_buyers=${netBuyers ?? "?"}` : null,
@@ -806,11 +855,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
             })();
             break;
           }
+          const bypassPollCooldown = !!exit.urgent;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (bypassPollCooldown || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — triggering management`);
+            const triggerLabel = bypassPollCooldown
+              ? "triggering management immediately"
+              : "triggering management";
+            log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — ${triggerLabel}`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Exit alert: ${p.pair} — ${exit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -849,11 +902,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
             log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
             continue;
           }
+          const bypassPollCooldown = !!closeRule.urgent;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
           const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
+          if (bypassPollCooldown || sinceLastTrigger >= cooldownMs) {
             _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management`);
+            const triggerLabel = bypassPollCooldown
+              ? "triggering management immediately"
+              : "triggering management";
+            log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — ${triggerLabel}`);
             runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
           } else {
             log("state", `[PnL poll] Deterministic close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
@@ -940,7 +997,14 @@ function getDeterministicCloseRule(position, managementConfig) {
     position.active_bin > position.upper_bin &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    return { action: "CLOSE", rule: 4, reason: "OOR" };
+    const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
+    return {
+      action: "CLOSE",
+      rule: 4,
+      reason: oorExit?.reason || "OOR",
+      indicatorPolicy: oorExit?.indicatorPolicy ?? "confirm",
+      urgent: oorExit?.urgent ?? false,
+    };
   }
   if (
     position.fee_per_tvl_24h != null &&
@@ -1014,7 +1078,7 @@ function formatConfigSnapshot() {
     `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses cooldown ✓`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
+    `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
     `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,

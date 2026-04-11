@@ -176,7 +176,11 @@ function isSystemRoleError(error) {
 function isToolChoiceRequiredError(error) {
   const message = String(error?.message || error?.error?.message || error || "");
   // DashScope thinking mode rejects tool_choice set to "required" or "object"
-  return /tool_choice/i.test(message) && (/required/i.test(message) || /object/i.test(message) || /thinking mode/i.test(message));
+  // OpenRouter returns 404 when the selected provider doesn't support tool_choice at all
+  return (
+    /tool_choice/i.test(message) &&
+    (/required/i.test(message) || /object/i.test(message) || /thinking mode/i.test(message) || /no endpoints found/i.test(message) || /does not support/i.test(message))
+  );
 }
 
 /**
@@ -229,8 +233,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       let response;
       let usedModel = activeModel;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
+      // GLM and similar models don't support tool_choice: "required" — use "auto" for those
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
-      let toolChoice = (step === 0 && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      const modelSupportsRequiredToolChoice = !/glm|qwen.*think|deepseek.*think/i.test(activeModel);
+      let toolChoice = (step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
       let providerIgnore = ["Parasail", "Nebius", "Together"];
 
       for (let attempt = 0; attempt < 3; attempt++) {
