@@ -235,7 +235,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       // GLM and similar models don't support tool_choice: "required" — use "auto" for those
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
-      const modelSupportsRequiredToolChoice = !/glm|qwen.*think|deepseek.*think/i.test(activeModel);
+      const modelSupportsRequiredToolChoice = !/glm|qwen|deepseek.*think/i.test(activeModel);
       let toolChoice = (step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
       let providerIgnore = ["Parasail", "Nebius", "Together"];
 

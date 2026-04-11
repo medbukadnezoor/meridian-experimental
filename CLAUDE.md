@@ -57,6 +57,7 @@ Then push and deploy: `git push private experimental && ssh ohox mp`
 | Stop-loss 6h cooldown on pool + mint | `pool-memory.js` | Bot re-enters dumping tokens immediately without this |
 | OPERATOR COMMAND Telegram wrapping | `index.js` | Prompt injection hardening — upstream keeps removing this |
 | `managementModel`/`screeningModel`/`generalModel` ABSENT from CONFIG_MAP | `tools/executor.js` | **Security**: LLM cannot mutate its own model routing |
+| Qwen DashScope `tool_choice` rejection fix | `agent.js` | DashScope API natively rejects `required` tool choice for all Qwen models, causing unnecessary 1s round-trip penalties and API errors before auto-retry |
 
 ### Bin count guard (v1.0.7) — `tools/dlmm.js`
 The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of "69") which causes a Rust integer overflow in Meteora's `InitializePosition`. A general max-bins clamp (≤200 total) is applied after the `downside_pct` block — it preserves the `bins_above/bins_below` ratio and does NOT force symmetry. Single-sided `bid_ask` (`bins_above=0`) is **valid** and the SDK handles it natively via `toWeightBidAsk()`.
@@ -65,7 +66,7 @@ The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of 
 `strategy-library.json` takes full precedence over `user-config.json`'s `strategy` field. `index.js` calls `getActiveStrategy()` and injects the active entry into the screener system prompt as `ACTIVE STRATEGY: <name> — LP: <type>`. The LLM always uses the library entry. Changing `strategy` in `user-config.json` has **no effect** while a library strategy is active.
 
 `single_sided_reseed` = EXIT strategy (token→SOL, high bins_above).
-`sol_dca_accumulator` (proposed, not yet in library) = ENTRY strategy (SOL→token, bins_below=62, bins_above=0, bid_ask).
+`sol_dca_accumulator` = ENTRY strategy (SOL→token, bins_below=69, bins_above=0, bid_ask). Currently used as the active primary strategy.
 
 > Upstream (yunus-0x/meridian) has actively reversed all 3 of these patches. Assume every rebase will drop them.
 
