@@ -1,5 +1,34 @@
 # Changelog
 
+## [v1.0.9-docs] — 2026-04-12 — Docs audit: Darwin signal table, roadmap, AGENTS.md sync
+
+### Documentation only — no code changes, no restart required
+
+- **AGENTS.md / CLAUDE.md synced**: Both files now accurate at v1.0.9 state.
+  - All three LLM roles confirmed on `qwen3.6-plus` / DashScope Singapore.
+  - OOR hard close corrected to 240m (was 20m in AGENTS.md).
+  - Strategy library table updated: `sol_dca_accumulator` marked as ACTIVE.
+  - Removed stale unknowns (sol_dca_accumulator not yet added — it is already active).
+
+- **Darwin signal table added**: 15 signals confirmed active in `signal-weights.js`.
+  - Original 8: organic_score, fee_tvl_ratio, volume, mcap, holder_count,
+    smart_wallets_present, narrative_quality, volatility.
+  - Extended (added in `ded4a58`): ath_proximity, volume_trend, change_1h,
+    candle_price_range, okx_signal_present.
+  - GMGN (added in v1.0.6): gmgn_bluechip_present, gmgn_bundler_present.
+  - Darwin evolution hardening confirmed: `getEnvironmentSnapshot()` only
+    snapshots screening thresholds, so Darwin weight recalcs do NOT invalidate
+    autoresearch shadow trials.
+
+- **Roadmap restructured**: Phase 2 (InsightX), Phase 3 (GMGN signal promotion),
+  and Future Roadmap (Knowledge Base, multi-provider fallback, active autoresearch)
+  clearly separated as deferred until bot is stable + profitable.
+
+- **fciaf420/meridian analysis completed** (feature/upstream-merge branch):
+  - Tier 1 (4 new Darwin signals + evolution hardening): already implemented in v1.0.9.
+  - Tier 2 deferred: Knowledge Base system, multi-provider LLM fallback.
+  - Tier 3 skipped: autoresearch section rotation (academic), nuggets packaging.
+
 ## [v1.0.9] — 2026-04-12 — Upstream rebase: decision log, server indicators, relay fallback
 
 ### Adopted from upstream (yunus-0x/meridian experimental branch)
