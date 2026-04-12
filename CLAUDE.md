@@ -23,6 +23,31 @@ ssh ohox "mr"
 ssh ohox "ml"
 ```
 
+### Config change workflow — MANDATORY
+
+`user-config.json` is gitignored (contains secrets). **`user-config.example.json` is the canonical config reference — it mirrors every VPS setting with `YOUR_*` placeholders for secrets.**
+
+**ALL config changes must follow this order:**
+```
+1. Edit user-config.example.json locally  ← VPS intent, no secrets
+2. Commit + push to private/experimental
+3. ssh ohox "cd ~/meridian && git pull"
+4. Apply only the changed values to ~/meridian/user-config.json (keep real secrets)
+5. ssh ohox "bash -i -c 'mr'"             ← restart without re-pull
+```
+
+**NEVER edit VPS `user-config.json` without first committing to `user-config.example.json`.**
+
+To check for drift between VPS live config and the example at any time:
+```bash
+ssh ohox "cd ~/meridian && node scripts/config-check.js"
+```
+Exit 0 = clean. Any drift means the example is stale and must be updated before the next session.
+
+> **Why this matters:** VPS-only config edits make the live bot the only source of truth for its own settings. The next LLM session has no way to know what changed — it reads the example and gives wrong answers.
+
+---
+
 ### BEFORE pushing code changes
 
 Run patch verification on Mac first. If it fails, STOP and fix before pushing:
