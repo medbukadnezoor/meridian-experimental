@@ -193,8 +193,8 @@ export const config = {
   // ─── Chart Indicator Confirmations ────
   indicators: {
     enabled: indicatorUserConfig.enabled ?? false,
-    entryPreset: indicatorUserConfig.entryPreset ?? "supertrend_break",
-    exitPreset: indicatorUserConfig.exitPreset ?? "supertrend_break",
+    entryPreset: "entryPreset" in indicatorUserConfig ? indicatorUserConfig.entryPreset : "supertrend_break",
+    exitPreset: "exitPreset" in indicatorUserConfig ? indicatorUserConfig.exitPreset : "supertrend_break",
     rsiLength: indicatorUserConfig.rsiLength ?? 2,
     intervals: Array.isArray(indicatorUserConfig.intervals)
       ? indicatorUserConfig.intervals
