@@ -218,6 +218,46 @@ export function isBaseMintOnCooldown(baseMint) {
   );
 }
 
+/**
+ * Return all active cooldowns (pool-level and token/mint-level), sorted by time remaining ascending.
+ * Token cooldowns are deduplicated by base_mint.
+ */
+export function getActiveCooldowns() {
+  const db = load();
+  const now = new Date();
+  const items = [];
+  const mintSeen = new Set();
+
+  for (const [address, entry] of Object.entries(db)) {
+    if (entry.cooldown_until && new Date(entry.cooldown_until) > now) {
+      items.push({
+        type: "pool",
+        name: entry.name || address.slice(0, 8),
+        address,
+        until: entry.cooldown_until,
+        reason: entry.cooldown_reason || "unknown",
+        msRemaining: new Date(entry.cooldown_until) - now,
+      });
+    }
+    if (entry.base_mint && entry.base_mint_cooldown_until && new Date(entry.base_mint_cooldown_until) > now) {
+      if (!mintSeen.has(entry.base_mint)) {
+        mintSeen.add(entry.base_mint);
+        const tokenSymbol = (entry.name || "").split("-")[0] || entry.base_mint.slice(0, 6);
+        items.push({
+          type: "token",
+          name: tokenSymbol,
+          address: entry.base_mint,
+          until: entry.base_mint_cooldown_until,
+          reason: entry.base_mint_cooldown_reason || "unknown",
+          msRemaining: new Date(entry.base_mint_cooldown_until) - now,
+        });
+      }
+    }
+  }
+
+  return items.sort((a, b) => a.msRemaining - b.msRemaining);
+}
+
 // ─── Read ──────────────────────────────────────────────────────
 
 /**

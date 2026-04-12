@@ -13,7 +13,7 @@ import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isE
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
-import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
+import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
 import { fetchGmgnTokenRisk } from "./tools/gmgn.js";
@@ -1113,6 +1113,7 @@ function formatHelpText() {
     "/set <n> <note> — set note/instruction on position",
     "/config — show important runtime config",
     "/setcfg <key> <value> — update persisted config",
+    "/cooldowns — active pool + token cooldowns with countdown",
     "/screen — refresh deterministic candidate list",
     "/candidates — show latest cached candidates",
     "/deploy <n> — deploy candidate by cached index",
@@ -1248,6 +1249,33 @@ async function telegramHandler(msg) {
 
   if (text === "/config") {
     await sendMessage(formatConfigSnapshot()).catch(() => {});
+    return;
+  }
+
+  if (text === "/cooldowns") {
+    const cooldowns = getActiveCooldowns();
+    if (cooldowns.length === 0) {
+      await sendMessage("✅ No active cooldowns — all pools and tokens are available.");
+      return;
+    }
+    const fmtCountdown = (ms) => {
+      const totalMin = Math.ceil(ms / 60000);
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    };
+    const pools  = cooldowns.filter((c) => c.type === "pool");
+    const tokens = cooldowns.filter((c) => c.type === "token");
+    const lines  = [`🔒 Active Cooldowns (${cooldowns.length})`];
+    if (tokens.length) {
+      lines.push("\nTOKEN (base mint):");
+      for (const c of tokens) lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+    }
+    if (pools.length) {
+      lines.push("\nPOOL:");
+      for (const c of pools)  lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+    }
+    await sendMessage(lines.join("\n"));
     return;
   }
 
