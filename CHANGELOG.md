@@ -3,12 +3,16 @@
 ## [v1.0.9] — 2026-04-12 — /cooldowns command + screening threshold widening
 
 ### Features
-- **`/cooldowns` Telegram command**: shows all active pool and token (base mint) cooldowns
-  with live countdown ("Xh Ym left"), grouped by type, sorted by time remaining.
-  No more log-staring to know when a pool is available again.
-  - `pool-memory.js`: new `getActiveCooldowns()` export — scans all entries, deduplicates
-    token cooldowns by base_mint, returns sorted by msRemaining.
-  - `index.js`: command handler imported and wired, added to `/help` text.
+- **`/cooldowns` Telegram command**: shows active pool and token (base mint) cooldowns
+  with live countdown ("Xh Ym left"), plus a "Recently cleared (last 2h)" section.
+  - Active: grouped TOKEN / POOL, sorted soonest-expiring first.
+  - Recently cleared: pools/tokens whose cooldown expired within the last 2 hours,
+    shown as "✓ Name — reason — cleared Xh Ym ago". Prevents false "no cooldowns"
+    confusion when a cooldown expires between the screening cycle and the command.
+  - Logs `[cooldowns] Query: N active, M recently expired` on every call for debugging.
+  - `pool-memory.js`: `getActiveCooldowns(recentWindowMs)` returns `{ active, recent }`.
+    Token cooldowns deduplicated by base_mint in both buckets.
+  - `index.js`: handler updated for new shape, added to `/help` text.
 
 ### Config changes (VPS user-config.json — 2026-04-12)
 Screening thresholds widened to increase deploy frequency and accelerate Darwin convergence.

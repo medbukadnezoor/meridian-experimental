@@ -254,7 +254,7 @@ Handled directly in `index.js` (bypass LLM):
 | `/close <n>` | Close position by list index |
 | `/closeall` | Close all open positions |
 | `/set <n> <note>` | Set note/instruction on position |
-| `/cooldowns` | Active pool + token cooldowns with countdown (Xh Ym left) |
+| `/cooldowns` | Active cooldowns (Xh Ym left) + recently cleared in last 2h (cleared Xh Ym ago). Logs `[cooldowns]` trace on every call. |
 | `/config` | Show important runtime config |
 | `/setcfg <key> <value>` | Update persisted config live |
 | `/screen` | Refresh deterministic candidate list |
