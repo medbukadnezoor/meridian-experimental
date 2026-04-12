@@ -1,5 +1,25 @@
 # Changelog
 
+## [v1.0.9] — 2026-04-12 — /cooldowns command + screening threshold widening
+
+### Features
+- **`/cooldowns` Telegram command**: shows all active pool and token (base mint) cooldowns
+  with live countdown ("Xh Ym left"), grouped by type, sorted by time remaining.
+  No more log-staring to know when a pool is available again.
+  - `pool-memory.js`: new `getActiveCooldowns()` export — scans all entries, deduplicates
+    token cooldowns by base_mint, returns sorted by msRemaining.
+  - `index.js`: command handler imported and wired, added to `/help` text.
+
+### Config changes (VPS user-config.json — 2026-04-12)
+Screening thresholds widened to increase deploy frequency and accelerate Darwin convergence.
+Monitor win rate — tighten if quality degrades.
+
+| Key | Before | After | Reason |
+|---|---|---|---|
+| `chartIndicators.rsiOversold` | 25 | **35** | RSI ≤ 25 was too rare to fire on 5m; was the dominant rejection reason in logs |
+| `minFeeActiveTvlRatio` | 0.15 | **0.05** | 15% daily fee/TVL was too aggressive; typical good pools at 5-10% |
+| `minVolume` | 10000 | **3000** | Catches more nascent pools earlier in their volume build |
+
 ## [v1.0.9-docs] — 2026-04-12 — Docs audit: Darwin signal table, roadmap, AGENTS.md sync
 
 ### Documentation only — no code changes, no restart required

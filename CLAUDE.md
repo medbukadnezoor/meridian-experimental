@@ -74,7 +74,7 @@ The LLM occasionally hallucinates large bin counts (e.g. types "690" instead of 
 ### Chart indicator philosophy (mean-reversion style)
 The active strategy is a passive accumulator (wide downside bins, tight stop-loss, small trailing TP). Indicator config is tuned accordingly:
 
-- **Entry** `entryPreset: rsi_reversal` — only allows new deploys when RSI ≤ 25 (deep oversold). Prevents chasing momentum or deploying into a pump. Correct behaviour for "buy weakness" accumulation.
+- **Entry** `entryPreset: rsi_reversal` — only allows new deploys when RSI ≤ `rsiOversold` (currently **35**, widened from 25 on 2026-04-12 for data volume). Prevents chasing momentum or deploying into a pump. Correct behaviour for "buy weakness" accumulation. If win rate drops, tighten back toward 25-30.
 - **Exit** `exitPreset: null` — **disabled intentionally**. When null, `confirmIndicatorPreset()` returns `confirmed: true` unconditionally, meaning indicators never gate trailing TP, stop-loss, or OOR closes. This prevents the common failure mode where `supertrend_break` blocks exits during the exact conditions they're needed.
 - **Why not `supertrend_break` for exit?** Supertrend exit is a momentum-following gate — it fires on trend breaks, not on mean-reversion profit targets. It was blocking trailing TP and OOR closes in live Telegram reports. Not suitable for this style.
 - **Available presets (in codebase):** `supertrend_break`, `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`. (Note: some Telegram-mentioned presets like `bb_plus_rsi`, `fibo_reclaim` are NOT yet implemented.)
@@ -153,9 +153,9 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 | Key | Section | Default |
 |-----|---------|---------|
-| minFeeActiveTvlRatio | screening | 0.05 |
+| minFeeActiveTvlRatio | screening | **0.05** (live on VPS; widened from 0.15 on 2026-04-12 for Darwin data volume) |
 | minTvl / maxTvl | screening | 10k / 150k |
-| minVolume | screening | 500 |
+| minVolume | screening | **3000** (live on VPS; widened from 10000 on 2026-04-12) |
 | minOrganic | screening | 60 |
 | minHolders | screening | 500 |
 | minMcap / maxMcap | screening | 150k / 10M |
@@ -180,7 +180,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
 | chartIndicators.entryPreset | indicators | rsi_reversal |
 | chartIndicators.exitPreset | indicators | null (disabled) |
-| chartIndicators.rsiOversold | indicators | 25 |
+| chartIndicators.rsiOversold | indicators | **35** (live on VPS; widened from 25 on 2026-04-12 — RSI ≤ 25 was too rare to fire meaningfully) |
 | chartIndicators.rsiOverbought | indicators | 80 |
 
 **Per-role LLM override fields** (`managementBaseUrl`, `managementApiKey`, `generalBaseUrl`, `generalApiKey`) default to `null`. When null, the role falls back to the global `llmBaseUrl` + `llmApiKey`. Set them only if you want a specific role to use a different provider or model endpoint.
@@ -247,11 +247,24 @@ Handled directly in `index.js` (bypass LLM):
 
 | Command | Action |
 |---------|--------|
-| `/positions` | List open positions with progress bar |
+| `/help` | List all commands |
+| `/status` | Wallet + positions snapshot |
+| `/positions` | List open positions |
+| `/pool <n>` | Detailed info for one open position |
 | `/close <n>` | Close position by list index |
-| `/set <n> <note>` | Set note on position by list index |
-
-Progress bar format: `[████████░░░░░░░░░░░░] 40%` (no bin numbers, no arrows)
+| `/closeall` | Close all open positions |
+| `/set <n> <note>` | Set note/instruction on position |
+| `/cooldowns` | Active pool + token cooldowns with countdown (Xh Ym left) |
+| `/config` | Show important runtime config |
+| `/setcfg <key> <value>` | Update persisted config live |
+| `/screen` | Refresh deterministic candidate list |
+| `/candidates` | Show latest cached candidates |
+| `/deploy <n>` | Deploy candidate by cached index |
+| `/briefing` | Morning briefing |
+| `/autoresearch` | Shadow autoresearch status |
+| `/hive` | HiveMind sync status |
+| `/pause` / `/resume` | Stop / start cron cycles |
+| `/stop` | Shut down agent |
 
 ---
 
