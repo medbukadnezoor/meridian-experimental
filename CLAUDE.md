@@ -76,6 +76,7 @@ The active strategy is a passive accumulator (wide downside bins, tight stop-los
 
 - **Entry** `entryPreset: rsi_reversal` — only allows new deploys when RSI ≤ `rsiOversold` (currently **35**, widened from 25 on 2026-04-12 for data volume). Prevents chasing momentum or deploying into a pump. Correct behaviour for "buy weakness" accumulation. If win rate drops, tighten back toward 25-30.
 - **Exit** `exitPreset: null` — **disabled intentionally**. When null, `confirmIndicatorPreset()` returns `confirmed: true` unconditionally, meaning indicators never gate trailing TP, stop-loss, or OOR closes. This prevents the common failure mode where `supertrend_break` blocks exits during the exact conditions they're needed.
+  - **Bug fixed (commit `a746df8`, 2026-04-12):** `config.js` was using `??` (nullish coalescing) to resolve presets, which coerces JSON `null` to the hardcoded default `"supertrend_break"`. Setting `exitPreset: null` in user-config had no runtime effect — the bot ran `supertrend_break` regardless. Fixed with `"exitPreset" in indicatorUserConfig ? value : default` so null is preserved. If `exitPreset: null` is set, `chart-indicators.js:161` (`if (!preset)`) now correctly short-circuits to `{ confirmed: true }`. Same fix applied to `entryPreset`.
 - **Why not `supertrend_break` for exit?** Supertrend exit is a momentum-following gate — it fires on trend breaks, not on mean-reversion profit targets. It was blocking trailing TP and OOR closes in live Telegram reports. Not suitable for this style.
 - **Available presets (in codebase):** `supertrend_break`, `rsi_reversal`, `bollinger_reversion`, `rsi_plus_supertrend`. (Note: some Telegram-mentioned presets like `bb_plus_rsi`, `fibo_reclaim` are NOT yet implemented.)
 
@@ -153,35 +154,47 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 | Key | Section | Default |
 |-----|---------|---------|
-| minFeeActiveTvlRatio | screening | **0.05** (live on VPS; widened from 0.15 on 2026-04-12 for Darwin data volume) |
+| minFeeActiveTvlRatio | screening | **0.07** (widened to 0.05 on 2026-04-12, evolved to 0.07 by lessons at 13:31 same day) |
 | minTvl / maxTvl | screening | 10k / 150k |
-| minVolume | screening | **3000** (live on VPS; widened from 10000 on 2026-04-12) |
-| minOrganic | screening | 60 |
+| minVolume | screening | **3000** (widened from 10000 on 2026-04-12) |
+| minOrganic | screening | **70** (VPS live; default is 60) |
 | minHolders | screening | 500 |
-| minMcap / maxMcap | screening | 150k / 10M |
+| minMcap / maxMcap | screening | 150k / **5M** (VPS; default 10M) |
 | minBinStep / maxBinStep | screening | 80 / 125 |
-| timeframe | screening | "5m" |
+| timeframe | screening | "4h" (VPS; default "5m") |
 | category | screening | "trending" |
 | minTokenFeesSol | screening | 30 |
-| maxBundlersPct | screening | 30 |
+| maxBundlePct | screening | 30 |
 | maxTop10Pct | screening | 60 |
+| maxBotHoldersPct | screening | **35** (VPS; default 30) |
+| athFilterPct | screening | **-10** (VPS; only deploy if price ≥ 10% below ATH; default null) |
+| minTokenAgeHours / maxTokenAgeHours | screening | **3 / 720** (VPS; default null/null) |
+| blockPvpSymbols | screening | **true** (VPS; hard-filter PVP rivals; default false) |
 | blockedLaunchpads | screening | [] |
-| deployAmountSol | management | 0.5 |
-| maxDeployAmount | risk | 50 |
-| maxPositions | risk | 3 |
+| deployAmountSol | management | **0.7** (VPS; default 0.5) |
+| maxDeployAmount | risk | 200 (VPS; default 50) |
+| maxPositions | risk | **4** (VPS; default 3) |
 | gasReserve | management | 0.2 |
 | positionSizePct | management | 0.35 |
-| minSolToOpen | management | 0.55 |
+| minSolToOpen | management | 0.15 (VPS) |
 | outOfRangeWaitMinutes | management | 180 |
 | outOfRangeHardCloseMinutes | management | 240 |
 | outOfRangeBinsToClose | management | 50 |
+| stopLossPct | management | **-5%** |
+| takeProfitPct | management | **6%** (VPS; default 5%) |
+| trailingTriggerPct | management | 3% |
+| trailingDropPct | management | **2.5%** (VPS; default 1.5%) |
+| stopLossCooldownHours | management | **3h** (VPS override; pool-memory.js default is 12h) |
+| oorCooldownHours / oorCooldownTriggerCount | management | **8h / 4** (VPS; default 12h / 3) |
+| autoSwapAfterClaim | management | **true** (VPS; default false) |
 | managementIntervalMin | schedule | 10 |
-| screeningIntervalMin | schedule | 30 |
-| managementModel / screeningModel / generalModel | llm | openrouter/healer-alpha |
-| chartIndicators.entryPreset | indicators | rsi_reversal |
-| chartIndicators.exitPreset | indicators | null (disabled) |
-| chartIndicators.rsiOversold | indicators | **35** (live on VPS; widened from 25 on 2026-04-12 — RSI ≤ 25 was too rare to fire meaningfully) |
+| screeningIntervalMin | schedule | **20** (VPS; default 30) |
+| managementModel / screeningModel / generalModel | llm | **qwen3.6-plus** (DashScope Singapore) |
+| chartIndicators.entryPreset | indicators | **rsi_reversal** (confirmed working — RSI ≤ 35 on 5_MINUTE) |
+| chartIndicators.exitPreset | indicators | **null** (disabled — exits always confirmed; bug fixed in a746df8) |
+| chartIndicators.rsiOversold | indicators | **35** (widened from 25 on 2026-04-12) |
 | chartIndicators.rsiOverbought | indicators | 80 |
+| chartIndicators.intervals | indicators | **["5_MINUTE"]** (VPS; default ["5_MINUTE", "15_MINUTE"]) |
 
 **Per-role LLM override fields** (`managementBaseUrl`, `managementApiKey`, `generalBaseUrl`, `generalApiKey`) default to `null`. When null, the role falls back to the global `llmBaseUrl` + `llmApiKey`. Set them only if you want a specific role to use a different provider or model endpoint.
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## [v1.0.9-hotfix2] — 2026-04-12 — Fix null exitPreset/entryPreset coerced to default by ?? operator
+
+### Bug fix
+- **`config.js`**: `exitPreset` and `entryPreset` used `??` (nullish coalescing), which
+  treats JSON `null` the same as `undefined` — falling back to `"supertrend_break"`.
+  Setting `exitPreset: null` in user-config had no effect; bot always loaded `"supertrend_break"`.
+  **Fix**: changed to `"key" in indicatorUserConfig ? value : default` so JSON null is preserved.
+  `chart-indicators.js` already returns `{ confirmed: true }` when preset is falsy — exits now
+  correctly ungated with `exitPreset: null`.
+  **Impact**: Iroha-SOL exit was suppressed ~40 min past its low-yield trigger (fee/TVL ~6% < 7%,
+  age 160m) by supertrend_break gate. Closed at +0.07% after restart — no loss, just held longer.
+  `entryPreset` unaffected — always set to `"rsi_reversal"` string, never null on VPS.
+- Commit: `a746df8`
+
+---
+
 ## [v1.0.9] — 2026-04-12 — /cooldowns command + screening threshold widening
 
 ### Features
