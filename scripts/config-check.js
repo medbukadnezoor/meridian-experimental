@@ -34,6 +34,15 @@ const SKIP = new Set([
   "_note",
 ]);
 
+// Fields autonomously tuned by evolveThresholds() in lessons.js — expected to drift.
+// Drift is reported separately as informational, not as an error requiring sync.
+const BOT_EVOLVED = new Set([
+  "minFeeActiveTvlRatio",
+  "minVolume",
+  "minOrganic",
+  "minHolders",
+]);
+
 function isSecret(key) {
   const last = key.split(".").pop();
   return SKIP.has(last) || last.endsWith("ApiKey") || last.endsWith("Key") ||
@@ -76,12 +85,19 @@ const example = flatten(JSON.parse(fs.readFileSync(examplePath, "utf8")));
 const drifted   = [];
 const extraLive = [];
 
+const botEvolved = [];
+
 for (const [key, exVal] of Object.entries(example)) {
   if (isSecret(key)) continue;
+  const leafKey = key.split(".").pop();
   if (!(key in live)) {
     drifted.push({ type: "MISSING_IN_LIVE", key, example: exVal, live: undefined });
   } else if (JSON.stringify(live[key]) !== JSON.stringify(exVal)) {
-    drifted.push({ type: "DRIFT", key, example: exVal, live: live[key] });
+    if (BOT_EVOLVED.has(leafKey)) {
+      botEvolved.push({ key, example: exVal, live: live[key] });
+    } else {
+      drifted.push({ type: "DRIFT", key, example: exVal, live: live[key] });
+    }
   }
 }
 
@@ -97,6 +113,13 @@ for (const key of Object.keys(live)) {
 console.log("── Config drift report (live vs user-config.example.json) ───────────────");
 
 if (drifted.length === 0 && extraLive.length === 0) {
+  if (botEvolved.length > 0) {
+    console.log(`\n🤖  ${botEvolved.length} bot-evolved field(s) (expected — evolveThresholds() tuned these):\n`);
+    for (const { key, example: ex, live: lv } of botEvolved) {
+      console.log(`  ~  ${key}  live=${JSON.stringify(lv)}  (example baseline: ${JSON.stringify(ex)})`);
+    }
+    console.log("");
+  }
   console.log("✅  No drift. Live config matches user-config.example.json.\n");
   process.exit(0);
 }
@@ -111,6 +134,13 @@ if (drifted.length > 0) {
       console.log(`               live:    ${JSON.stringify(lv)}`);
       console.log(`               example: ${JSON.stringify(ex)}`);
     }
+  }
+}
+
+if (botEvolved.length > 0) {
+  console.log(`\n🤖  ${botEvolved.length} bot-evolved field(s) (evolveThresholds() autonomously tuned — not a sync error):\n`);
+  for (const { key, example: ex, live: lv } of botEvolved) {
+    console.log(`  ~  ${key}  live=${JSON.stringify(lv)}  (example baseline: ${JSON.stringify(ex)})`);
   }
 }
 

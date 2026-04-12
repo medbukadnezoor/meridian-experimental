@@ -31,7 +31,7 @@
   "maxMcap": 5000000,
   "minBinStep": 80,
   "maxBinStep": 125,
-  "minFeeActiveTvlRatio": 0.07,
+  "minFeeActiveTvlRatio": 0.08,
   "minTokenFeesSol": 30,
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
@@ -125,9 +125,7 @@
     "exitPreset": null,
     "rsiLength": 2,
     "intervals": ["5_MINUTE"],
-    "candles": 298,
     "rsiOversold": 35,
-    "rsiOverbought": 80,
-    "requireAllIntervals": false
+    "rsiOverbought": 80
   }
 }
