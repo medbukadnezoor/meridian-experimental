@@ -219,43 +219,64 @@ export function isBaseMintOnCooldown(baseMint) {
 }
 
 /**
- * Return all active cooldowns (pool-level and token/mint-level), sorted by time remaining ascending.
+ * Return active and recently-expired cooldowns (pool-level and token/mint-level).
+ * Active items have msRemaining > 0. Recently expired items (within recentWindowMs) have msRemaining <= 0.
  * Token cooldowns are deduplicated by base_mint.
+ *
+ * @param {number} recentWindowMs  How far back to include expired cooldowns (default: 2h)
  */
-export function getActiveCooldowns() {
+export function getActiveCooldowns(recentWindowMs = 2 * 60 * 60 * 1000) {
   const db = load();
   const now = new Date();
-  const items = [];
+  const active = [];
+  const recent = [];
   const mintSeen = new Set();
 
   for (const [address, entry] of Object.entries(db)) {
-    if (entry.cooldown_until && new Date(entry.cooldown_until) > now) {
-      items.push({
+    // Pool-level cooldown
+    if (entry.cooldown_until) {
+      const until = new Date(entry.cooldown_until);
+      const msRemaining = until - now;
+      const item = {
         type: "pool",
         name: entry.name || address.slice(0, 8),
         address,
         until: entry.cooldown_until,
         reason: entry.cooldown_reason || "unknown",
-        msRemaining: new Date(entry.cooldown_until) - now,
-      });
+        msRemaining,
+      };
+      if (msRemaining > 0) active.push(item);
+      else if (msRemaining > -recentWindowMs) recent.push(item);
     }
-    if (entry.base_mint && entry.base_mint_cooldown_until && new Date(entry.base_mint_cooldown_until) > now) {
-      if (!mintSeen.has(entry.base_mint)) {
+
+    // Token/base-mint cooldown (deduplicated by mint)
+    if (entry.base_mint && entry.base_mint_cooldown_until && !mintSeen.has(entry.base_mint)) {
+      const until = new Date(entry.base_mint_cooldown_until);
+      const msRemaining = until - now;
+      const tokenSymbol = (entry.name || "").split("-")[0] || entry.base_mint.slice(0, 6);
+      const item = {
+        type: "token",
+        name: tokenSymbol,
+        address: entry.base_mint,
+        until: entry.base_mint_cooldown_until,
+        reason: entry.base_mint_cooldown_reason || "unknown",
+        msRemaining,
+      };
+      if (msRemaining > 0) {
         mintSeen.add(entry.base_mint);
-        const tokenSymbol = (entry.name || "").split("-")[0] || entry.base_mint.slice(0, 6);
-        items.push({
-          type: "token",
-          name: tokenSymbol,
-          address: entry.base_mint,
-          until: entry.base_mint_cooldown_until,
-          reason: entry.base_mint_cooldown_reason || "unknown",
-          msRemaining: new Date(entry.base_mint_cooldown_until) - now,
-        });
+        active.push(item);
+      } else if (msRemaining > -recentWindowMs) {
+        mintSeen.add(entry.base_mint);
+        recent.push(item);
       }
     }
   }
 
-  return items.sort((a, b) => a.msRemaining - b.msRemaining);
+  active.sort((a, b) => a.msRemaining - b.msRemaining);
+  // Most recently expired first
+  recent.sort((a, b) => b.msRemaining - a.msRemaining);
+
+  return { active, recent };
 }
 
 // ─── Read ──────────────────────────────────────────────────────

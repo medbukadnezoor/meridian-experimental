@@ -1253,27 +1253,37 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/cooldowns") {
-    const cooldowns = getActiveCooldowns();
-    if (cooldowns.length === 0) {
-      await sendMessage("✅ No active cooldowns — all pools and tokens are available.");
-      return;
-    }
+    const { active, recent } = getActiveCooldowns();
+    log("cooldowns", `Query: ${active.length} active, ${recent.length} recently expired`);
     const fmtCountdown = (ms) => {
-      const totalMin = Math.ceil(ms / 60000);
+      const totalMin = Math.ceil(Math.abs(ms) / 60000);
       const h = Math.floor(totalMin / 60);
       const m = totalMin % 60;
       return h > 0 ? `${h}h ${m}m` : `${m}m`;
     };
-    const pools  = cooldowns.filter((c) => c.type === "pool");
-    const tokens = cooldowns.filter((c) => c.type === "token");
-    const lines  = [`🔒 Active Cooldowns (${cooldowns.length})`];
-    if (tokens.length) {
-      lines.push("\nTOKEN (base mint):");
-      for (const c of tokens) lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+    const lines = [];
+    if (active.length === 0 && recent.length === 0) {
+      await sendMessage("✅ No active cooldowns — all pools and tokens are available.");
+      return;
     }
-    if (pools.length) {
-      lines.push("\nPOOL:");
-      for (const c of pools)  lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+    if (active.length > 0) {
+      lines.push(`🔒 Active Cooldowns (${active.length})`);
+      const activePools  = active.filter((c) => c.type === "pool");
+      const activeTokens = active.filter((c) => c.type === "token");
+      if (activeTokens.length) {
+        lines.push("\nTOKEN (base mint):");
+        for (const c of activeTokens) lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+      }
+      if (activePools.length) {
+        lines.push("\nPOOL:");
+        for (const c of activePools)  lines.push(`  • ${c.name} — ${c.reason} — ${fmtCountdown(c.msRemaining)} left`);
+      }
+    } else {
+      lines.push("✅ No active cooldowns");
+    }
+    if (recent.length > 0) {
+      lines.push("\nRecently cleared (last 2h):");
+      for (const c of recent) lines.push(`  ✓ ${c.name} (${c.type}) — ${c.reason} — cleared ${fmtCountdown(c.msRemaining)} ago`);
     }
     await sendMessage(lines.join("\n"));
     return;
