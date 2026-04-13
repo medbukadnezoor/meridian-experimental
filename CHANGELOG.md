@@ -1,5 +1,97 @@
 # Changelog
 
+<<<<<<< HEAD
+=======
+## [nanocap-v1 fixes-2] — 2026-04-13 — GMGN fix, PnL backfill, Darwin unblocked
+
+### Fix: GMGN_API_KEY missing from VPS .env (both bots) — commit `a08d103`
+- **Symptom**: Every candidate in every screening cycle showed `gmgn: unavailable`. Darwin signals
+  `gmgn_bluechip_present` and `gmgn_bundler_present` had weight=1.0 with zero history — no trades
+  ever closed with GMGN data flowing. Phase 1 GMGN enrichment was live in code but dead in practice.
+- **Root cause**: `GMGN_API_KEY` was only in the local Mac workspace `.env`. It was never added to
+  either VPS `.env` file (`~/meridian/.env` and `~/meridian-nanocap/.env`). `fetchGmgnTokenRisk()`
+  checks `process.env.GMGN_API_KEY || ""` and returns null immediately if empty.
+- **Fix**: Added `GMGN_API_KEY=gmgn_f302885717ae821a900514f52d6e0a68` directly to both VPS `.env`
+  files. Restarted both bots. Also updated `tools/gmgn.js` to log `[GMGN] <mint> — top10=X%
+  bluechip=N bundler=N suspicious=N` on every successful fetch, plus `[GMGN_WARN]` on fetch errors
+  (previously completely silent — impossible to diagnose from PM2 logs).
+- **Confirmed working**: `[GMGN]` lines appear in nanocap PM2 log per candidate per screening cycle.
+- **Gotcha for future setups**: `GMGN_API_KEY` is NOT committed to git. Any new VPS instance must
+  have it manually added to `.env`.
+
+### Fix: Nanocap PnL backfill — 18 positions injected into lessons.json
+- **Symptom**: `lessons.json performance[]` was empty despite 18+ positions having closed. Darwin had
+  zero training data. Bot's `/status` and briefings showed no wins/losses. `evolveThresholds()` never
+  fired.
+- **Root cause**: `state.json` bug (see previous entry — positions array vs object). All 18+ pre-fix
+  closes had `tracked=null` → PnL block skipped → `recordPerformance()` never called.
+- **Fix**: After the state.json bug fix, reconstructed 18 closed positions from LPAgent API + decision
+  log cross-reference. LPAgent provided exact USD `inputValue`, `outputValue`, `collectedFee` values.
+  Decision log provided close reasons and deploy timestamps for hold time calculation.
+- **Script**: `/tmp/backfill_v2.py` on VPS ohox. Re-runnable (skips already-injected positions by
+  checking `position` field).
+- **Results**: 18 records injected — 13/18 wins (72%), total PnL +$3.10 USD. 7 lessons derived.
+  `evolveThresholds()` will fire at 20 total closes (2 more needed).
+- **Outstanding**: Backfilled records have `gmgn_bluechip_present: null` and `gmgn_bundler_present:
+  null` (GMGN wasn't working when they closed). GMGN Darwin signal weights will start converging from
+  future closes only.
+
+---
+
+## [nanocap-v1 setup] — 2026-04-13 — Nanocap forward test instance live
+
+### New bot instance: meridian-nanocap
+- **VPS directory**: `~/meridian-nanocap/` — separate from `~/meridian/`
+- **Wallet**: `7dTthcwHvtsLq8LSxfzC9K8JrgBkg1jzZsNKRtkqJnzn` (~1.5 SOL)
+- **Branch**: `nanocap-v1` (from `experimental` at v1.0.9, no code changes)
+- **PM2**: `meridian-nanocap` (id 1) — aliases `ncl`, `ncll`, `ncr`, `ncp`, `ncstop`, `ncstart`
+- **Active strategy**: `nanocap_mean_reversion` in `strategy-library.json` — SOL-only bid_ask,
+  85 bins below, RSI(2)≤30 entry gate, $30k–$800k MCap, SL=-25%, TP=25% trailing
+- **Telegram**: disabled (no bot token) — monitor via `ssh ohox ncl`
+- **Darwin**: fresh start (all 15 signal weights = 1.0, empty lessons/pool-memory)
+- **Autoresearch**: disabled | **HiveMind pull**: disabled
+
+### Bug fix: state.json positions must be object `{}` not array `[]`
+- **Symptom**: All close decisions logged `"metrics": {}` (empty). PnL never recorded in
+  `lessons.json performance[]`. Darwin had zero training data. Bot could not report wins/losses.
+- **Root cause**: `state.json` was initialized with `"positions": []` (array). `state.js` does
+  `state.positions[positionAddress] = data` — valid in JS memory but `JSON.stringify` silently
+  drops string keys on arrays. Every `save()` wrote back `{"positions": []}`, erasing all tracking.
+  On every `closePosition()` call, `getTrackedPosition()` read from disk → `[]` → `undefined` →
+  `tracked = null` → entire PnL + `recordPerformance()` block skipped.
+- **Fix**: Changed `state.json` to `{"positions": {}}` (object). `JSON.stringify` correctly
+  serializes string-keyed objects. Position tracking now persists across saves.
+- **Impact**: All 17 positions deployed before this fix closed without PnL data. Fix applied at
+  2026-04-13T16:27. All future deploys will be tracked and PnL will flow to Darwin/lessons.
+- **Initialization rule**: Always initialize as `{"positions": {}, "recentEvents": []}`.
+
+### Bug fix: lp_strategy not enforced in screener deploy step (commit `56afe0c`)
+- **Symptom**: All nanocap deploys used `spot` distribution despite `strategy-library.json`
+  setting `lp_strategy: "bid_ask"`. Positions showed rectangular bin distribution on Meteora
+  instead of the expected triangular bid_ask shape.
+- **Root cause**: The screener prompt injects the active strategy name/type in a header block
+  (`ACTIVE STRATEGY: ... — LP: bid_ask`) but the deploy step 2 instructions never referenced
+  `lp_strategy` at all. The LLM had no explicit instruction and defaulted to `"spot"`.
+- **Fix**: Interpolate `activeStrategy.lp_strategy` directly into step 2 deploy instructions:
+  `lp_strategy: MUST be "bid_ask" — taken from ACTIVE STRATEGY above. Do NOT use "spot".`
+- **Impact**: All 4 initial nanocap positions were deployed with wrong shape (`spot`). Fix applies
+  to all future deploys. Existing positions unaffected until they close naturally.
+
+### Setup fix: lessons.json must include `performance` array
+- `lessons.json` initialized as `{"lessons":[]}` caused `CRON_ERROR: Cannot read properties of
+  undefined (reading 'length')` in both briefing and screening cycles.
+- Root cause: `lessons.js:getPerformanceSummary()` reads `data.performance` without a null guard.
+  When the key is absent the value is `undefined`, and `.length` throws.
+- Fix: initialize as `{"lessons":[],"performance":[]}`. Not a code change — runtime gotcha.
+
+### Config reference
+- `user-config.example.json` on `nanocap-v1` branch is the canonical nanocap config.
+- `strategy-library.nanocap-v1.example.json` is the strategy library reference (committed).
+- Research basis: `nanocap-strategy-research/deliverables/NANOCAP_DLMM_RESEARCH_REPORT.md`
+
+---
+
+>>>>>>> af07441 (docs: add GMGN fix + PnL backfill entries to CHANGELOG)
 ## [v1.0.9-hotfix2] — 2026-04-12 — Fix null exitPreset/entryPreset coerced to default by ?? operator
 
 ### Bug fix
