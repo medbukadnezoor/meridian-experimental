@@ -1,5 +1,33 @@
 # Changelog
 
+## [solMode close path fix] — 2026-04-14 — PnL fields now correctly denominated in SOL — commit `f4911a1`
+
+### Fix: Close path hardcoded to USD despite solMode=true
+
+- **Symptom**: With `solMode: true` live on both bots, `lessons.json` performance records stored
+  USD values in `initial_value_usd`, `final_value_usd`, `fees_earned_usd`. Example: nanocap live
+  close showed `initial=20.87` for a `0.25 SOL` deploy (SOL price ~$83). All downstream Darwin
+  signal reasoning was operating on USD-scale numbers even though the bot reported in SOL.
+- **Root cause**: Both close paths in `tools/dlmm.js` (relay path ~line 1237, non-relay path
+  ~line 1478) hardcoded `.usd` field reads from the Meteora datapi closed-positions endpoint.
+  The `solMode` flag only affected display (◎ symbol in Telegram) and the `_positionsCache`
+  monitoring fields — it never reached the close-time datapi reads.
+- **Fix (commit `f4911a1`, both branches)**:
+  - Both close paths now branch on `config.management.solMode` (`sm`/`tk` pattern):
+    - Datapi reads: `posEntry.allTimeWithdrawals?.total?.[tk]` etc. (`tk = "sol"` when solMode)
+    - `pnlUsd` computed as `(withdrawals + fees) - deposits` in SOL (no `pnlSol` field in API)
+    - `pnlPct` recomputed from SOL values when solMode=true
+    - `feesUsd` initialized to 0 when solMode=true (claim tracker is always USD — discard it)
+  - Fallback cache path also branched:
+    - Uses `pnl_usd`/`collected_fees_usd`/`total_value_usd` (SOL values when solMode=true)
+    - NOT `pnl_true_usd`/`collected_fees_true_usd` (always USD — wrong when solMode=true)
+    - Initial value fallback uses `tracked.amount_sol` instead of `tracked.initial_value_usd`
+  - Log line now shows `SOL` or `USD` dynamically
+- **Deployed**: Both bots restarted via `mp` and `ncp` on 2026-04-14.
+- **Verification**: Next close should log e.g. `pnl=0.0042 SOL` instead of `pnl=0.35 USD`.
+
+---
+
 ## [nanocap-v1 fixes-2] — 2026-04-13 — GMGN fix, PnL backfill, Darwin unblocked
 
 ### Fix: GMGN_API_KEY missing from VPS .env (both bots) — commit `a08d103`
