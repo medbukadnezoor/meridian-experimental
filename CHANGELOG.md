@@ -1,5 +1,41 @@
 # Changelog
 
+## [nanocap-v1 fixes-2] — 2026-04-13 — GMGN fix, PnL backfill, Darwin unblocked
+
+### Fix: GMGN_API_KEY missing from VPS .env (both bots) — commit `a08d103`
+- **Symptom**: Every candidate in every screening cycle showed `gmgn: unavailable`. Darwin signals
+  `gmgn_bluechip_present` and `gmgn_bundler_present` had weight=1.0 with zero history — no trades
+  ever closed with GMGN data flowing. Phase 1 GMGN enrichment was live in code but dead in practice.
+- **Root cause**: `GMGN_API_KEY` was only in the local Mac workspace `.env`. It was never added to
+  either VPS `.env` file (`~/meridian/.env` and `~/meridian-nanocap/.env`). `fetchGmgnTokenRisk()`
+  checks `process.env.GMGN_API_KEY || ""` and returns null immediately if empty.
+- **Fix**: Added `GMGN_API_KEY=gmgn_f302885717ae821a900514f52d6e0a68` directly to both VPS `.env`
+  files. Restarted both bots. Also updated `tools/gmgn.js` to log `[GMGN] <mint> — top10=X%
+  bluechip=N bundler=N suspicious=N` on every successful fetch, plus `[GMGN_WARN]` on fetch errors
+  (previously completely silent — impossible to diagnose from PM2 logs).
+- **Confirmed working**: `[GMGN]` lines appear in nanocap PM2 log per candidate per screening cycle.
+- **Gotcha for future setups**: `GMGN_API_KEY` is NOT committed to git. Any new VPS instance must
+  have it manually added to `.env`.
+
+### Fix: Nanocap PnL backfill — 18 positions injected into lessons.json
+- **Symptom**: `lessons.json performance[]` was empty despite 18+ positions having closed. Darwin had
+  zero training data. Bot's `/status` and briefings showed no wins/losses. `evolveThresholds()` never
+  fired.
+- **Root cause**: `state.json` bug (see previous entry — positions array vs object). All 18+ pre-fix
+  closes had `tracked=null` → PnL block skipped → `recordPerformance()` never called.
+- **Fix**: After the state.json bug fix, reconstructed 18 closed positions from LPAgent API + decision
+  log cross-reference. LPAgent provided exact USD `inputValue`, `outputValue`, `collectedFee` values.
+  Decision log provided close reasons and deploy timestamps for hold time calculation.
+- **Script**: `/tmp/backfill_v2.py` on VPS ohox. Re-runnable (skips already-injected positions by
+  checking `position` field).
+- **Results**: 18 records injected — 13/18 wins (72%), total PnL +$3.10 USD. 7 lessons derived.
+  `evolveThresholds()` will fire at 20 total closes (2 more needed).
+- **Outstanding**: Backfilled records have `gmgn_bluechip_present: null` and `gmgn_bundler_present:
+  null` (GMGN wasn't working when they closed). GMGN Darwin signal weights will start converging from
+  future closes only.
+
+---
+
 ## [nanocap-v1 setup] — 2026-04-13 — Nanocap forward test instance live
 
 ### New bot instance: meridian-nanocap
