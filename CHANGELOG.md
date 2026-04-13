@@ -1,5 +1,32 @@
 # Changelog
 
+## [nanocap-v1 setup] — 2026-04-13 — Nanocap forward test instance live
+
+### New bot instance: meridian-nanocap
+- **VPS directory**: `~/meridian-nanocap/` — separate from `~/meridian/`
+- **Wallet**: `7dTthcwHvtsLq8LSxfzC9K8JrgBkg1jzZsNKRtkqJnzn` (~1.5 SOL)
+- **Branch**: `nanocap-v1` (from `experimental` at v1.0.9, no code changes)
+- **PM2**: `meridian-nanocap` (id 1) — aliases `ncl`, `ncll`, `ncr`, `ncp`, `ncstop`, `ncstart`
+- **Active strategy**: `nanocap_mean_reversion` in `strategy-library.json` — SOL-only bid_ask,
+  85 bins below, RSI(2)≤30 entry gate, $30k–$800k MCap, SL=-25%, TP=25% trailing
+- **Telegram**: disabled (no bot token) — monitor via `ssh ohox ncl`
+- **Darwin**: fresh start (all 15 signal weights = 1.0, empty lessons/pool-memory)
+- **Autoresearch**: disabled | **HiveMind pull**: disabled
+
+### Setup fix: lessons.json must include `performance` array
+- `lessons.json` initialized as `{"lessons":[]}` caused `CRON_ERROR: Cannot read properties of
+  undefined (reading 'length')` in both briefing and screening cycles.
+- Root cause: `lessons.js:getPerformanceSummary()` reads `data.performance` without a null guard.
+  When the key is absent the value is `undefined`, and `.length` throws.
+- Fix: initialize as `{"lessons":[],"performance":[]}`. Not a code change — runtime gotcha.
+
+### Config reference
+- `user-config.example.json` on `nanocap-v1` branch is the canonical nanocap config.
+- `strategy-library.nanocap-v1.example.json` is the strategy library reference (committed).
+- Research basis: `nanocap-strategy-research/deliverables/NANOCAP_DLMM_RESEARCH_REPORT.md`
+
+---
+
 ## [v1.0.9-hotfix2] — 2026-04-12 — Fix null exitPreset/entryPreset coerced to default by ?? operator
 
 ### Bug fix
