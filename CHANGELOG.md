@@ -13,6 +13,18 @@
 - **Darwin**: fresh start (all 15 signal weights = 1.0, empty lessons/pool-memory)
 - **Autoresearch**: disabled | **HiveMind pull**: disabled
 
+### Bug fix: lp_strategy not enforced in screener deploy step (commit `56afe0c`)
+- **Symptom**: All nanocap deploys used `spot` distribution despite `strategy-library.json`
+  setting `lp_strategy: "bid_ask"`. Positions showed rectangular bin distribution on Meteora
+  instead of the expected triangular bid_ask shape.
+- **Root cause**: The screener prompt injects the active strategy name/type in a header block
+  (`ACTIVE STRATEGY: ... — LP: bid_ask`) but the deploy step 2 instructions never referenced
+  `lp_strategy` at all. The LLM had no explicit instruction and defaulted to `"spot"`.
+- **Fix**: Interpolate `activeStrategy.lp_strategy` directly into step 2 deploy instructions:
+  `lp_strategy: MUST be "bid_ask" — taken from ACTIVE STRATEGY above. Do NOT use "spot".`
+- **Impact**: All 4 initial nanocap positions were deployed with wrong shape (`spot`). Fix applies
+  to all future deploys. Existing positions unaffected until they close naturally.
+
 ### Setup fix: lessons.json must include `performance` array
 - `lessons.json` initialized as `{"lessons":[]}` caused `CRON_ERROR: Cannot read properties of
   undefined (reading 'length')` in both briefing and screening cycles.
