@@ -1,7 +1,5 @@
 # Changelog
 
-<<<<<<< HEAD
-=======
 ## [nanocap-v1 fixes-2] — 2026-04-13 — GMGN fix, PnL backfill, Darwin unblocked
 
 ### Fix: GMGN_API_KEY missing from VPS .env (both bots) — commit `a08d103`
@@ -91,7 +89,6 @@
 
 ---
 
->>>>>>> af07441 (docs: add GMGN fix + PnL backfill entries to CHANGELOG)
 ## [v1.0.9-hotfix2] — 2026-04-12 — Fix null exitPreset/entryPreset coerced to default by ?? operator
 
 ### Bug fix
