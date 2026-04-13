@@ -28,6 +28,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { log } from "../logger.js";
 
 const GMGN_BASE = "https://openapi.gmgn.ai/v1";
 const GMGN_API_KEY = process.env.GMGN_API_KEY || "";
@@ -59,13 +60,19 @@ export async function fetchGmgnTokenRisk(mintAddress, limit = 20) {
       signal:  AbortSignal.timeout(8000),
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log("gmgn", `HTTP ${res.status} for ${mintAddress.slice(0, 8)}`);
+      return null;
+    }
 
     const body = await res.json();
     if (body.code !== 0 || !Array.isArray(body.data?.list)) return null;
 
-    return _computeRiskSignals(body.data.list);
-  } catch {
+    const result = _computeRiskSignals(body.data.list);
+    log("gmgn", `${mintAddress.slice(0, 8)} — top10=${result.top10_concentration_pct}% bluechip=${result.bluechip_count} bundler=${result.bundler_count} suspicious=${result.suspicious_count}`);
+    return result;
+  } catch (err) {
+    log("gmgn_warn", `fetch failed for ${mintAddress.slice(0, 8)}: ${err.message}`);
     return null;
   }
 }
