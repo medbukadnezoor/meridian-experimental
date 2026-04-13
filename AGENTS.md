@@ -61,6 +61,7 @@ ssh ohox "ml"
 - **GMGN** (`LPAGENT_API_KEY` in `.env` on VPS) — live via `tools/gmgn.js`. Note: env var is named `LPAGENT_API_KEY`, not `GMGN_API_KEY`.
 - **InsightX** (`INSIGHTX_API_KEY` in `.env` on VPS) — NOT YET WIRED (Phase 2).
 - **State files live on VPS only** (`~/meridian/`). They are gitignored. Rsync them back before rebase.
+- **`user-config.json` source of truth**: The local `user-config.json` can drift. The VPS `~/meridian/user-config.json` is the ultimate ground truth for live execution parameters (OOR timers, stop loss, LLM routing endpoints). Pull it via rsync when auditing live behavior.
 
 ## Next High-Value Work
 1. **Monitor Darwin convergence** on new GMGN signals (`gmgn_bluechip_present`, `gmgn_bundler_present`) — needs 10+ closes each before tuning.

@@ -59,6 +59,14 @@ All checks must show ✅. If any show ❌, do not push or restart.
 **Authentication for `git push`**: 
 Use the `GITHUB_PERSONAL_ACCESS_TOKEN` stored in the workspace-level `.env` file (`/Users/user/Trading Project Files/DLMM/.env`). If prompted for a password during `git push`, use this PAT instead of your account password.
 
+**Workspace git structure** — three independent repos, no submodules:
+```
+DLMM/                    ← workspace repo (docs, strategy library, utility scripts)
+  meridian-experimental/ ← this bot repo (push to medbukadnezoor/meridian, branch: experimental)
+  meridian-intelligence/ ← RAG/analysis repo (local-only, branch: main)
+```
+DLMM's `.gitignore` excludes both sub-repos. Each sub-repo has its own git history.
+
 ### BEFORE any `git rebase`
 
 All steps required, in order:
@@ -179,7 +187,7 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 | Key | Section | Default |
 |-----|---------|---------|
-| minFeeActiveTvlRatio | screening | **0.07** (widened to 0.05 on 2026-04-12, evolved to 0.07 by lessons at 13:31 same day) |
+| minFeeActiveTvlRatio | screening | **0.08** (example baseline; autonomously evolved by `evolveThresholds()` — check live value with `config-check.js`) |
 | minTvl / maxTvl | screening | 10k / 150k |
 | minVolume | screening | **3000** (widened from 10000 on 2026-04-12) |
 | minOrganic | screening | **70** (VPS live; default is 60) |
@@ -206,12 +214,14 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 | outOfRangeHardCloseMinutes | management | 240 |
 | outOfRangeBinsToClose | management | 50 |
 | stopLossPct | management | **-5%** |
-| takeProfitPct | management | **6%** (VPS; default 5%) |
+| takeProfitPct | management | **4%** (lowered from 6% on 2026-04-13 — positions were peaking 4-5% and giving back gains waiting for 6%) |
+| takeProfitFeePct | management | **4%** (trailing TP minimum fee gate, matches TP target) |
 | trailingTriggerPct | management | 3% |
 | trailingDropPct | management | **2.5%** (VPS; default 1.5%) |
 | stopLossCooldownHours | management | **3h** (VPS override; pool-memory.js default is 12h) |
 | oorCooldownHours / oorCooldownTriggerCount | management | **8h / 4** (VPS; default 12h / 3) |
 | autoSwapAfterClaim | management | **true** (VPS; default false) |
+| solMode | management | **true** (all PnL and balance reporting in SOL, not USD — enabled 2026-04-13) |
 | managementIntervalMin | schedule | 10 |
 | screeningIntervalMin | schedule | **20** (VPS; default 30) |
 | managementModel / screeningModel / generalModel | llm | **qwen3.6-plus** (DashScope Singapore) |
