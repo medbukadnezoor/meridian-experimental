@@ -681,6 +681,7 @@ ${candidateBlocks.join("\n\n")}
 STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
+   lp_strategy: MUST be "${activeStrategy?.lp_strategy ?? 'bid_ask'}" — taken from ACTIVE STRATEGY above. Do NOT use "spot". Do NOT change this value.
    bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
