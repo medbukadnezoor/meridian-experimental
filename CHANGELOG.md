@@ -13,6 +13,20 @@
 - **Darwin**: fresh start (all 15 signal weights = 1.0, empty lessons/pool-memory)
 - **Autoresearch**: disabled | **HiveMind pull**: disabled
 
+### Bug fix: state.json positions must be object `{}` not array `[]`
+- **Symptom**: All close decisions logged `"metrics": {}` (empty). PnL never recorded in
+  `lessons.json performance[]`. Darwin had zero training data. Bot could not report wins/losses.
+- **Root cause**: `state.json` was initialized with `"positions": []` (array). `state.js` does
+  `state.positions[positionAddress] = data` — valid in JS memory but `JSON.stringify` silently
+  drops string keys on arrays. Every `save()` wrote back `{"positions": []}`, erasing all tracking.
+  On every `closePosition()` call, `getTrackedPosition()` read from disk → `[]` → `undefined` →
+  `tracked = null` → entire PnL + `recordPerformance()` block skipped.
+- **Fix**: Changed `state.json` to `{"positions": {}}` (object). `JSON.stringify` correctly
+  serializes string-keyed objects. Position tracking now persists across saves.
+- **Impact**: All 17 positions deployed before this fix closed without PnL data. Fix applied at
+  2026-04-13T16:27. All future deploys will be tracked and PnL will flow to Darwin/lessons.
+- **Initialization rule**: Always initialize as `{"positions": {}, "recentEvents": []}`.
+
 ### Bug fix: lp_strategy not enforced in screener deploy step (commit `56afe0c`)
 - **Symptom**: All nanocap deploys used `spot` distribution despite `strategy-library.json`
   setting `lp_strategy: "bid_ask"`. Positions showed rectangular bin distribution on Meteora
