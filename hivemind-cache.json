@@ -1,8 +1,34 @@
 {
   "sharedLessons": [
     {
-      "id": "1775905714015",
-      "rule": "PREFER: Peepa-SOL-type pools (volatility=4.17, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +2.25%.",
+      "id": "1775931442005",
+      "rule": "PREFER: emi-SOL-type pools (volatility=7, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +1.35%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.28,
+      "created_at": "2026-04-11T18:17:22.005Z"
+    },
+    {
+      "id": "1775931404292",
+      "rule": "PREFER: milkers-SOL-type pools (volatility=1.64, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +2.16%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.28,
+      "created_at": "2026-04-11T18:16:44.292Z"
+    },
+    {
+      "id": "1775931288898",
+      "rule": "PREFER: Neukgu-SOL-type pools (volatility=9.24, bin_step=80) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +6.04%.",
       "tags": [
         "efficient",
         "bid_ask"
@@ -11,7 +37,59 @@
       "outcome": "good",
       "sourceType": "performance",
       "score": 57.27,
-      "created_at": "2026-04-11T11:08:34.015Z"
+      "created_at": "2026-04-11T18:14:48.898Z"
+    },
+    {
+      "id": "1775931312768",
+      "rule": "PREFER: Peepa-SOL-type pools (volatility=4.85, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +3.97%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.27,
+      "created_at": "2026-04-11T18:15:12.768Z"
+    },
+    {
+      "id": "1775929299308",
+      "rule": "PREFER: Iroha-SOL-type pools (volatility=null, bin_step=100) with strategy=\"spot\" — 82.5% in-range efficiency, PnL +2.93%.",
+      "tags": [
+        "efficient",
+        "spot"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.25,
+      "created_at": "2026-04-11T17:41:39.308Z"
+    },
+    {
+      "id": "1775928708610",
+      "rule": "PREFER: Iroha-SOL-type pools (volatility=2.11, bin_step=100) with strategy=\"bid_ask\" — 95.5% in-range efficiency, PnL +2.83%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.24,
+      "created_at": "2026-04-11T17:31:48.610Z"
+    },
+    {
+      "id": "1775927698403",
+      "rule": "PREFER: GENZ-SOL-type pools (volatility=5.12, bin_step=80) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +2.31%.",
+      "tags": [
+        "efficient",
+        "bid_ask"
+      ],
+      "role": null,
+      "outcome": "good",
+      "sourceType": "performance",
+      "score": 57.23,
+      "created_at": "2026-04-11T17:14:58.403Z"
     },
     {
       "id": "1775905228864",
@@ -23,60 +101,8 @@
       "role": null,
       "outcome": "good",
       "sourceType": "performance",
-      "score": 57.26,
+      "score": 56.97,
       "created_at": "2026-04-11T11:00:28.864Z"
-    },
-    {
-      "id": "1775903939899",
-      "rule": "PREFER: Neukgu-SOL-type pools (volatility=2.98, bin_step=80) with strategy=\"bid_ask\" — 99.6% in-range efficiency, PnL +5.94%.",
-      "tags": [
-        "efficient",
-        "bid_ask"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 57.25,
-      "created_at": "2026-04-11T10:38:59.899Z"
-    },
-    {
-      "id": "1775896482949",
-      "rule": "PREFER: Iroha-SOL-type pools (volatility=0.7, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +4.55%.",
-      "tags": [
-        "efficient",
-        "bid_ask"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 57.16,
-      "created_at": "2026-04-11T08:34:42.949Z"
-    },
-    {
-      "id": "1775895549868",
-      "rule": "PREFER: GENZ-SOL-type pools (volatility=1.52, bin_step=80) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +2.71%.",
-      "tags": [
-        "efficient",
-        "bid_ask"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 57.15,
-      "created_at": "2026-04-11T08:19:09.868Z"
-    },
-    {
-      "id": "1775895096633",
-      "rule": "PREFER: Iroha-SOL-type pools (volatility=2.88, bin_step=100) with strategy=\"spot\" — 100% in-range efficiency, PnL +1.66%.",
-      "tags": [
-        "efficient",
-        "spot"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 57.14,
-      "created_at": "2026-04-11T08:11:36.633Z"
     },
     {
       "id": "1775821393365",
@@ -88,7 +114,7 @@
       "role": null,
       "outcome": "good",
       "sourceType": "performance",
-      "score": 56.29,
+      "score": 56,
       "created_at": "2026-04-10T11:43:13.365Z"
     },
     {
@@ -101,21 +127,21 @@
       "role": null,
       "outcome": "good",
       "sourceType": "performance",
-      "score": 56.24,
+      "score": 55.95,
       "created_at": "2026-04-10T10:30:13.235Z"
     },
     {
-      "id": "1775813743014",
-      "rule": "PREFER: milkers-SOL-type pools (volatility=1.95, bin_step=100) with strategy=\"bid_ask\" — 100% in-range efficiency, PnL +6.51%.",
+      "id": "1775930332999",
+      "rule": "PREFER: Neukgu-SOL-type pools (volatility=3.46, bin_step=80) with strategy=\"spot\" — 100% in-range efficiency, PnL +5.11%.",
       "tags": [
         "efficient",
-        "bid_ask"
+        "spot"
       ],
       "role": null,
       "outcome": "good",
       "sourceType": "performance",
-      "score": 56.2,
-      "created_at": "2026-04-10T09:35:43.014Z"
+      "score": 55.26,
+      "created_at": "2026-04-11T17:58:52.999Z"
     },
     {
       "id": "1775756131815",
@@ -127,36 +153,10 @@
       "role": null,
       "outcome": "good",
       "sourceType": "performance",
-      "score": 55.53,
+      "score": 55.25,
       "created_at": "2026-04-09T17:35:31.815Z"
-    },
-    {
-      "id": "1775746685888",
-      "rule": "PREFER: 49-SOL-type pools (volatility=2.99, bin_step=100) with strategy=\"bid_ask\" — 97.8% in-range efficiency, PnL +4.42%.",
-      "tags": [
-        "efficient",
-        "bid_ask"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 55.43,
-      "created_at": "2026-04-09T14:58:05.888Z"
-    },
-    {
-      "id": "1775905419354",
-      "rule": "PREFER: GENZ-SOL-type pools (volatility=2.2, bin_step=80) with strategy=\"spot\" — 99.4% in-range efficiency, PnL +3.26%.",
-      "tags": [
-        "efficient",
-        "spot"
-      ],
-      "role": null,
-      "outcome": "good",
-      "sourceType": "performance",
-      "score": 55.26,
-      "created_at": "2026-04-11T11:03:39.354Z"
     }
   ],
   "presets": [],
-  "pulledAt": "2026-04-11T11:28:29.471Z"
+  "pulledAt": "2026-04-11T18:22:28.263Z"
 }
