@@ -12,8 +12,8 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 [CONFIRMED] Bot Host: VPS **ohox** (TencentCloud Singapore, 43.156.182.93) under PM2.
 [CONFIRMED] Security Status: ACTIVE (8 patches maintained).
 [CONFIRMED] Active Role Models: All use `qwen3.6-plus` via DashScope Singapore.
-[CONFIRMED] **takeProfitPct: 4%** / **takeProfitFeePct: 4%**
-[CONFIRMED] **solMode: true** — All PnL/balance reporting in SOL. Close path now correctly reads `.sol` fields from Meteora datapi (fixed 2026-04-14, commit `f4911a1`). Both relay and non-relay paths branch on `solMode`. Fallback cache reads also use SOL-denominated fields. `lessons.json` performance records now store SOL values in `initial_value_usd`, `final_value_usd`, `fees_earned_usd` when solMode=true.
+[CONFIRMED] **takeProfitPct: 4%** / **deployAmountSol: 3.0** (Upsized 2026-04-15) / **takeProfitFeePct: 4%**
+[CONFIRMED] **solMode: true** / **minTvl: 20000** (Upsized 2026-04-15) — All PnL/balance reporting in SOL. Close path now correctly reads `.sol` fields from Meteora datapi (fixed 2026-04-14, commit `f4911a1`). Both relay and non-relay paths branch on `solMode`. Fallback cache reads also use SOL-denominated fields. `lessons.json` performance records now store SOL values in `initial_value_usd`, `final_value_usd`, `fees_earned_usd` when solMode=true.
 [CONFIRMED] **minFeeActiveTvlRatio: 0.08** (example baseline; evolved by Darwin).
 [CONFIRMED] **Stop Loss: -5%** with 3h cooldown.
 [CONFIRMED] **OOR Cooldown: 8h** after 4 consecutive OOR exits.

@@ -8,10 +8,10 @@
   "llmModel": "qwen3.6-plus",
   "dryRun": false,
 
-  "deployAmountSol": 0.7,
-  "maxPositions": 4,
+  "deployAmountSol": 3.0,
+  "maxPositions": 2,
   "minSolToOpen": 0.15,
-  "maxDeployAmount": 200,
+  "maxDeployAmount": 3.5,
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
 
@@ -21,7 +21,7 @@
   "timeframe": "4h",
   "category": "trending",
   "excludeHighSupplyConcentration": true,
-  "minTvl": 10000,
+  "minTvl": 20000,
   "maxTvl": 150000,
   "minVolume": 3000,
   "minOrganic": 70,

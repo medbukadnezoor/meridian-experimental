@@ -163,11 +163,19 @@ def main():
     parser.add_argument("--source", choices=["dashscope", "openrouter", "sls", "all"], required=True)
     parser.add_argument("--last", type=int, default=24)
     parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--api-key", type=str, default=None, help="Specific API key for the chosen source")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
 
     load_env()
+    
+    # Overwrite environment variable if explicit key is passed via CLI
+    if args.api_key:
+        if args.source == "dashscope" or args.source == "sls":
+            os.environ["DASHSCOPE_API_KEY"] = args.api_key
+        elif args.source == "openrouter":
+            os.environ["OPENROUTER_API_KEY"] = args.api_key
     
     logs = []
     if args.source in ["dashscope", "all"]:
