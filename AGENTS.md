@@ -19,6 +19,10 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 [CONFIRMED] **OOR Cooldown: 8h** after 4 consecutive OOR exits.
 [CONFIRMED] **OOR Hard Close: 240m**.
 
+### Nanocap-specific patches (nanocap-v1 branch)
+[CONFIRMED] **skipClaim on URGENT stop-loss** (commit `c11e584`, 2026-04-16): `closePosition()` accepts `urgent: true`. When urgent, Step 1 (claimFees TX) is skipped — `removeLiquidity({ shouldClaimAndClose: true })` still captures fees atomically. Both URGENT close paths in `index.js` pass `urgent: true`. Fixes the Republicans-SOL incident where a 23s claim TX held the position open while price dropped -50% further (final PnL -65.79% vs -33% at trigger). Pending merge to `experimental` after 3–5 confirmed URGENT closes on nanocap.
+[CONFIRMED] **minOrganic: 55** on nanocap VPS (raised from 45, operator instruction 2026-04-16). Republicans-SOL had organic=77 and still rugged — organic alone insufficient, but this reduces nanocap's exposure to the lowest-quality tier.
+
 ## Safety Protocol
 **The bot runs on VPS ohox, NOT locally. Do NOT run `node index.js` on Mac.**
 
