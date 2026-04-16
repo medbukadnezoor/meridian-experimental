@@ -841,6 +841,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
                 const result = await executeTool("close_position", {
                   position_address: p.position,
                   reason: `Trailing TP: ${exit.reason}`,
+                  urgent: true,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
@@ -882,6 +883,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
                 const result = await executeTool("close_position", {
                   position_address: p.position,
                   reason: `Trailing TP: ${closeRule.reason}`,
+                  urgent: true,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);

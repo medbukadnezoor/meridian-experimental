@@ -1122,7 +1122,7 @@ export async function claimFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
-export async function closePosition({ position_address, reason }) {
+export async function closePosition({ position_address, reason, urgent }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
@@ -1354,27 +1354,33 @@ export async function closePosition({ position_address, reason }) {
     const closeTxHashes = [];
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
+    // Skip claim on URGENT stop-loss — removeLiquidity (Step 2) uses shouldClaimAndClose:true
+    // which handles fees atomically. Skipping saves ~20–25s exposure during rug scenarios.
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
-    try {
-      if (recentlyClaimed) {
-        log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
-      } else {
-        log("close", `Step 1: Claiming fees for ${position_address}`);
-        const positionData = await pool.getPosition(positionPubKey);
-        const claimTxs = await pool.claimSwapFee({
-          owner: wallet.publicKey,
-          position: positionData,
-        });
-        if (claimTxs && claimTxs.length > 0) {
-          for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-            claimTxHashes.push(claimHash);
+    if (urgent) {
+      log("close", `Step 1: Skipping claim — urgent stop-loss, going straight to liquidity removal`);
+    } else {
+      try {
+        if (recentlyClaimed) {
+          log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else {
+          log("close", `Step 1: Claiming fees for ${position_address}`);
+          const positionData = await pool.getPosition(positionPubKey);
+          const claimTxs = await pool.claimSwapFee({
+            owner: wallet.publicKey,
+            position: positionData,
+          });
+          if (claimTxs && claimTxs.length > 0) {
+            for (const tx of claimTxs) {
+              const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+              claimTxHashes.push(claimHash);
+            }
+            log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
           }
-          log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
+      } catch (e) {
+        log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
       }
-    } catch (e) {
-      log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
     }
 
     // ─── Step 2: Remove Liquidity & Close ──────────────────────
