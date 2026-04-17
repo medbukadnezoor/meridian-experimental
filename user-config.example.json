@@ -1,5 +1,5 @@
 {
-  "_note": "NANOCAP-V1 — Hypothesis 1 forward test. Nanocap DLMM mean-reversion accumulation. LP-first discovery, lenient filters, fresh Darwin. 0.2 SOL / 1.5 SOL wallet. See nanocap-v1 branch. Secrets pattern: YOUR_*",
+  "_note": "NANOCAP-V1 — Phase 2 (scaled). Nanocap DLMM mean-reversion accumulation. 1.5 SOL / 5.0 SOL wallet. Scaled 2026-04-17 after 5-day forward test (136 closes, 79.4% win rate, +18.7% wallet return). See nanocap-v1 branch. Secrets pattern: YOUR_*",
 
   "preset": "nanocap-v1",
   "rpcUrl": "YOUR_HELIUS_RPC_URL",
@@ -8,11 +8,11 @@
   "llmModel": "qwen3.6-plus",
   "dryRun": false,
 
-  "deployAmountSol": 0.2,
-  "maxPositions": 6,
-  "minSolToOpen": 0.1,
-  "maxDeployAmount": 0.25,
-  "gasReserve": 0.15,
+  "deployAmountSol": 1.5,
+  "maxPositions": 3,
+  "minSolToOpen": 0.5,
+  "maxDeployAmount": 1.55,
+  "gasReserve": 0.20,
   "positionSizePct": 0.35,
 
   "strategy": "bid_ask",
@@ -22,7 +22,7 @@
   "category": "trending",
   "excludeHighSupplyConcentration": false,
 
-  "minTvl": 2000,
+  "minTvl": 10000,
   "maxTvl": 300000,
   "minVolume": 1000,
   "minOrganic": 55,
