@@ -178,6 +178,8 @@ Sets defined in `agent.js:6-7`. If you add a tool, also add it to the relevant s
 
 ## Config System
 
+> **Strategy rationale:** For the *why* behind config values on both bots (especially nanocap's -25% SL, 25% TP, LP PnL mechanics), read `meridian-intelligence/STRATEGY_JUSTIFICATION.md` before making parameter changes.
+
 `config.js` loads `user-config.json` at startup. Runtime mutations go through `update_config` tool (executor.js) which:
 - Updates the live `config` object immediately
 - Persists to `user-config.json`
