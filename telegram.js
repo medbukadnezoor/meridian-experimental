@@ -21,6 +21,7 @@ let _polling = false;
 let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
+const TELEGRAM_MAX_TEXT_LENGTH = 4096;
 
 // ─── chatId persistence ──────────────────────────────────────────
 function loadChatId() {
@@ -101,9 +102,39 @@ async function postTelegram(method, body) {
   }
 }
 
+function splitTelegramText(text, maxLen = TELEGRAM_MAX_TEXT_LENGTH) {
+  const input = String(text ?? "");
+  if (!input) return [""];
+  if (input.length <= maxLen) return [input];
+
+  const chunks = [];
+  let remaining = input;
+  const minPreferredCut = Math.floor(maxLen * 0.5);
+
+  while (remaining.length > maxLen) {
+    let cut = remaining.lastIndexOf("\n\n", maxLen);
+    if (cut < minPreferredCut) cut = remaining.lastIndexOf("\n", maxLen);
+    if (cut < minPreferredCut) cut = remaining.lastIndexOf(" ", maxLen);
+    if (cut < minPreferredCut) cut = maxLen;
+
+    const chunk = remaining.slice(0, cut).trimEnd();
+    chunks.push(chunk || remaining.slice(0, maxLen));
+    remaining = remaining.slice(cut).trimStart();
+  }
+
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks.filter(Boolean);
+}
+
 export async function sendMessage(text) {
   if (!TOKEN || !chatId) return;
-  return postTelegram("sendMessage", { text: String(text).slice(0, 4096) });
+  const chunks = splitTelegramText(text);
+  let firstResult = null;
+  for (const chunk of chunks) {
+    const result = await postTelegram("sendMessage", { text: chunk });
+    if (!firstResult) firstResult = result;
+  }
+  return firstResult;
 }
 
 export async function sendHTML(html) {
@@ -213,12 +244,13 @@ export async function createLiveMessage(title, intro = "Starting...") {
     flushRequested: false,
   };
 
-  function render() {
+  function render({ allowOverflow = false } = {}) {
     const sections = [state.title];
     if (state.intro) sections.push(state.intro);
     if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
     if (state.footer) sections.push(state.footer);
-    return sections.join("\n\n").slice(0, 4096);
+    const text = sections.join("\n\n");
+    return allowOverflow ? text : text.slice(0, TELEGRAM_MAX_TEXT_LENGTH);
   }
 
   async function flushNow() {
@@ -231,6 +263,27 @@ export async function createLiveMessage(title, intro = "Starting...") {
       return;
     }
     await editMessage(text, state.messageId);
+  }
+
+  async function flushFinalNow() {
+    state.flushTimer = null;
+    state.flushRequested = false;
+    const chunks = splitTelegramText(render({ allowOverflow: true }));
+    const [firstChunk = "", ...restChunks] = chunks;
+
+    if (!state.messageId) {
+      const sent = await postTelegram("sendMessage", { text: firstChunk });
+      state.messageId = sent?.result?.message_id ?? null;
+    } else {
+      await postTelegram("editMessageText", {
+        message_id: state.messageId,
+        text: firstChunk,
+      });
+    }
+
+    for (const chunk of restChunks) {
+      await postTelegram("sendMessage", { text: chunk });
+    }
   }
 
   function scheduleFlush(delay = 300) {
@@ -275,7 +328,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
       }
       if (state.flushPromise) await state.flushPromise;
       state.footer = finalText;
-      await flushNow();
+      await flushFinalNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },
@@ -286,7 +339,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
       }
       if (state.flushPromise) await state.flushPromise;
       state.footer = `❌ ${errorText}`;
-      await flushNow();
+      await flushFinalNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();
     },
