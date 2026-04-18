@@ -6,6 +6,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
 const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
+const DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
+const DEFAULT_HIVEMIND_API_KEY = DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY;
 
 const u = fs.existsSync(USER_CONFIG_PATH)
   ? JSON.parse(fs.readFileSync(USER_CONFIG_PATH, "utf8"))
@@ -17,6 +19,14 @@ export function normalizeOptionalString(value) {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed === "" ? undefined : trimmed;
+}
+
+export function firstNonEmptyString(...values) {
+  for (const value of values) {
+    const normalized = normalizeOptionalString(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
 }
 
 export const INTERNAL_FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
@@ -177,17 +187,26 @@ export const config = {
 
   // ─── HiveMind ─────────────────────────
   hiveMind: {
-    url: u.hiveMindUrl ?? DEFAULT_HIVEMIND_URL,
-    apiKey: u.hiveMindApiKey ?? "",
+    url: firstNonEmptyString(u.hiveMindUrl, DEFAULT_HIVEMIND_URL) ?? DEFAULT_HIVEMIND_URL,
+    apiKey: firstNonEmptyString(u.hiveMindApiKey, process.env.HIVEMIND_API_KEY, DEFAULT_HIVEMIND_API_KEY) ?? DEFAULT_HIVEMIND_API_KEY,
     agentId: u.agentId ?? null,
     pullMode: u.hiveMindPullMode ?? "auto",
   },
 
   // ─── Agent Meridian API ───────────────
   api: {
-    url: u.agentMeridianApiUrl ?? process.env.AGENT_MERIDIAN_API_URL ?? DEFAULT_AGENT_MERIDIAN_API_URL,
-    publicApiKey: u.publicApiKey ?? process.env.PUBLIC_API_KEY ?? "",
+    url: firstNonEmptyString(u.agentMeridianApiUrl, process.env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL) ?? DEFAULT_AGENT_MERIDIAN_API_URL,
+    publicApiKey: firstNonEmptyString(u.publicApiKey, process.env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY) ?? DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY,
     lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
+  },
+
+  // ─── Jupiter Swap V2 ──────────────────
+  jupiter: {
+    apiKey: firstNonEmptyString(process.env.JUPITER_API_KEY) ?? "",
+    referralAccount:
+      firstNonEmptyString(process.env.JUPITER_REFERRAL_ACCOUNT, "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey")
+      ?? "9MzhDUnq3KxecyPzvhguQMMPbooXQ3VAoCMPDnoijwey",
+    referralFeeBps: Number(process.env.JUPITER_REFERRAL_FEE_BPS ?? 50),
   },
 
   // ─── Chart Indicator Confirmations ────

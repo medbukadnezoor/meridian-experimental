@@ -115,7 +115,7 @@
   "agentId": "YOUR_AGENT_ID",
   "publicApiKey": "YOUR_PUBLIC_API_KEY",
   "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
-  "lpAgentRelayEnabled": false,
+  "lpAgentRelayEnabled": true,
 
   "chartIndicators": {
     "enabled": true,

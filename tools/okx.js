@@ -4,6 +4,7 @@
  * Docs: https://web3.okx.com/build/dev-docs/
  */
 import crypto from "crypto";
+import { config } from "../config.js";
 
 const BASE = "https://web3.okx.com";
 const CHAIN_SOLANA = "501";
@@ -12,6 +13,8 @@ const OKX_API_KEY = process.env.OKX_API_KEY || process.env.OK_ACCESS_KEY || "";
 const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || process.env.OK_ACCESS_SECRET || "";
 const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || process.env.OK_ACCESS_PASSPHRASE || "";
 const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID || process.env.OK_ACCESS_PROJECT || "";
+const serverEnrichmentCache = new Map();
+const SERVER_ENRICHMENT_CACHE_MS = 30_000;
 
 function hasAuth() {
   return !!(OKX_API_KEY && OKX_SECRET_KEY && OKX_PASSPHRASE && !/enter your passphrase here/i.test(OKX_PASSPHRASE));
@@ -64,6 +67,56 @@ async function okxPost(path, body) {
 const pct = (v) => v != null && v !== "" ? parseFloat(v) : null;
 const int = (v) => v != null && v !== "" ? parseInt(v, 10) : null;
 
+function agentMeridianBaseUrl() {
+  return String(config.api?.url || "").replace(/\/+$/, "");
+}
+
+function agentMeridianHeaders() {
+  const headers = { accept: "application/json" };
+  if (config.api?.publicApiKey) {
+    headers["x-api-key"] = config.api.publicApiKey;
+  }
+  return headers;
+}
+
+async function fetchServerOkxEnrichment(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  const baseUrl = agentMeridianBaseUrl();
+  if (!baseUrl) return null;
+
+  const cacheKey = `${chainIndex}:${tokenAddress}`;
+  const cached = serverEnrichmentCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < SERVER_ENRICHMENT_CACHE_MS) {
+    return cached.promise;
+  }
+
+  const url = `${baseUrl}/okx/enrich/${encodeURIComponent(tokenAddress)}?chainIndex=${encodeURIComponent(chainIndex)}`;
+  const promise = fetch(url, { headers: agentMeridianHeaders() })
+    .then(async (res) => {
+      const text = await res.text();
+      const payload = text ? JSON.parse(text) : null;
+      if (!res.ok) {
+        throw new Error(payload?.error || `Agent Meridian OKX enrichment ${res.status}`);
+      }
+      return payload;
+    })
+    .catch((error) => {
+      serverEnrichmentCache.delete(cacheKey);
+      throw error;
+    });
+
+  serverEnrichmentCache.set(cacheKey, { at: Date.now(), promise });
+  return promise;
+}
+
+async function getServerOkxEnrichmentOrNull(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  if (hasAuth()) return null;
+  try {
+    return await fetchServerOkxEnrichment(tokenAddress, chainIndex);
+  } catch {
+    return null;
+  }
+}
+
 function isAffirmative(label) {
   return typeof label === "string" && label.trim().toLowerCase() === "yes";
 }
@@ -82,6 +135,9 @@ function collectRiskEntries(section) {
  * Rugpull is informational only; wash trading is used as a hard filter upstream.
  */
 export async function getRiskFlags(tokenAddress, chainId = CHAIN_SOLANA) {
+  const serverPayload = await getServerOkxEnrichmentOrNull(tokenAddress, chainId);
+  if (serverPayload?.risk) return serverPayload.risk;
+
   const ts = Date.now();
   const path = `/priapi/v1/dx/market/v2/risk/new/check?chainId=${chainId}&tokenContractAddress=${tokenAddress}&t=${ts}`;
   const data = await okxGet(path);
@@ -108,6 +164,9 @@ export async function getRiskFlags(tokenAddress, chainId = CHAIN_SOLANA) {
  * Advanced token info — risk level, bundle/sniper/suspicious %, dev rug history, token tags.
  */
 export async function getAdvancedInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  const serverPayload = await getServerOkxEnrichmentOrNull(tokenAddress, chainIndex);
+  if (serverPayload?.advanced) return serverPayload.advanced;
+
   const path = `/api/v6/dex/market/token/advanced-info?chainIndex=${chainIndex}&tokenContractAddress=${tokenAddress}`;
   const data = await okxGet(path);
   const d = Array.isArray(data) ? data[0] : data;
@@ -142,6 +201,9 @@ export async function getAdvancedInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
  * Condenses to top N clusters for LLM consumption.
  */
 export async function getClusterList(tokenAddress, chainIndex = CHAIN_SOLANA, limit = 5) {
+  const serverPayload = await getServerOkxEnrichmentOrNull(tokenAddress, chainIndex);
+  if (Array.isArray(serverPayload?.clusters)) return serverPayload.clusters.slice(0, limit);
+
   const path = `/api/v6/dex/market/token/cluster/list?chainIndex=${chainIndex}&tokenContractAddress=${tokenAddress}`;
   const data = await okxGet(path);
   // Public endpoint returns data.clusterList (not data[0].clustList)
@@ -169,6 +231,9 @@ export async function getClusterList(tokenAddress, chainIndex = CHAIN_SOLANA, li
  * Also returns holders, marketCap, liquidity from this endpoint.
  */
 export async function getPriceInfo(tokenAddress, chainIndex = CHAIN_SOLANA) {
+  const serverPayload = await getServerOkxEnrichmentOrNull(tokenAddress, chainIndex);
+  if (serverPayload?.price) return serverPayload.price;
+
   const data = await okxPost("/api/v6/dex/market/price-info", [
     { chainIndex, tokenContractAddress: tokenAddress },
   ]);
