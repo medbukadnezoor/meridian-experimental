@@ -423,6 +423,9 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
+  if (!silent && telegramEnabled()) {
+    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...");
+  }
   try {
     [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
     if (prePositions.total_positions >= config.risk.maxPositions) {
@@ -457,9 +460,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
     _screeningBusy = false;
     return screenReport;
   }
-  if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Scanning candidates...");
-  }
+  await liveMessage?.note("Scanning candidates...");
   timers.screeningLastRun = Date.now();
   log("cron", `Starting screening cycle [model: ${config.llm.screeningModel}]`);
   try {
@@ -1834,15 +1835,32 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
   (async () => {
+    let startupLiveMessage = null;
     try {
+      if (telegramEnabled()) {
+        startupLiveMessage = await createLiveMessage("🚀 Startup Check", "Checking wallet, open positions, and best current opportunity...");
+      }
       const startupStep3 = process.env.DRY_RUN === "true"
         ? `3. Ignore wallet SOL threshold in dry run: get_top_candidates then simulate deploy ${DEPLOY} SOL.`
         : `3. If SOL >= ${config.management.minSolToOpen}: get_top_candidates then deploy ${DEPLOY} SOL.`;
-      await agentLoop(`
+      const { content } = await agentLoop(`
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
-      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel);
+      `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, null, {
+        onToolStart: async ({ name }) => { await startupLiveMessage?.toolStart(name); },
+        onToolFinish: async ({ name, result, success }) => { await startupLiveMessage?.toolFinish(name, result, success); },
+      });
+      if (startupLiveMessage) {
+        await startupLiveMessage.finalize(stripThink(content)).catch(() => {});
+      } else if (telegramEnabled()) {
+        await sendMessage(`🚀 Startup Check\n\n${stripThink(content)}`).catch(() => {});
+      }
     } catch (e) {
+      if (startupLiveMessage) {
+        await startupLiveMessage.fail(e.message).catch(() => {});
+      } else if (telegramEnabled()) {
+        await sendMessage(`🚀 Startup Check\n\n❌ ${e.message}`).catch(() => {});
+      }
       log("startup_error", e.message);
     }
   })();
