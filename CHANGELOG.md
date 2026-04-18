@@ -1,5 +1,32 @@
 # Changelog
 
+## [position fallback order] — 2026-04-18 — LPAgent.io direct as intermediate fallback — both branches
+
+### Change: Relay → LPAgent.io direct → Meteora (was: relay → Meteora)
+
+**Motivation**: When Agent Meridian relay is unavailable, position data previously fell all the way
+back to Meteora portfolio API. LPAgent.io has its own direct API (`/lp-positions/opening`) that
+returns pool address, position address, bin ranges, and full PnL — enough to run management
+without Meteora at all. Adding it as an intermediate fallback means two independent fallbacks exist
+before the Meteora dependency.
+
+**Changes in `tools/dlmm.js`:**
+- `getMyPositions()`: After Meridian relay catch, tries `fetchLpAgentOpenPositions()` first.
+  Groups returned positions by `lpData.pool`, batch-fetches Meteora PnL per pool for `lowerBinId`/
+  `upperBinId`/`poolActiveBinId` (bin IDs only), then builds the full positions array.
+  Falls through to Meteora portfolio if LPAgent returns 0 positions or `LPAGENT_API_KEY` is absent.
+- `getPositionPnl()`: Same intermediate pattern — tries LPAgent direct after relay miss/failure,
+  falls to Meteora PnL API only if LPAgent also misses the position.
+
+**Fallback chain (both functions):**
+  1. Agent Meridian relay (if `lpAgentRelayEnabled: true`) — full data
+  2. LPAgent.io direct (if `LPAGENT_API_KEY` set) — position discovery + PnL + bin hints
+  3. Meteora portfolio/PnL API — original fallback, now third in line
+
+**Applied to**: `nanocap-v1` and `experimental` branches.
+
+---
+
 ## [nanocap urgent stop-loss fix] — 2026-04-16 — Skip claimFees on URGENT stop-loss — commit `c11e584`
 
 ### Fix: claimFees TX exposes position to further dump during rug events (nanocap-v1)
