@@ -1,5 +1,63 @@
 # Changelog
 
+## [position fallback order] — 2026-04-18 — LPAgent.io direct as intermediate fallback — both branches
+
+### Change: Relay → LPAgent.io direct → Meteora (was: relay → Meteora)
+
+**Motivation**: When Agent Meridian relay is unavailable, position data previously fell all the way
+back to Meteora portfolio API. LPAgent.io has its own direct API (`/lp-positions/opening`) that
+returns pool address, position address, bin ranges, and full PnL — enough to run management
+without Meteora at all. Adding it as an intermediate fallback means two independent fallbacks exist
+before the Meteora dependency.
+
+**Changes in `tools/dlmm.js`:**
+- `getMyPositions()`: After Meridian relay catch, tries `fetchLpAgentOpenPositions()` first.
+  Groups returned positions by `lpData.pool`, batch-fetches Meteora PnL per pool for `lowerBinId`/
+  `upperBinId`/`poolActiveBinId` (bin IDs only), then builds the full positions array.
+  Falls through to Meteora portfolio if LPAgent returns 0 positions or `LPAGENT_API_KEY` is absent.
+- `getPositionPnl()`: Same intermediate pattern — tries LPAgent direct after relay miss/failure,
+  falls to Meteora PnL API only if LPAgent also misses the position.
+
+**Fallback chain (both functions):**
+  1. Agent Meridian relay (if `lpAgentRelayEnabled: true`) — full data
+  2. LPAgent.io direct (if `LPAGENT_API_KEY` set) — position discovery + PnL + bin hints
+  3. Meteora portfolio/PnL API — original fallback, now third in line
+
+**Applied to**: `nanocap-v1` and `experimental` branches.
+
+---
+
+## [nanocap urgent stop-loss fix] — 2026-04-16 — Skip claimFees on URGENT stop-loss — commit `c11e584`
+
+### Fix: claimFees TX exposes position to further dump during rug events (nanocap-v1)
+
+- **Incident**: Republicans-SOL (2026-04-16, 01:31–01:56 UTC). Bot deployed 0.25 SOL at
+  ~0.00040 USD/token. Price was stable for ~22 minutes then crashed. URGENT stop-loss fired
+  at 01:55:38 UTC when PnL hit -32.94%. Step 1 (claimFees TX) took **23 seconds** to confirm.
+  During those 23 seconds, the token crashed from ~0.00020 to ~0.00008 USD (a further -60%).
+  The second URGENT fire (at 01:56:09) showed -61.19% PnL. Final closed PnL: **-65.79%**.
+- **Root cause**: The non-relay close path always ran Step 1 (`claimSwapFee`) before Step 2
+  (`removeLiquidity`). But Step 2 already has `shouldClaimAndClose: true`, which claims fees
+  atomically inside the same remove-liquidity transaction. The separate Step 1 claim was
+  redundant for stop-loss exits and created a 20–25 second window of additional exposure.
+- **Confirmed via chart**: GeckoTerminal 1m OHLCV for pumpswap pool
+  `1xJ6quHgi7qLVvxyoWom8rGNwQFR6nKRvs4KrYU47d6`:
+  - 01:54 candle: open 0.00041 → low 0.00019 (-54% in 60s)
+  - 01:55 candle: open 0.00020 → low 0.00008 (-62% more) — this is when claim TX ran
+  - Price at stop-loss fire (~01:55:38): ~0.00020. Price when removed (~01:56:09): ~0.00008.
+- **Fix (commit `c11e584`, nanocap-v1)**:
+  - `closePosition()` accepts `urgent: true` parameter
+  - When `urgent: true`, Step 1 (claimFees) is skipped; logs "urgent stop-loss, going straight
+    to liquidity removal"
+  - Both URGENT close paths in `index.js` now pass `urgent: true`
+  - `removeLiquidity({ shouldClaimAndClose: true })` still handles fees atomically — no fee loss
+- **Config change**: `minOrganic` raised 45 → 55 (operator instruction, 2026-04-16)
+- **Deployed to nanocap**: VPS ohox, 2026-04-16. `user-config.json` updated directly.
+- **Next step**: Monitor 3–5 URGENT closes on nanocap-v1. If stops land closer to -25% threshold
+  instead of -65%, merge this fix to `experimental` branch.
+
+---
+
 ## [solMode close path fix] — 2026-04-14 — PnL fields now correctly denominated in SOL — commit `f4911a1`
 
 ### Fix: Close path hardcoded to USD despite solMode=true

@@ -801,11 +801,35 @@ export async function getPositionPnl({ pool_address, position_address }) {
           request_id: payload?.requestId || null,
         };
       }
-      log("pnl_warn", "Relay positions API did not include requested position; falling back to Meteora PnL path");
+      log("pnl_warn", "Relay positions API did not include requested position; falling back to LPAgent.io direct PnL");
     } catch (error) {
-      log("pnl_warn", `Relay PnL lookup failed; falling back to Meteora PnL path: ${error.message}`);
+      log("pnl_warn", `Relay PnL lookup failed; falling back to LPAgent.io direct PnL: ${error.message}`);
     }
   }
+  // ─── Fallback 1: LPAgent.io direct ───────────────────────────
+  if (process.env.LPAGENT_API_KEY) {
+    try {
+      const lpAgentByPos = await fetchLpAgentOpenPositions(walletAddress);
+      const lpData = lpAgentByPos[position_address];
+      if (lpData) {
+        log("pnl", `LPAgent.io direct PnL for ${position_address.slice(0, 8)}: ${config.management.solMode ? (lpData.pnl?.percentNative ?? 0).toFixed(2) : (lpData.pnl?.percent ?? 0).toFixed(2)}%`);
+        return {
+          pnl_usd:           Math.round(safeNum(config.management.solMode ? lpData.pnl?.valueNative   : lpData.pnl?.value)       * 100) / 100,
+          pnl_pct:           Math.round(safeNum(config.management.solMode ? lpData.pnl?.percentNative : lpData.pnl?.percent)     * 100) / 100,
+          current_value_usd: Math.round(safeNum(config.management.solMode ? lpData.valueNative        : lpData.value)            * 100) / 100,
+          unclaimed_fee_usd: Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative : lpData.unCollectedFee) * 100) / 100,
+          all_time_fees_usd: Math.round(safeNum(config.management.solMode ? lpData.collectedFeeNative  : lpData.collectedFee)    * 100) / 100,
+          in_range:          !!lpData.inRange,
+          lower_bin:         lpData.tickLower ?? null,
+          upper_bin:         lpData.tickUpper ?? null,
+        };
+      }
+      log("pnl_warn", "LPAgent.io direct: position not found — falling back to Meteora PnL API");
+    } catch (lpErr) {
+      log("pnl_warn", `LPAgent.io direct PnL failed; falling back to Meteora PnL API: ${lpErr.message}`);
+    }
+  }
+  // ─── Fallback 2: Meteora PnL API ─────────────────────────────
   try {
     const byAddress = await fetchDlmmPnlForPool(pool_address, walletAddress);
     const p = byAddress[position_address];
@@ -919,10 +943,93 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         _positionsCacheAt = Date.now();
         return _positionsCache;
       } catch (error) {
-        log("positions_warn", `Agent Meridian relay failed; falling back to Meteora/local positions path: ${error.message}`);
+        log("positions_warn", `Agent Meridian relay failed; trying LPAgent.io direct: ${error.message}`);
       }
     }
 
+    // ─── Fallback 1: LPAgent.io direct ─────────────────────────
+    // LPAgent returns pool + position addresses + PnL. Still calls Meteora PnL per pool for bin IDs.
+    // Only runs if LPAGENT_API_KEY is present and returns at least 1 position.
+    if (process.env.LPAGENT_API_KEY) {
+      try {
+        if (!silent) log("positions", "Trying LPAgent.io direct as positions source...");
+        const lpAgentByPos = await fetchLpAgentOpenPositions(walletAddress);
+        const posAddresses = Object.keys(lpAgentByPos);
+        if (posAddresses.length > 0) {
+          // Group by pool address so we can batch-fetch Meteora bin data
+          const byPool = {};
+          for (const [posAddr, lpData] of Object.entries(lpAgentByPos)) {
+            const poolAddr = lpData.pool;
+            if (poolAddr) {
+              if (!byPool[poolAddr]) byPool[poolAddr] = [];
+              byPool[poolAddr].push({ posAddr, lpData });
+            }
+          }
+          const poolAddresses = Object.keys(byPool);
+          const pnlMaps = await Promise.all(poolAddresses.map(p => fetchDlmmPnlForPool(p, walletAddress)));
+          const binDataByPool = {};
+          poolAddresses.forEach((p, i) => { binDataByPool[p] = pnlMaps[i]; });
+
+          const positions = [];
+          for (const [poolAddr, posEntries] of Object.entries(byPool)) {
+            for (const { posAddr, lpData } of posEntries) {
+              const tracked = getTrackedPosition(posAddr);
+              const binData = binDataByPool[poolAddr]?.[posAddr];
+              const isOOR = !lpData.inRange;
+              if (isOOR) markOutOfRange(posAddr);
+              else markInRange(posAddr);
+
+              const lowerBin  = binData?.lowerBinId      ?? lpData.tickLower          ?? tracked?.bin_range?.min    ?? null;
+              const upperBin  = binData?.upperBinId      ?? lpData.tickUpper          ?? tracked?.bin_range?.max    ?? null;
+              const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+              const ageFromState = tracked?.deployed_at
+                ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
+                : null;
+              const reportedPnlPct = parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0));
+              const derivedPnlPct  = deriveLpAgentPnlPct(lpData, config.management.solMode);
+
+              positions.push({
+                position:               posAddr,
+                pool:                   poolAddr,
+                pair:                   tracked?.pool_name || lpData.pairName || "?/SOL",
+                base_mint:              lpData.token0,
+                lower_bin:              lowerBin,
+                upper_bin:              upperBin,
+                active_bin:             activeBin,
+                in_range:               !!lpData.inRange,
+                unclaimed_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative  : lpData.unCollectedFee)  * 10000) / 10000,
+                total_value_usd:        Math.round(safeNum(config.management.solMode ? lpData.valueNative           : lpData.value)           * 10000) / 10000,
+                total_value_true_usd:   Math.round(safeNum(lpData.value)                                                                      * 10000) / 10000,
+                collected_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.collectedFeeNative    : lpData.collectedFee)    * 10000) / 10000,
+                collected_fees_true_usd: Math.round(safeNum(lpData.collectedFee)                                                              * 10000) / 10000,
+                pnl_usd:                Math.round(safeNum(config.management.solMode ? lpData.pnl?.valueNative      : lpData.pnl?.value)      * 10000) / 10000,
+                pnl_true_usd:           Math.round(safeNum(lpData.pnl?.value)                                                                 * 10000) / 10000,
+                pnl_pct:                Math.round(reportedPnlPct * 100) / 100,
+                pnl_pct_derived:        derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
+                pnl_pct_diff:           null,
+                pnl_pct_suspicious:     false,
+                unclaimed_fees_true_usd: Math.round(safeNum(lpData.unCollectedFee)                                                            * 10000) / 10000,
+                fee_per_tvl_24h:        binData ? Math.round(parseFloat(binData.feePerTvl24h || 0) * 100) / 100 : null,
+                age_minutes:            lpData.ageHour != null ? Math.round(lpData.ageHour * 60) : ageFromState,
+                minutes_out_of_range:   minutesOutOfRange(posAddr),
+                note:                   tracked?.note ?? null,
+              });
+            }
+          }
+
+          log("positions", `LPAgent.io direct: ${positions.length} position(s) across ${poolAddresses.length} pool(s)`);
+          syncOpenPositions(positions.map(p => p.position));
+          _positionsCache = { wallet: walletAddress, total_positions: positions.length, positions };
+          _positionsCacheAt = Date.now();
+          return _positionsCache;
+        }
+        log("positions_warn", "LPAgent.io direct: 0 positions returned — falling through to Meteora portfolio");
+      } catch (lpErr) {
+        log("positions_warn", `LPAgent.io direct failed; falling back to Meteora portfolio: ${lpErr.message}`);
+      }
+    }
+
+    // ─── Fallback 2: Meteora portfolio API ──────────────────────
     // Portfolio API discovers open pools/positions for this wallet.
     // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
     if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
