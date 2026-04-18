@@ -162,7 +162,6 @@ function toolLabel(name) {
     close_position: "close position",
     claim_fees: "claim fees",
     swap_token: "swap token",
-    update_config: "update config",
     get_my_positions: "get positions",
     get_wallet_balance: "get wallet balance",
     check_smart_wallets_on_pool: "check smart wallets",
@@ -185,8 +184,6 @@ function summarizeToolResult(name, result) {
       return result.success ? "closed" : (result.reason || "failed");
     case "claim_fees":
       return result.claimed_amount != null ? `claimed ${result.claimed_amount}` : "done";
-    case "update_config":
-      return Object.keys(result.applied || {}).join(", ") || "updated";
     case "get_top_candidates":
       return `${result.candidates?.length ?? 0} candidates`;
     case "get_my_positions":

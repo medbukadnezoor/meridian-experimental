@@ -32,6 +32,11 @@ const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 import { log, logAction } from "../logger.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
+const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
+  "CLI config set",
+  "Telegram slash command /setcfg",
+]);
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -290,6 +295,17 @@ export async function executeTool(name, args) {
     const error = `Unknown tool: ${name}`;
     log("error", error);
     return { error };
+  }
+
+  if (name === "update_config") {
+    const reason = String(args?.reason || "").trim();
+    if (!OPERATOR_UPDATE_CONFIG_REASONS.has(reason)) {
+      return {
+        success: false,
+        blocked: true,
+        reason: "update_config is operator-only. Use explicit operator paths such as /setcfg or CLI config set.",
+      };
+    }
   }
 
   // ─── Pre-execution safety checks ──────────

@@ -23,7 +23,6 @@ const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "g
 const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "self_update",
-  "update_config",
   "add_to_blacklist",
   "remove_from_blacklist",
   "block_deployer",
@@ -48,7 +47,6 @@ const INTENT_TOOLS = {
   close:       new Set(["close_position", "get_my_positions", "get_position_pnl", "get_wallet_balance", "swap_token"]),
   claim:       new Set(["claim_fees", "get_my_positions", "get_position_pnl", "get_wallet_balance"]),
   swap:        new Set(["swap_token", "get_wallet_balance"]),
-  config:      new Set(["update_config"]),
   blocklist:   new Set(["add_to_blacklist", "remove_from_blacklist", "list_blacklist", "block_deployer", "unblock_deployer", "list_blocked_deployers"]),
   selfupdate:  new Set(["self_update"]),
   balance:     new Set(["get_wallet_balance", "get_my_positions", "get_wallet_positions"]),
@@ -90,7 +88,9 @@ function getToolsForRole(agentType, goal = "") {
   const matched = new Set();
   for (const { intent, re } of INTENT_PATTERNS) {
     if (re.test(goal)) {
-      for (const t of INTENT_TOOLS[intent]) matched.add(t);
+      const intentTools = INTENT_TOOLS[intent];
+      if (!intentTools) continue;
+      for (const t of intentTools) matched.add(t);
     }
   }
 
