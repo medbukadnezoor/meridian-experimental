@@ -10,9 +10,10 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ## Current Operational Context
 [CONFIRMED] Bot Version: **v1.0.9** (Enabled solMode + TP 4% on 2026-04-13)
 [CONFIRMED] Bot Host: VPS **ohox** (TencentCloud Singapore, 43.156.182.93) under PM2.
+[CONFIRMED] Current VPS PM2 runtime state (2026-04-18): `stopped` during critical main/experimental update staging. Verify with `ssh ohox ms` before restart.
 [CONFIRMED] Security Status: ACTIVE (8 patches maintained).
 [CONFIRMED] Active Role Models: All use `qwen3.6-plus` via DashScope Singapore.
-[CONFIRMED] **takeProfitPct: 4%** / **deployAmountSol: 3.0** (Upsized 2026-04-15) / **takeProfitFeePct: 4%** / **maxPositions: 3** (Upsized 2026-04-15)
+[CONFIRMED] **takeProfitPct: 4%** / **deployAmountSol: 3.0** (Upsized 2026-04-15) / **maxPositions: 3** (Upsized 2026-04-15). `takeProfitFeePct` is still present in live config for compatibility, but current live branches treat it as a fallback alias into `takeProfitPct`, not as a separate runtime fee gate.
 [CONFIRMED] **solMode: true** / **minTvl: 20000** (Upsized 2026-04-15) — All PnL/balance reporting in SOL. Close path now correctly reads `.sol` fields from Meteora datapi (fixed 2026-04-14, commit `f4911a1`). Both relay and non-relay paths branch on `solMode`. Fallback cache reads also use SOL-denominated fields. `lessons.json` performance records now store SOL values in `initial_value_usd`, `final_value_usd`, `fees_earned_usd` when solMode=true.
 [CONFIRMED] **minFeeActiveTvlRatio: 0.08** (example baseline; evolved by Darwin).
 [CONFIRMED] **Stop Loss: -5%** with 3h cooldown.
@@ -33,7 +34,7 @@ ssh ohox "ml"
 ```
 
 ## Strategy Library — Key Architecture Note
-The strategy library (`strategy-library.json`) takes **full precedence** over `user-config.json`'s `strategy` field.
+The strategy library (`strategy-library.json`) defines the LP posture injected into screening and should be treated as the live intent. Current code still retains `config.strategy.*` helper fallbacks underneath when a deploy call omits strategy fields, so this is not a hard deletion of config defaults.
 [CONFIRMED] Active Strategy: **`sol_dca_accumulator`** — SOL accumulation on dips, RSI ≤ 35 entry gate.
 
 ## VPS Operations
