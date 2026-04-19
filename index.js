@@ -11,7 +11,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -283,6 +283,17 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        if (closeRule.reason === "low yield") {
+          const strikes = incrementLowYieldStrike(p.position);
+          if (strikes < 2) {
+            log("cron", `[LowYield] ${p.pair} strike ${strikes}/2 (fee/TVL ${p.fee_per_tvl_24h ?? "?"}%) — holding one more cycle`);
+            actionMap.set(p.position, { action: "STAY" });
+            continue;
+          }
+          // Strike 2 reached — fall through to close
+        } else {
+          clearLowYieldStrike(p.position);
+        }
         if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
           const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
           if (!indicatorConfirmation.confirmed) {
@@ -302,6 +313,8 @@ export async function runManagementCycle({ silent = false } = {}) {
         actionMap.set(p.position, closeRule);
         continue;
       }
+      // No close rule — position has recovered; clear any pending low-yield strikes
+      clearLowYieldStrike(p.position);
       // Claim rule
       if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         actionMap.set(p.position, { action: "CLAIM" });

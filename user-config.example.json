@@ -31,7 +31,7 @@
   "maxMcap": 5000000,
   "minBinStep": 80,
   "maxBinStep": 125,
-  "minFeeActiveTvlRatio": 0.08,
+  "minFeeActiveTvlRatio": 2.0,
   "minTokenFeesSol": 30,
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
