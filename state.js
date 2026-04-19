@@ -177,6 +177,30 @@ export function markInRange(position_address) {
 }
 
 /**
+ * Increment low-yield strike counter. Returns new count.
+ * Resets automatically when position is closed via recordClose.
+ */
+export function incrementLowYieldStrike(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return 0;
+  pos.low_yield_strikes = (pos.low_yield_strikes ?? 0) + 1;
+  save(state);
+  return pos.low_yield_strikes;
+}
+
+/**
+ * Clear low-yield strike counter (position recovered above threshold).
+ */
+export function clearLowYieldStrike(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || !pos.low_yield_strikes) return;
+  delete pos.low_yield_strikes;
+  save(state);
+}
+
+/**
  * How many minutes has a position been out of range?
  * Returns 0 if currently in range.
  */

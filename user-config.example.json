@@ -68,7 +68,7 @@
   "takeProfitPct": 25,
   "takeProfitFeePct": 2,
   "minFeePerTvl24h": 4,
-  "minAgeBeforeYieldCheck": 30,
+  "minAgeBeforeYieldCheck": 60,
   "trailingTakeProfit": true,
   "trailingTriggerPct": 8,
   "trailingDropPct": 3,
