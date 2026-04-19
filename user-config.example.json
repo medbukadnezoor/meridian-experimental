@@ -8,10 +8,10 @@
   "llmModel": "qwen3.6-plus",
   "dryRun": false,
 
-  "deployAmountSol": 3.0,
+  "deployAmountSol": 4.0,
   "maxPositions": 3,
   "minSolToOpen": 0.15,
-  "maxDeployAmount": 3.5,
+  "maxDeployAmount": 4.5,
   "gasReserve": 0.2,
   "positionSizePct": 0.35,
 
