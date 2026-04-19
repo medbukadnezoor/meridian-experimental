@@ -15,6 +15,9 @@ const STATE_FILE = "./state.json";
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_INSTRUCTION_LENGTH = 280;
+const GHOST_POSITION_GRACE_MS = 10 * 60_000;
+const GHOST_VALUE_EPSILON = 0.0001;
+const GHOST_OBSERVATIONS_TO_SUPPRESS = 3;
 
 function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
   if (text == null) return null;
@@ -29,23 +32,58 @@ function sanitizeStoredText(text, maxLen = MAX_INSTRUCTION_LENGTH) {
 
 function load() {
   if (!fs.existsSync(STATE_FILE)) {
-    return { positions: {}, recentEvents: [], lastUpdated: null };
+    return { positions: {}, recentEvents: [], ghostCandidates: {}, lastUpdated: null };
   }
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch (err) {
     log("state_error", `Failed to read state.json: ${err.message}`);
-    return { positions: {}, lastUpdated: null };
+    return { positions: {}, ghostCandidates: {}, lastUpdated: null };
   }
 }
 
 function save(state) {
   try {
+    if (!state.positions || typeof state.positions !== "object" || Array.isArray(state.positions)) {
+      state.positions = {};
+    }
+    if (!state.ghostCandidates || typeof state.ghostCandidates !== "object" || Array.isArray(state.ghostCandidates)) {
+      state.ghostCandidates = {};
+    }
     state.lastUpdated = new Date().toISOString();
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
   } catch (err) {
     log("state_error", `Failed to write state.json: ${err.message}`);
   }
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function isGhostLikeLivePosition(position) {
+  const value = Math.abs(toFiniteNumber(position?.total_value_usd, 0));
+  const fees = Math.abs(toFiniteNumber(position?.unclaimed_fees_usd, 0));
+  const baseMint = typeof position?.base_mint === "string"
+    ? position.base_mint.trim()
+    : position?.base_mint;
+  return value <= GHOST_VALUE_EPSILON && fees <= GHOST_VALUE_EPSILON && !baseMint;
+}
+
+function getGhostObservationAgeMs(tracked, livePosition) {
+  const candidates = [];
+  if (tracked?.deployed_at) {
+    const deployedAt = new Date(tracked.deployed_at).getTime();
+    if (Number.isFinite(deployedAt) && deployedAt > 0) {
+      candidates.push(Date.now() - deployedAt);
+    }
+  }
+  const liveAgeMinutes = toFiniteNumber(livePosition?.age_minutes, Number.NaN);
+  if (Number.isFinite(liveAgeMinutes) && liveAgeMinutes >= 0) {
+    candidates.push(liveAgeMinutes * 60_000);
+  }
+  return candidates.length > 0 ? Math.min(...candidates) : Number.POSITIVE_INFINITY;
 }
 
 // ─── Position Registry ─────────────────────────────────────────
@@ -576,4 +614,102 @@ export function syncOpenPositions(active_addresses) {
   }
 
   if (changed) save(state);
+}
+
+export function reconcileGhostPositions(livePositions = []) {
+  const state = load();
+  if (!state.positions || typeof state.positions !== "object" || Array.isArray(state.positions)) {
+    state.positions = {};
+  }
+  if (!state.ghostCandidates || typeof state.ghostCandidates !== "object" || Array.isArray(state.ghostCandidates)) {
+    state.ghostCandidates = {};
+  }
+
+  const nowIso = new Date().toISOString();
+  const kept = [];
+  const suppressed = [];
+  const seen = new Set();
+  let changed = false;
+
+  for (const livePosition of Array.isArray(livePositions) ? livePositions : []) {
+    const posId = livePosition?.position;
+    if (!posId) {
+      kept.push(livePosition);
+      continue;
+    }
+
+    seen.add(posId);
+    const tracked = state.positions[posId] || null;
+    const candidate = state.ghostCandidates[posId] || {
+      observations: 0,
+      first_seen_at: nowIso,
+      reason: "zero-value live position with no base mint",
+    };
+    const ghostLike = isGhostLikeLivePosition(livePosition);
+    const ageMs = getGhostObservationAgeMs(tracked, livePosition);
+
+    if (!ghostLike || ageMs < GHOST_POSITION_GRACE_MS) {
+      if (state.ghostCandidates[posId]) {
+        delete state.ghostCandidates[posId];
+        changed = true;
+      }
+      kept.push(livePosition);
+      continue;
+    }
+
+    if (candidate.suppressed) {
+      suppressed.push({
+        ...livePosition,
+        ghost_reason: candidate.reason,
+        ghost_observations: candidate.observations,
+      });
+      continue;
+    }
+
+    candidate.observations += 1;
+    candidate.last_seen_at = nowIso;
+    candidate.pool = livePosition.pool || tracked?.pool || null;
+    state.ghostCandidates[posId] = candidate;
+    changed = true;
+
+    if (candidate.observations >= GHOST_OBSERVATIONS_TO_SUPPRESS) {
+      candidate.suppressed = true;
+      candidate.suppressed_at = nowIso;
+
+      if (tracked && !tracked.closed) {
+        tracked.closed = true;
+        tracked.closed_at = nowIso;
+        tracked.notes = Array.isArray(tracked.notes) ? tracked.notes : [];
+        tracked.notes.push(`Auto-closed during ghost reconciliation: ${candidate.reason}`);
+        pushEvent(state, {
+          action: "close",
+          position: posId,
+          pool_name: tracked.pool_name || tracked.pool,
+          reason: `ghost reconciliation: ${candidate.reason}`,
+        });
+        log("state", `Position ${posId} auto-closed during ghost reconciliation`);
+      } else {
+        log("state", `Suppressing ghost position ${posId} after ${candidate.observations} observations`);
+      }
+
+      suppressed.push({
+        ...livePosition,
+        ghost_reason: candidate.reason,
+        ghost_observations: candidate.observations,
+      });
+      continue;
+    }
+
+    kept.push(livePosition);
+  }
+
+  for (const posId of Object.keys(state.ghostCandidates)) {
+    if (!seen.has(posId)) {
+      delete state.ghostCandidates[posId];
+      changed = true;
+    }
+  }
+
+  if (changed) save(state);
+  return { positions: kept, suppressed };
 }

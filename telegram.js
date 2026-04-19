@@ -21,6 +21,9 @@ let _polling = false;
 let _liveMessageDepth = 0;
 let _warnedMissingChatId = false;
 let _warnedMissingAllowedUsers = false;
+let _chatActionBackoffUntil = 0;
+let _chatActionInFlight = false;
+let _chatAction429LoggedUntil = 0;
 const TELEGRAM_MAX_TEXT_LENGTH = 4096;
 
 // ─── chatId persistence ──────────────────────────────────────────
@@ -82,7 +85,18 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
-async function postTelegram(method, body) {
+function getRetryAfterMs(payloadText) {
+  try {
+    const payload = JSON.parse(payloadText);
+    const retryAfter = Number(payload?.parameters?.retry_after);
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      return retryAfter * 1000;
+    }
+  } catch { /**/ }
+  return 0;
+}
+
+async function postTelegram(method, body, { quietRateLimit = false } = {}) {
   if (!TOKEN || !chatId) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
@@ -92,7 +106,20 @@ async function postTelegram(method, body) {
     });
     if (!res.ok) {
       const err = await res.text();
-      log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+      const retryAfterMs = res.status === 429 ? getRetryAfterMs(err) : 0;
+      if (method === "sendChatAction" && retryAfterMs > 0) {
+        _chatActionBackoffUntil = Math.max(_chatActionBackoffUntil, Date.now() + retryAfterMs);
+      }
+      if (!(quietRateLimit && res.status === 429)) {
+        if (method === "sendChatAction" && res.status === 429) {
+          if (Date.now() >= _chatAction429LoggedUntil) {
+            _chatAction429LoggedUntil = Date.now() + Math.max(retryAfterMs, 30_000);
+            log("telegram_warn", `${method} 429: backing off for ${Math.max(1, Math.ceil(Math.max(retryAfterMs, 0) / 1000))}s`);
+          }
+        } else {
+          log("telegram_error", `${method} ${res.status}: ${err.slice(0, 200)}`);
+        }
+      }
       return null;
     }
     return await res.json();
@@ -164,7 +191,24 @@ function createTypingIndicator() {
 
   async function tick() {
     if (stopped) return;
-    await postTelegram("sendChatAction", { action: "typing" });
+    if (Date.now() < _chatActionBackoffUntil) {
+      timer = setTimeout(() => {
+        tick().catch(() => null);
+      }, Math.max(1000, _chatActionBackoffUntil - Date.now()));
+      return;
+    }
+    if (_chatActionInFlight) {
+      timer = setTimeout(() => {
+        tick().catch(() => null);
+      }, 1000);
+      return;
+    }
+    _chatActionInFlight = true;
+    try {
+      await postTelegram("sendChatAction", { action: "typing" }, { quietRateLimit: true });
+    } finally {
+      _chatActionInFlight = false;
+    }
     timer = setTimeout(() => {
       tick().catch(() => null);
     }, 4000);
