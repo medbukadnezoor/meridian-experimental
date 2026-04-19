@@ -18,6 +18,7 @@ import {
   recordClose,
   getTrackedPosition,
   minutesOutOfRange,
+  reconcileGhostPositions,
   syncOpenPositions,
 } from "../state.js";
 import { recordPerformance } from "../lessons.js";
@@ -911,6 +912,21 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
   });
 }
 
+function buildFilteredPositionsResult(walletAddress, positions, sourceLabel) {
+  const livePositions = Array.isArray(positions) ? positions : [];
+  const { positions: filteredPositions, suppressed } = reconcileGhostPositions(livePositions);
+  if (suppressed.length > 0) {
+    log("positions", `${sourceLabel}: suppressed ${suppressed.length} ghost position(s)`);
+  }
+  syncOpenPositions(filteredPositions.map((position) => position.position));
+  return {
+    wallet: walletAddress,
+    total_positions: filteredPositions.length,
+    positions: filteredPositions,
+    ghost_positions: suppressed,
+  };
+}
+
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false } = {}) {
   if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
@@ -933,11 +949,8 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           walletAddress,
           agentId: config.hiveMind.agentId || "agent-local",
         });
-        syncOpenPositions((result.positions || []).map((p) => p.position));
         _positionsCache = {
-          wallet: walletAddress,
-          total_positions: Number(result.total_positions || 0),
-          positions: Array.isArray(result.positions) ? result.positions : [],
+          ...buildFilteredPositionsResult(walletAddress, result.positions || [], "Agent Meridian relay"),
           request_id: result.requestId || null,
         };
         _positionsCacheAt = Date.now();
@@ -1018,8 +1031,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           }
 
           log("positions", `LPAgent.io direct: ${positions.length} position(s) across ${poolAddresses.length} pool(s)`);
-          syncOpenPositions(positions.map(p => p.position));
-          _positionsCache = { wallet: walletAddress, total_positions: positions.length, positions };
+          _positionsCache = buildFilteredPositionsResult(walletAddress, positions, "LPAgent.io direct");
           _positionsCacheAt = Date.now();
           return _positionsCache;
         }
@@ -1178,8 +1190,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
       }
     }
 
-    const result = { wallet: walletAddress, total_positions: positions.length, positions };
-    syncOpenPositions(positions.map(p => p.position));
+    const result = buildFilteredPositionsResult(walletAddress, positions, "Meteora portfolio");
     _positionsCache = result;
     _positionsCacheAt = Date.now();
     return result;
@@ -1312,7 +1323,7 @@ export async function claimFees({ position_address }) {
 }
 
 // ─── Close Position ────────────────────────────────────────────
-export async function closePosition({ position_address, reason }) {
+export async function closePosition({ position_address, reason, urgent }) {
   position_address = normalizeMint(position_address);
   if (process.env.DRY_RUN === "true") {
     return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
@@ -1364,134 +1375,160 @@ export async function closePosition({ position_address, reason }) {
       const closeUnsigned = order?.order?.transactions?.close || [];
       const swapUnsigned = order?.order?.transactions?.swap || [];
       if (closeUnsigned.length + swapUnsigned.length === 0) {
-        throw new Error("LPAgent close order returned no transactions. Check the position, quote response, and selected output.");
-      }
-
-      const submit = await meridianJson("/execution/zap-out/submit", {
-        method: "POST",
-        headers: getMeridianHeaders(),
-        body: JSON.stringify({
-          requestId: order.requestId,
-          lastValidBlockHeight: order?.order?.lastValidBlockHeight,
-          transactions: {
-            close: signSerializedTransactions(closeUnsigned, wallet),
-            swap: signSerializedTransactions(swapUnsigned, wallet),
-          },
-        }),
-      });
-
-      const claimTxHashes = [];
-      const closeTxHashes = normalizeExecutionSignatures(submit);
-      const txHashes = [...claimTxHashes, ...closeTxHashes];
-
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      _positionsCacheAt = 0;
-
-      let closedConfirmed = false;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        try {
-          const refreshed = await getMyPositions({ force: true, silent: true });
-          const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
-          if (!stillOpen) {
-            closedConfirmed = true;
-            break;
-          }
-          log("close_warn", `Relay close still appears open after submit (attempt ${attempt + 1}/4)`);
-        } catch (e) {
-          log("close_warn", `Relay close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
-        }
-        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 3000));
-      }
-
-      if (!closedConfirmed) {
-        return {
-          success: false,
-          error: "Close submit succeeded but position still appears open after verification window",
-          position: position_address,
-          pool: poolAddress,
-          close_txs: closeTxHashes,
-          txs: txHashes,
-        };
-      }
-
-      recordClose(position_address, reason || "agent decision");
-
-      if (tracked) {
-        const deployedAt = new Date(tracked.deployed_at).getTime();
-        const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
-        let minutesOOR = 0;
-        if (tracked.out_of_range_since) {
-          minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
-        }
-
-        const sm = config.management.solMode;
-        const tk = sm ? "sol" : "usd";
-        let pnlUsd = 0;
-        let pnlPct = 0;
-        let finalValueUsd = 0;
-        let initialUsd = 0;
-        let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0); // claim tracker is always USD
-        try {
-          const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
-          for (let attempt = 0; attempt < 6; attempt++) {
-            const res = await fetch(closedUrl);
-            if (res.ok) {
-              const data = await res.json();
-              const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
-              if (posEntry) {
-                pnlPct        = parseFloat(posEntry.pnlPctChange || 0);
-                finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.[tk] || 0);
-                initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.[tk]    || 0);
-                feesUsd       = parseFloat(posEntry.allTimeFees?.total?.[tk]        || 0) || feesUsd;
-                pnlUsd        = sm ? (finalValueUsd + feesUsd) - initialUsd : parseFloat(posEntry.pnlUsd || 0);
-                if (sm && initialUsd > 0) pnlPct = (pnlUsd / initialUsd) * 100;
-                break;
-              }
-            }
-            if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
-          }
-        } catch (e) {
-          log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
-        }
-
-        await recordPerformance({
-          position: position_address,
-          pool: poolAddress,
-          pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
-          base_mint: livePosition?.base_mint || null,
-          strategy: tracked.strategy,
-          bin_range: tracked.bin_range,
-          bin_step: tracked.bin_step || null,
-          volatility: tracked.volatility || null,
-          fee_tvl_ratio: tracked.fee_tvl_ratio || null,
-          organic_score: tracked.organic_score || null,
-          amount_sol: tracked.amount_sol,
-          fees_earned_usd: feesUsd,
-          final_value_usd: finalValueUsd,
-          initial_value_usd: initialUsd,
-          minutes_in_range: minutesHeld - minutesOOR,
-          minutes_held: minutesHeld,
-          close_reason: reason || "agent decision",
+        log("close_warn", `Relay close returned no transactions for ${position_address} — falling back to direct SDK close`);
+      } else {
+        const submit = await meridianJson("/execution/zap-out/submit", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            requestId: order.requestId,
+            lastValidBlockHeight: order?.order?.lastValidBlockHeight,
+            transactions: {
+              close: signSerializedTransactions(closeUnsigned, wallet),
+              swap: signSerializedTransactions(swapUnsigned, wallet),
+            },
+          }),
         });
+
+        const claimTxHashes = [];
+        const closeTxHashes = normalizeExecutionSignatures(submit);
+        const txHashes = [...claimTxHashes, ...closeTxHashes];
+
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        _positionsCacheAt = 0;
+
+        let closedConfirmed = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            const refreshed = await getMyPositions({ force: true, silent: true });
+            const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
+            if (!stillOpen) {
+              closedConfirmed = true;
+              break;
+            }
+            log("close_warn", `Relay close still appears open after submit (attempt ${attempt + 1}/4)`);
+          } catch (e) {
+            log("close_warn", `Relay close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
+          }
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+
+        if (!closedConfirmed) {
+          return {
+            success: false,
+            error: "Close submit succeeded but position still appears open after verification window",
+            position: position_address,
+            pool: poolAddress,
+            close_txs: closeTxHashes,
+            txs: txHashes,
+          };
+        }
+
+        recordClose(position_address, reason || "agent decision");
+
+        if (tracked) {
+          const deployedAt = new Date(tracked.deployed_at).getTime();
+          const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
+          let minutesOOR = 0;
+          if (tracked.out_of_range_since) {
+            minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
+          }
+
+          const sm = config.management.solMode;
+          const tk = sm ? "sol" : "usd";
+          let pnlUsd = 0;
+          let pnlPct = 0;
+          let finalValueUsd = 0;
+          let initialUsd = 0;
+          let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0); // claim tracker is always USD
+          try {
+            const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
+            for (let attempt = 0; attempt < 6; attempt++) {
+              const res = await fetch(closedUrl);
+              if (res.ok) {
+                const data = await res.json();
+                const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
+                if (posEntry) {
+                  pnlPct        = parseFloat(posEntry.pnlPctChange || 0);
+                  finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.[tk] || 0);
+                  initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.[tk]    || 0);
+                  feesUsd       = parseFloat(posEntry.allTimeFees?.total?.[tk]        || 0) || feesUsd;
+                  pnlUsd        = sm ? (finalValueUsd + feesUsd) - initialUsd : parseFloat(posEntry.pnlUsd || 0);
+                  if (sm && initialUsd > 0) pnlPct = (pnlUsd / initialUsd) * 100;
+                  break;
+                }
+              }
+              if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+          } catch (e) {
+            log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
+          }
+
+          await recordPerformance({
+            position: position_address,
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            base_mint: livePosition?.base_mint || null,
+            strategy: tracked.strategy,
+            bin_range: tracked.bin_range,
+            bin_step: tracked.bin_step || null,
+            volatility: tracked.volatility || null,
+            fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+            organic_score: tracked.organic_score || null,
+            amount_sol: tracked.amount_sol,
+            fees_earned_usd: feesUsd,
+            final_value_usd: finalValueUsd,
+            initial_value_usd: initialUsd,
+            minutes_in_range: minutesHeld - minutesOOR,
+            minutes_held: minutesHeld,
+            close_reason: reason || "agent decision",
+          });
+
+          appendDecision({
+            type: "close",
+            actor: "MANAGER",
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            position: position_address,
+            summary: `Relay closed at ${pnlPct.toFixed(2)}%`,
+            reason: reason || "agent decision",
+            risks: [
+              minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
+              tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
+            ].filter(Boolean),
+            metrics: {
+              pnl_usd: pnlUsd,
+              pnl_pct: pnlPct,
+              fees_usd: feesUsd,
+              minutes_held: minutesHeld,
+            },
+          });
+
+          return {
+            success: true,
+            relay: true,
+            request_id: order.requestId,
+            position: position_address,
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || null,
+            claim_txs: claimTxHashes,
+            close_txs: closeTxHashes,
+            txs: txHashes,
+            pnl_usd: pnlUsd,
+            pnl_pct: pnlPct,
+            base_mint: livePosition?.base_mint || null,
+          };
+        }
 
         appendDecision({
           type: "close",
           actor: "MANAGER",
           pool: poolAddress,
-          pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+          pool_name: poolMeta.name || poolAddress.slice(0, 8),
           position: position_address,
-          summary: `Relay closed at ${pnlPct.toFixed(2)}%`,
+          summary: "Relay closed position",
           reason: reason || "agent decision",
-          risks: [
-            minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
-            tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
-          ].filter(Boolean),
-          metrics: {
-            pnl_usd: pnlUsd,
-            pnl_pct: pnlPct,
-            fees_usd: feesUsd,
-            minutes_held: minutesHeld,
-          },
+          metrics: {},
         });
 
         return {
@@ -1500,39 +1537,13 @@ export async function closePosition({ position_address, reason }) {
           request_id: order.requestId,
           position: position_address,
           pool: poolAddress,
-          pool_name: tracked.pool_name || poolMeta.name || null,
-          claim_txs: claimTxHashes,
+          pool_name: poolMeta.name || null,
+          claim_txs: [],
           close_txs: closeTxHashes,
           txs: txHashes,
-          pnl_usd: pnlUsd,
-          pnl_pct: pnlPct,
           base_mint: livePosition?.base_mint || null,
         };
       }
-
-      appendDecision({
-        type: "close",
-        actor: "MANAGER",
-        pool: poolAddress,
-        pool_name: poolMeta.name || poolAddress.slice(0, 8),
-        position: position_address,
-        summary: "Relay closed position",
-        reason: reason || "agent decision",
-        metrics: {},
-      });
-
-      return {
-        success: true,
-        relay: true,
-        request_id: order.requestId,
-        position: position_address,
-        pool: poolAddress,
-        pool_name: poolMeta.name || null,
-        claim_txs: claimTxHashes,
-        close_txs: closeTxHashes,
-        txs: txHashes,
-        base_mint: livePosition?.base_mint || null,
-      };
     }
 
     // Clear cached pool so SDK loads fresh position fee state
