@@ -96,6 +96,11 @@ export const config = {
     outOfRangeHardCloseMinutes: u.outOfRangeHardCloseMinutes ?? null,
     oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
     oorCooldownHours:       u.oorCooldownHours       ?? 12,
+    repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
+    repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 3,
+    repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
+    repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
+    repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
