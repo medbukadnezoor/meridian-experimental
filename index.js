@@ -97,6 +97,9 @@ async function confirmExitIndicator(position, closeReason) {
   if (!config.indicators.enabled) {
     return { confirmed: true, skipped: true, reason: "Indicators disabled" };
   }
+  if (!config.indicators.exitPreset) {
+    return { confirmed: true, skipped: true, reason: "Exit indicators not configured" };
+  }
   if (!position?.base_mint) {
     return { confirmed: true, skipped: true, reason: "Missing base mint for indicator lookup" };
   }
@@ -284,13 +287,18 @@ export async function runManagementCycle({ silent = false } = {}) {
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
         if (closeRule.reason === "low yield") {
-          const strikes = incrementLowYieldStrike(p.position);
-          if (strikes < 2) {
-            log("cron", `[LowYield] ${p.pair} strike ${strikes}/2 (fee/TVL ${p.fee_per_tvl_24h ?? "?"}%) — holding one more cycle`);
-            actionMap.set(p.position, { action: "STAY" });
-            continue;
+          const tracked = getTrackedPosition(p.position);
+          if (!tracked) {
+            log("cron_warn", `[LowYield] ${p.pair} is untracked (${p.position.slice(0, 8)}) — closing instead of holding at strike 0`);
+          } else {
+            const strikes = incrementLowYieldStrike(p.position);
+            if (strikes < 2) {
+              log("cron", `[LowYield] ${p.pair} strike ${strikes}/2 (fee/TVL ${p.fee_per_tvl_24h ?? "?"}%) — holding one more cycle`);
+              actionMap.set(p.position, { action: "STAY" });
+              continue;
+            }
+            // Strike 2 reached — fall through to close
           }
-          // Strike 2 reached — fall through to close
         } else {
           clearLowYieldStrike(p.position);
         }

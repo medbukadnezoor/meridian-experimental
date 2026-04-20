@@ -122,6 +122,16 @@ function isRetryableStatus(status) {
   return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
+function isRetryableError(error) {
+  if (isRetryableStatus(Number(error?.status || 0))) return true;
+  const name = String(error?.name || "");
+  const message = String(error?.message || "").toLowerCase();
+  return name === "AbortError" ||
+    message.includes("aborted") ||
+    message.includes("fetch failed") ||
+    message.includes("network");
+}
+
 function retryDelayMs(error, attempt) {
   const retryAfter = Number(error?.retryAfter);
   if (Number.isFinite(retryAfter) && retryAfter > 0) {
@@ -194,8 +204,7 @@ async function meridianJson(pathname, options = {}) {
       );
     } catch (error) {
       lastError = error;
-      const status = Number(error?.status || 0);
-      if (!isRetryableStatus(status) || attempt >= maxAttempts - 1) {
+      if (!isRetryableError(error) || attempt >= maxAttempts - 1) {
         throw error;
       }
       const waitMs = Math.min(retryDelayMs(error, attempt), Math.max(0, remainingMs - 1));
@@ -1024,22 +1033,107 @@ function deriveLpAgentPnlPct(lpData, solMode = false) {
   return (pnl / deposit) * 100;
 }
 
+function normalizeRelayPosition(position) {
+  if (!position || typeof position !== "object" || !config.management.solMode) return position;
+
+  const totalValueNative = position.total_value_native ?? position.total_value_usd;
+  const unclaimedFeesNative = position.unclaimed_fees_native ?? position.unclaimed_fees_usd;
+  const collectedFeesNative = position.collected_fees_native ?? position.collected_fees_usd;
+  const pnlNative = position.pnl_native ?? position.pnl_usd;
+  const derivedPnlPct = position.pnl_pct_derived_native ?? position.pnl_pct_derived;
+
+  return {
+    ...position,
+    total_value_usd: totalValueNative,
+    unclaimed_fees_usd: unclaimedFeesNative,
+    collected_fees_usd: collectedFeesNative,
+    pnl_usd: pnlNative,
+    pnl_pct_derived: derivedPnlPct,
+  };
+}
+
 async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
   const search = new URLSearchParams({
     owner: walletAddress,
     agentId: agentId || "agent-local",
   });
-  return meridianJson(`/positions/open?${search.toString()}`, {
+  const payload = await meridianJson(`/positions/open?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
     retry: {
       maxElapsedMs: 30_000,
-      perAttemptTimeoutMs: 10_000,
+      perAttemptTimeoutMs: 30_000,
     },
   });
+  return {
+    ...payload,
+    positions: Array.isArray(payload?.positions)
+      ? payload.positions.map((position) => normalizeRelayPosition(position))
+      : [],
+  };
 }
 
-function buildFilteredPositionsResult(walletAddress, positions, sourceLabel) {
+async function getDlmmPositionWalletOwner(positionAddress) {
+  try {
+    const account = await getConnection().getAccountInfo(new PublicKey(positionAddress), "confirmed");
+    if (!account) {
+      return { verified: true, owner: null, reason: "account missing or closed" };
+    }
+    if (!account.owner.equals(getDlmmProgramId())) {
+      return { verified: true, owner: null, reason: `account owned by ${account.owner.toString()}` };
+    }
+    if (!account.data || account.data.length < 72) {
+      return { verified: false, owner: null, reason: "position account data too short" };
+    }
+    return {
+      verified: true,
+      owner: new PublicKey(account.data.subarray(40, 72)).toString(),
+      reason: null,
+    };
+  } catch (error) {
+    return { verified: false, owner: null, reason: error.message };
+  }
+}
+
+async function filterPositionsByWalletOwner(walletAddress, positions, sourceLabel) {
   const livePositions = Array.isArray(positions) ? positions : [];
+  const filtered = [];
+  const rejected = [];
+
+  for (const position of livePositions) {
+    const positionAddress = position?.position;
+    if (!positionAddress) {
+      rejected.push({ label: "missing-position", reason: "missing position address" });
+      continue;
+    }
+
+    const ownership = await getDlmmPositionWalletOwner(positionAddress);
+    if (!ownership.verified) {
+      log("positions_warn", `${sourceLabel}: could not verify owner for ${positionAddress.slice(0, 8)} (${ownership.reason}) — keeping position`);
+      filtered.push(position);
+      continue;
+    }
+
+    if (ownership.owner !== walletAddress) {
+      rejected.push({
+        label: `${position.pair || positionAddress.slice(0, 8)}:${positionAddress.slice(0, 8)}`,
+        reason: ownership.owner ? `owner ${ownership.owner.slice(0, 8)}` : ownership.reason,
+      });
+      continue;
+    }
+
+    filtered.push(position);
+  }
+
+  if (rejected.length > 0) {
+    const sample = rejected.slice(0, 3).map((entry) => `${entry.label} (${entry.reason})`).join(", ");
+    log("positions_warn", `${sourceLabel}: rejected ${rejected.length} foreign/closed position(s): ${sample}`);
+  }
+
+  return filtered;
+}
+
+async function buildFilteredPositionsResult(walletAddress, positions, sourceLabel) {
+  const livePositions = await filterPositionsByWalletOwner(walletAddress, positions, sourceLabel);
   const { positions: filteredPositions, suppressed } = reconcileGhostPositions(livePositions);
   if (suppressed.length > 0) {
     log("positions", `${sourceLabel}: suppressed ${suppressed.length} ghost position(s)`);
@@ -1076,7 +1170,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           agentId: config.hiveMind.agentId || "agent-local",
         });
         _positionsCache = {
-          ...buildFilteredPositionsResult(walletAddress, result.positions || [], "Agent Meridian relay"),
+          ...(await buildFilteredPositionsResult(walletAddress, result.positions || [], "Agent Meridian relay")),
           request_id: result.requestId || null,
         };
         _positionsCacheAt = Date.now();
@@ -1157,7 +1251,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           }
 
           log("positions", `LPAgent.io direct: ${positions.length} position(s) across ${poolAddresses.length} pool(s)`);
-          _positionsCache = buildFilteredPositionsResult(walletAddress, positions, "LPAgent.io direct");
+          _positionsCache = await buildFilteredPositionsResult(walletAddress, positions, "LPAgent.io direct");
           _positionsCacheAt = Date.now();
           return _positionsCache;
         }
@@ -1316,7 +1410,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
       }
     }
 
-    const result = buildFilteredPositionsResult(walletAddress, positions, "Meteora portfolio");
+    const result = await buildFilteredPositionsResult(walletAddress, positions, "Meteora portfolio");
     _positionsCache = result;
     _positionsCacheAt = Date.now();
     return result;
