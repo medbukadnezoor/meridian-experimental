@@ -8,10 +8,10 @@
   "llmModel": "qwen3.6-plus",
   "dryRun": false,
 
-  "deployAmountSol": 2.5,
+  "deployAmountSol": 1.5,
   "maxPositions": 3,
   "minSolToOpen": 0.5,
-  "maxDeployAmount": 2.55,
+  "maxDeployAmount": 1.55,
   "gasReserve": 0.20,
   "positionSizePct": 0.35,
 
@@ -58,6 +58,12 @@
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 3,
   "minVolumeToRebalance": 500,
+
+  "repeatDeployCooldownEnabled": true,
+  "repeatDeployCooldownTriggerCount": 3,
+  "repeatDeployCooldownHours": 6,
+  "repeatDeployCooldownScope": "token",
+  "repeatDeployCooldownMinFeeEarnedPct": 0,
 
   "stopLossPct": -25,
   "emergencyPriceDropPct": -15,
