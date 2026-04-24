@@ -29,7 +29,7 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ### Nanocap-specific patches (nanocap-v1 branch)
 [CONFIRMED] **skipClaim on URGENT stop-loss** (commit `c11e584`, 2026-04-16): `closePosition()` accepts `urgent: true`. When urgent, Step 1 (claimFees TX) is skipped — `removeLiquidity({ shouldClaimAndClose: true })` still captures fees atomically. Both URGENT close paths in `index.js` pass `urgent: true`. Fixes the Republicans-SOL incident where a 23s claim TX held the position open while price dropped -50% further (final PnL -65.79% vs -33% at trigger). Pending merge to `experimental` after 3–5 confirmed URGENT closes on nanocap.
 [CONFIRMED] **minOrganic: 55** on nanocap VPS (raised from 45, operator instruction 2026-04-16). Republicans-SOL had organic=77 and still rugged — organic alone insufficient, but this reduces nanocap's exposure to the lowest-quality tier.
-[CONFIRMED] **confirmed stop-loss trial live** (commit `628776e`, 2026-04-24): nanocap uses soft `stopLossPct=-8` with `stopLossConfirmDelayMs=15000`, immediate `hardStopLossPct=-15`, separate `earlyDumpPct=-8` within 20m, and compact 30s PnL snapshots in `logs/pnl-snapshots-YYYY-MM-DD.jsonl`. Main remains stopped; do not revive it.
+[CONFIRMED] **confirmed stop-loss trial live** (2026-04-24): nanocap uses soft `stopLossPct=-8` with `stopLossConfirmDelayMs=15000`, immediate `hardStopLossPct=-15`, separate `earlyDumpPct=-8` within 20m, and compact 30s PnL snapshots in `logs/pnl-snapshots-YYYY-MM-DD.jsonl`. Synthetic behavior proof is in `scripts/verify-stop-loss-trial-behavior.js`. Main remains stopped; do not revive it.
 
 ## Safety Protocol
 **The bot runs on VPS ohox, NOT locally. Do NOT run `node index.js` on Mac.**
