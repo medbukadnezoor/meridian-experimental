@@ -193,7 +193,7 @@ Saved lessons are injected into subsequent agent cycles as part of the system co
 
 ### Threshold evolution (`/evolve`)
 
-After at least 5 positions have been closed, `/evolve` analyzes the performance record (win rate, average PnL, fee yields) and adjusts the screening thresholds in `user-config.json` accordingly. Changes take effect immediately — no restart needed. The rationale for each change is printed to the console.
+After at least 5 positions have been closed, `/evolve` analyzes the performance record (raw WR, material WR, average PnL, fee yields) and adjusts the screening thresholds in `user-config.json` accordingly. Changes take effect immediately — no restart needed. The rationale for each change is printed to the console.
 
 Use `/thresholds` to see current values alongside performance stats.
 

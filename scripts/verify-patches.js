@@ -26,6 +26,7 @@ const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
+const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 
 function loadSource(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8");
@@ -88,6 +89,22 @@ function runStopLossTrialBehaviorProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMaterialWinMetricsProof() {
+  const result = spawnSync(process.execPath, [MATERIAL_WIN_METRICS_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-material-win-metrics failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -98,6 +115,7 @@ function buildChecks() {
     : null;
   const earlyDumpProof = runEarlyDumpCooldownProof();
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
+  const materialProof = runMaterialWinMetricsProof();
 
   return [
     {
@@ -234,6 +252,90 @@ function buildChecks() {
         stopLossBehaviorProof?.tempDirRemoved === true,
     },
     {
+      file: "performance-metrics.js",
+      label: "[Material wins] canonical raw/material/neutral classifier present",
+      test: (src) =>
+        src.includes("classifyMaterialOutcome") &&
+        src.includes("summarizeMaterialPerformance") &&
+        src.includes("material_win") &&
+        src.includes("neutral_reason") &&
+        src.includes("close_reason_bucket"),
+    },
+    {
+      file: "config-builder.js",
+      label: "[Material wins] performance thresholds and Darwin material mode map into runtime config",
+      test: (src) =>
+        src.includes("performance: {") &&
+        src.includes("materialWinPct") &&
+        src.includes("materialLossPct") &&
+        src.includes("dustNeutralAbsPct") &&
+        src.includes("darwinUseMaterialOutcomes") &&
+        src.includes("darwinExcludeNeutralOutcomes"),
+    },
+    {
+      file: "lessons.js",
+      label: "[Material wins] new performance records store material outcome fields",
+      test: (src) =>
+        src.includes("classifyMaterialOutcome") &&
+        src.includes("raw_win: entry.raw_win") &&
+        src.includes("material_outcome: entry.material_outcome") &&
+        src.includes("material_win_rate_pct") &&
+        src.includes("raw_win_rate_pct"),
+    },
+    {
+      file: "pool-memory.js",
+      label: "[Material wins] pool memory stores Material WR and neutral close counts",
+      test: (src) =>
+        src.includes("material_win_rate") &&
+        src.includes("neutral_close_count") &&
+        src.includes("low_yield_neutral_count") &&
+        src.includes("POOL MEMORY") &&
+        src.includes("raw WR") &&
+        src.includes("material WR"),
+    },
+    {
+      file: "signal-weights.js",
+      label: "[Material wins] Darwin excludes neutral low-yield/dust outcomes in material mode",
+      test: (src) =>
+        src.includes("getMaterialOutcomeOptions") &&
+        src.includes("classifyMaterialOutcome") &&
+        src.includes("neutral_excluded") &&
+        src.includes("material_learning_records") &&
+        src.includes("Only ${learningRecords.length} material learning records"),
+    },
+    {
+      file: "scripts/analyze-material-wins.js",
+      label: "[Material wins] read-only action-log analyzer reports raw/material/neutral metrics",
+      test: (src) =>
+        src.includes("analyze-material-wins") &&
+        src.includes("summarizeMaterialPerformance") &&
+        src.includes("material_ev_per_deployed_sol_pct") &&
+        src.includes("worst_stop_loss_tails") &&
+        src.includes("top_material_wins") &&
+        !src.includes("getMyPositions") &&
+        !src.includes("deploy_position(") &&
+        !src.includes("closePosition("),
+    },
+    {
+      file: "scripts/verify-material-win-metrics.js",
+      label: "[Material wins] synthetic verifier proves low-yield dust is neutral and Darwin learns from material outcomes",
+      test: () =>
+        materialProof?.success === true &&
+        materialProof?.cases?.lowYieldDustWin?.raw_win === true &&
+        materialProof?.cases?.lowYieldDustWin?.material_outcome === "neutral" &&
+        materialProof?.cases?.lowYieldDustWin?.material_win === false &&
+        materialProof?.cases?.tinyTrailingTp?.material_outcome === "neutral" &&
+        materialProof?.cases?.materialTrailingTp?.material_outcome === "material_win" &&
+        materialProof?.cases?.operatorDust?.material_outcome === "neutral" &&
+        materialProof?.cases?.operatorMaterialLoss?.material_outcome === "material_loss" &&
+        materialProof?.cases?.stopLoss?.material_outcome === "material_loss" &&
+        materialProof?.cases?.hardStopLoss?.material_outcome === "material_loss" &&
+        materialProof?.cases?.positiveOor?.material_outcome === "material_win" &&
+        materialProof?.cases?.negativeOor?.material_outcome === "material_loss" &&
+        materialProof?.darwinProof?.neutral_excluded === 3 &&
+        materialProof?.darwinProof?.material_learning_records === 4,
+    },
+    {
       file: "pool-memory.js",
       label: "[Hygiene] repeat low-yield helper present and default-gated",
       test: (src) =>
@@ -259,6 +361,17 @@ function buildChecks() {
         defaultProof?.management?.pnlSnapshotLoggingEnabled === false,
     },
     {
+      file: "scripts/verify-runtime-config.js",
+      label: "[Runtime] material outcome defaults enable 1% material threshold and Darwin material mode",
+      test: () =>
+        defaultProof.userConfigExists === false &&
+        Number(defaultProof?.performance?.materialWinPct) === 1 &&
+        Number(defaultProof?.performance?.materialLossPct) === -1 &&
+        Number(defaultProof?.performance?.dustNeutralAbsPct) === 1 &&
+        defaultProof?.performance?.darwinUseMaterialOutcomes === true &&
+        defaultProof?.performance?.darwinExcludeNeutralOutcomes === true,
+    },
+    {
       file: "user-config.example.json",
       label: "[Runtime] nanocap example resolves confirmed -8/-15 stop-loss trial config",
       test: () =>
@@ -270,6 +383,17 @@ function buildChecks() {
         Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
         exampleProof?.management?.pnlSnapshotLoggingEnabled === true &&
         exampleProof?.management?.pnlSnapshotBotName === "nanocap",
+    },
+    {
+      file: "user-config.example.json",
+      label: "[Runtime] nanocap example resolves material win metrics config",
+      test: () =>
+        exampleProof.userConfigExists === true &&
+        Number(exampleProof?.performance?.materialWinPct) === 1 &&
+        Number(exampleProof?.performance?.materialLossPct) === -1 &&
+        Number(exampleProof?.performance?.dustNeutralAbsPct) === 1 &&
+        exampleProof?.performance?.darwinUseMaterialOutcomes === true &&
+        exampleProof?.performance?.darwinExcludeNeutralOutcomes === true,
     },
     {
       file: "scripts/verify-runtime-config.js",
@@ -327,6 +451,17 @@ function buildChecks() {
         Number(nanocapConfig.management?.repeatLowYieldCooldownLookbackHours) === Number(nanocapUserConfig.repeatLowYieldCooldownLookbackHours ?? 48) &&
         Number(nanocapConfig.management?.repeatLowYieldCooldownHours) === Number(nanocapUserConfig.repeatLowYieldCooldownHours ?? 12) &&
         nanocapConfig.management?.repeatLowYieldCooldownScope === (nanocapUserConfig.repeatLowYieldCooldownScope ?? "token"),
+    },
+    {
+      file: NANOCAP_USER_CONFIG_PATH,
+      label: "[Runtime] nanocap material metrics resolve from supplied config/defaults",
+      test: () =>
+        nanocapConfig != null &&
+        Number(nanocapConfig?.performance?.materialWinPct) === Number(nanocapUserConfig.materialWinPct ?? nanocapUserConfig.performance?.materialWinPct ?? 1) &&
+        Number(nanocapConfig?.performance?.materialLossPct) === Number(nanocapUserConfig.materialLossPct ?? nanocapUserConfig.performance?.materialLossPct ?? -1) &&
+        Number(nanocapConfig?.performance?.dustNeutralAbsPct) === Number(nanocapUserConfig.dustNeutralAbsPct ?? nanocapUserConfig.performance?.dustNeutralAbsPct ?? 1) &&
+        nanocapConfig?.performance?.darwinUseMaterialOutcomes === (nanocapUserConfig.darwinUseMaterialOutcomes ?? nanocapUserConfig.performance?.darwinUseMaterialOutcomes ?? true) &&
+        nanocapConfig?.performance?.darwinExcludeNeutralOutcomes === (nanocapUserConfig.darwinExcludeNeutralOutcomes ?? nanocapUserConfig.performance?.darwinExcludeNeutralOutcomes ?? true),
     },
     {
       file: "scripts/verify-early-dump-cooldown.js",
@@ -422,7 +557,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, and confirmed stop-loss trial config.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, and material win metrics.\n");
 
   for (const check of checks) {
     let src = "";

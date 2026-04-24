@@ -2160,8 +2160,10 @@ Commands:
       console.log(`  timeframe:            ${s.timeframe}`);
       const perf = getPerformanceSummary();
       if (perf) {
+        const materialWr = perf.material_win_rate_pct == null ? "N/A" : `${perf.material_win_rate_pct}%`;
         console.log(`\n  Based on ${perf.total_positions_closed} closed positions`);
-        console.log(`  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`);
+        console.log(`  Raw WR: ${perf.raw_win_rate_pct}%  |  Material WR: ${materialWr} of all closes (${perf.material_sample_count} material sample(s))`);
+        console.log(`  Neutral/dust closes: ${perf.neutral_count ?? 0} (${perf.neutral_rate_pct ?? 0}%)  |  Avg PnL: ${perf.avg_pnl_pct}%`);
       } else {
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }

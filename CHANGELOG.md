@@ -1,5 +1,22 @@
 # Changelog
 
+## [nanocap material-win metrics] — 2026-04-24 — Raw WR separated from Material WR — nanocap-v1
+
+### Change: Low-yield/dust closes no longer inflate strategy-health learning
+
+- Added `performance-metrics.js` as the canonical close-outcome classifier.
+- New performance records store `raw_win`, `material_outcome`, `material_win`,
+  `material_loss`, `neutral_reason`, and `close_reason_bucket`.
+- `getPerformanceSummary()`, `/thresholds`, morning briefing text, and pool memory now show
+  `Raw WR` beside `Material WR` and neutral/dust close counts.
+- Darwin signal recalculation uses material outcomes by default and excludes neutral
+  low-yield/operator/dust closes from learning samples.
+- Added read-only owner tools:
+  - `node scripts/verify-material-win-metrics.js`
+  - `node scripts/analyze-material-wins.js --actions logs --json`
+
+---
+
 ## [position fallback order] — 2026-04-18 — LPAgent.io direct as intermediate fallback — both branches
 
 ### Change: Relay → LPAgent.io direct → Meteora (was: relay → Meteora)

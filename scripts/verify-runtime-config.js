@@ -80,6 +80,14 @@ function buildProof(imported, requestedUserConfigPath) {
       pnlSnapshotBotName: imported.config.management.pnlSnapshotBotName,
       minAgeBeforeYieldCheck: imported.config.management.minAgeBeforeYieldCheck,
     },
+    performance: {
+      materialWinPct: imported.config.performance.materialWinPct,
+      materialLossPct: imported.config.performance.materialLossPct,
+      dustNeutralAbsPct: imported.config.performance.dustNeutralAbsPct,
+      neutralCloseReasonBuckets: imported.config.performance.neutralCloseReasonBuckets,
+      darwinUseMaterialOutcomes: imported.config.performance.darwinUseMaterialOutcomes,
+      darwinExcludeNeutralOutcomes: imported.config.performance.darwinExcludeNeutralOutcomes,
+    },
   };
 }
 
@@ -103,7 +111,10 @@ async function main() {
   console.log(`requested user-config: ${proof.requestedUserConfigPath ?? "(repo-local default)"}`);
   console.log(`effective user-config: ${proof.effectiveUserConfigPath}${proof.userConfigExists ? "" : " (missing -> defaults only)"}`);
   console.log("");
-  console.log(JSON.stringify(proof.management, null, 2));
+  console.log(JSON.stringify({
+    management: proof.management,
+    performance: proof.performance,
+  }, null, 2));
   console.log("");
 }
 

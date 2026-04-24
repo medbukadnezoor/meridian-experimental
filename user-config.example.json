@@ -1,5 +1,5 @@
 {
-  "_note": "NANOCAP-V1 — Phase 2 (scaled). Nanocap DLMM mean-reversion accumulation. 1.5 SOL / 5.0 SOL wallet. Scaled 2026-04-17 after 5-day forward test (136 closes, 79.4% win rate, +18.7% wallet return). See nanocap-v1 branch. Secrets pattern: YOUR_*",
+  "_note": "NANOCAP-V1 — Phase 2 (scaled). Nanocap DLMM mean-reversion accumulation. 1.5 SOL / 5.0 SOL wallet. Scaled 2026-04-17 after 5-day forward test (136 closes, 79.4% raw win rate, +18.7% wallet return). See nanocap-v1 branch. Secrets pattern: YOUR_*",
 
   "preset": "nanocap-v1",
   "rpcUrl": "YOUR_HELIUS_RPC_URL",
@@ -120,6 +120,13 @@
   "darwinStrongLiftThreshold": 0.2,
   "darwinCalibrationMinSamples": 15,
   "darwinMeanReversionRate": 0.02,
+
+  "materialWinPct": 1.0,
+  "materialLossPct": -1.0,
+  "dustNeutralAbsPct": 1.0,
+  "neutralCloseReasonBuckets": ["low_yield", "operator"],
+  "darwinUseMaterialOutcomes": true,
+  "darwinExcludeNeutralOutcomes": true,
 
   "autoresearchEnabled": false,
 

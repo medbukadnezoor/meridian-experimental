@@ -908,7 +908,7 @@ Call list_lessons first to find the lesson ID.`,
       name: "get_performance_history",
       description: `Retrieve closed position records filtered by time window.
 Use when the user asks about recent performance, last 24h positions, how you've been doing, P&L history, etc.
-Returns individual closed positions with PnL, fees, strategy, hold time, and close reason.`,
+Returns individual closed positions with PnL, fees, strategy, hold time, close reason, raw WR fields, and material/neutral outcome classification.`,
       parameters: {
         type: "object",
         properties: {
@@ -932,7 +932,7 @@ Returns individual closed positions with PnL, fees, strategy, hold time, and clo
     function: {
       name: "get_pool_memory",
       description: `Check your deploy history for a pool BEFORE deploying.
-Returns all past deploys, PnL, win rate, and any notes you've added.
+Returns all past deploys, PnL, Raw WR, Material WR, neutral/dust close counts, and any notes you've added.
 
 Call this tool before deploying to any pool — you may have been here before and it didn't work.
 Also useful during screening to skip pools with a bad track record.`,

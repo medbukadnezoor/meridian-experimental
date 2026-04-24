@@ -48,6 +48,7 @@ export function applyUserConfigToEnv(userConfig, env = process.env) {
 export function buildConfig(userConfig = {}, env = process.env) {
   const u = userConfig ?? {};
   const indicatorUserConfig = u.chartIndicators ?? {};
+  const performanceUserConfig = u.performance ?? {};
   const fallbackModel = normalizeOptionalString(u.fallbackModel);
 
   return {
@@ -169,6 +170,17 @@ export function buildConfig(userConfig = {}, env = process.env) {
       strongLiftThreshold: u.darwinStrongLiftThreshold ?? 0.2,
       calibrationMinSamples: u.darwinCalibrationMinSamples ?? 20,
       meanReversionRate: u.darwinMeanReversionRate ?? 0.02,
+    },
+
+    performance: {
+      materialWinPct: performanceUserConfig.materialWinPct ?? u.materialWinPct ?? 1.0,
+      materialLossPct: performanceUserConfig.materialLossPct ?? u.materialLossPct ?? -1.0,
+      dustNeutralAbsPct: performanceUserConfig.dustNeutralAbsPct ?? u.dustNeutralAbsPct ?? 1.0,
+      neutralCloseReasonBuckets: Array.isArray(performanceUserConfig.neutralCloseReasonBuckets)
+        ? performanceUserConfig.neutralCloseReasonBuckets
+        : (Array.isArray(u.neutralCloseReasonBuckets) ? u.neutralCloseReasonBuckets : ["low_yield", "operator"]),
+      darwinUseMaterialOutcomes: performanceUserConfig.darwinUseMaterialOutcomes ?? u.darwinUseMaterialOutcomes ?? true,
+      darwinExcludeNeutralOutcomes: performanceUserConfig.darwinExcludeNeutralOutcomes ?? u.darwinExcludeNeutralOutcomes ?? true,
     },
 
     autoresearch: {
