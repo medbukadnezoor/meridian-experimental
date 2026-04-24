@@ -27,9 +27,25 @@ const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js")
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
+const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
+  "materialWinPct",
+  "materialLossPct",
+  "dustNeutralAbsPct",
+  "neutralCloseReasonBuckets",
+  "darwinUseMaterialOutcomes",
+  "darwinExcludeNeutralOutcomes",
+]);
 
 function loadSource(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8");
+}
+
+function materialConfigMapEntryPresent(src, key) {
+  return new RegExp(`${key}:\\s*\\["performance",\\s*"${key}"\\]`).test(src);
+}
+
+function materialDefinitionsFieldPresent(src, key) {
+  return new RegExp(`["']${key}["']`).test(src);
 }
 
 function parseNanocapUserConfig() {
@@ -271,6 +287,51 @@ function buildChecks() {
         src.includes("dustNeutralAbsPct") &&
         src.includes("darwinUseMaterialOutcomes") &&
         src.includes("darwinExcludeNeutralOutcomes"),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[Material wins] update_config executor maps all material outcome fields",
+      test: (src) => MATERIAL_UPDATE_CONFIG_FIELDS.every((key) => materialConfigMapEntryPresent(src, key)),
+    },
+    {
+      file: "tools/definitions.js",
+      label: "[Material wins] definitions document operator-tunable material outcome fields",
+      test: (src) =>
+        src.includes("OPERATOR_UPDATE_CONFIG_MATERIAL_OUTCOME_FIELDS") &&
+        src.includes("live-tunable through operator-only") &&
+        src.includes("Raw WR/Material WR reporting") &&
+        src.includes("Darwin material learning only") &&
+        src.includes("not stop-loss, TP, entry, sizing, routing, or GMGN policy") &&
+        MATERIAL_UPDATE_CONFIG_FIELDS.every((key) => materialDefinitionsFieldPresent(src, key)),
+    },
+    {
+      file: "tools/definitions.js",
+      label: "[Material wins] update_config executor and definitions agree on material outcome fields",
+      test: (src) => {
+        const executor = loadSource("tools/executor.js");
+        return MATERIAL_UPDATE_CONFIG_FIELDS.every((key) =>
+          materialDefinitionsFieldPresent(src, key) &&
+          materialConfigMapEntryPresent(executor, key)
+        );
+      },
+    },
+    {
+      file: "index.js",
+      label: "[Material wins] owner-facing reports label Raw WR and Material WR explicitly",
+      test: (src) => {
+        const briefing = loadSource("briefing.js");
+        const poolMemory = loadSource("pool-memory.js");
+        const analyzer = loadSource("scripts/analyze-material-wins.js");
+        return src.includes("Raw WR") &&
+          src.includes("Material WR") &&
+          briefing.includes("Raw WR") &&
+          briefing.includes("Material WR") &&
+          poolMemory.includes("raw WR") &&
+          poolMemory.includes("material WR") &&
+          analyzer.includes("Raw WR") &&
+          analyzer.includes("Material WR") &&
+          !src.includes("  Win rate:");
+      },
     },
     {
       file: "lessons.js",

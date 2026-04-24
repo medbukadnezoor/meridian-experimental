@@ -118,6 +118,8 @@ All fields are optional — defaults shown. Edit `user-config.json`.
 | `outOfRangeWaitMinutes` | `30` | Minutes a position can be out of range before alerting / acting |
 | `outOfRangeHardCloseMinutes` | `null` | Optional hard OOR cap that bypasses indicator confirmation once reached |
 
+Material outcome thresholds default to `materialWinPct=1`, `materialLossPct=-1`, `dustNeutralAbsPct=1`, with Darwin material learning enabled. These are live-tunable through operator-only `meridian config set <key> <value>` or Telegram `/setcfg <key> <value>` paths, and affect Raw WR/Material WR reporting plus Darwin learning classification only. They do not change stop-loss, TP, entry, sizing, routing, or GMGN policy.
+
 ---
 
 ## REPL commands

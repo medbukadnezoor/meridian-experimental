@@ -1,3 +1,15 @@
+export const OPERATOR_UPDATE_CONFIG_MATERIAL_OUTCOME_FIELDS = Object.freeze([
+  "materialWinPct",
+  "materialLossPct",
+  "dustNeutralAbsPct",
+  "neutralCloseReasonBuckets",
+  "darwinUseMaterialOutcomes",
+  "darwinExcludeNeutralOutcomes",
+]);
+
+export const OPERATOR_UPDATE_CONFIG_MATERIAL_OUTCOME_NOTE =
+  "Material outcome thresholds are live-tunable through operator-only `meridian config set` and Telegram `/setcfg`; they affect Raw WR/Material WR reporting and Darwin material learning only, not stop-loss, TP, entry, sizing, routing, or GMGN policy.";
+
 export const tools = [
   // ═══════════════════════════════════════════
   //  SCREENING TOOLS

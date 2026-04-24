@@ -22,6 +22,14 @@ import { recalculateWeights } from "../signal-weights.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
+  "materialWinPct",
+  "materialLossPct",
+  "dustNeutralAbsPct",
+  "neutralCloseReasonBuckets",
+  "darwinUseMaterialOutcomes",
+  "darwinExcludeNeutralOutcomes",
+]);
 
 function baseOptions() {
   return {
@@ -38,6 +46,18 @@ function baseOptions() {
 
 function classify(record) {
   return classifyMaterialOutcome(record, baseOptions());
+}
+
+function loadSource(relativePath) {
+  return fs.readFileSync(path.join(ROOT, relativePath), "utf8");
+}
+
+function materialConfigMapEntryPresent(src, key) {
+  return new RegExp(`${key}:\\s*\\["performance",\\s*"${key}"\\]`).test(src);
+}
+
+function materialDefinitionsFieldPresent(src, key) {
+  return new RegExp(`["']${key}["']`).test(src);
 }
 
 function assertClassification(label, record, expected) {
@@ -113,6 +133,50 @@ function runDarwinProof() {
     process.chdir(previousCwd);
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+function runUpdateConfigProof() {
+  const executor = loadSource("tools/executor.js");
+  const definitions = loadSource("tools/definitions.js");
+  const executorKeys = MATERIAL_UPDATE_CONFIG_FIELDS.filter((key) => materialConfigMapEntryPresent(executor, key));
+  const definitionKeys = MATERIAL_UPDATE_CONFIG_FIELDS.filter((key) => materialDefinitionsFieldPresent(definitions, key));
+
+  assert.deepStrictEqual(executorKeys, [...MATERIAL_UPDATE_CONFIG_FIELDS], "executor material update_config keys");
+  assert.deepStrictEqual(definitionKeys, [...MATERIAL_UPDATE_CONFIG_FIELDS], "definitions material update_config keys");
+  assert.ok(definitions.includes("live-tunable through operator-only"), "definitions document live-tunable operator-only scope");
+  assert.ok(definitions.includes("Raw WR/Material WR reporting"), "definitions document report labels");
+  assert.ok(definitions.includes("Darwin material learning only"), "definitions document Darwin-only learning scope");
+  assert.ok(definitions.includes("not stop-loss, TP, entry, sizing, routing, or GMGN policy"), "definitions document no trading-policy change");
+
+  return {
+    liveTunable: true,
+    operatorPaths: ["meridian config set", "Telegram /setcfg"],
+    fields: [...MATERIAL_UPDATE_CONFIG_FIELDS],
+    affects: ["Raw WR/Material WR reporting", "Darwin material learning"],
+    doesNotAffect: ["stop-loss", "TP", "entry", "sizing", "routing", "GMGN"],
+  };
+}
+
+function runOwnerLabelProof() {
+  const index = loadSource("index.js");
+  const briefing = loadSource("briefing.js");
+  const poolMemory = loadSource("pool-memory.js");
+  const analyzer = loadSource("scripts/analyze-material-wins.js");
+  const proof = {
+    thresholdsCommand: index.includes("Raw WR") && index.includes("Material WR") && !index.includes("  Win rate:"),
+    briefing: briefing.includes("Raw WR") && briefing.includes("Material WR"),
+    poolMemory: poolMemory.includes("raw WR") && poolMemory.includes("material WR"),
+    analyzerText: analyzer.includes("Raw WR") && analyzer.includes("Material WR"),
+    ambiguousBareWinRateHeadlineAbsent: !index.includes("  Win rate:"),
+  };
+
+  assert.ok(proof.thresholdsCommand, "/thresholds labels Raw WR and Material WR explicitly");
+  assert.ok(proof.briefing, "briefing labels Raw WR and Material WR explicitly");
+  assert.ok(proof.poolMemory, "pool memory labels raw/material WR explicitly");
+  assert.ok(proof.analyzerText, "material analyzer labels Raw WR and Material WR explicitly");
+  assert.ok(proof.ambiguousBareWinRateHeadlineAbsent, "ambiguous bare Win rate headline absent");
+
+  return proof;
 }
 
 function main() {
@@ -253,6 +317,8 @@ function main() {
   assert.strictEqual(flatConfig.performance.darwinExcludeNeutralOutcomes, false);
 
   const darwinProof = runDarwinProof();
+  const updateConfigProof = runUpdateConfigProof();
+  const ownerLabelProof = runOwnerLabelProof();
 
   console.log(JSON.stringify({
     success: true,
@@ -260,6 +326,8 @@ function main() {
     summary,
     runtimeConfig: defaultConfig.performance,
     darwinProof,
+    updateConfigProof,
+    ownerLabelProof,
     scriptReadOnly: true,
     repoRoot: ROOT,
   }, null, 2));

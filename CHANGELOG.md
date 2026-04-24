@@ -11,6 +11,9 @@
   `Raw WR` beside `Material WR` and neutral/dust close counts.
 - Darwin signal recalculation uses material outcomes by default and excludes neutral
   low-yield/operator/dust closes from learning samples.
+- Material outcome thresholds are live-tunable through operator-only `meridian config set`
+  and Telegram `/setcfg`; this changes reporting/Darwin learning classification only and
+  does not change stop-loss, TP, entry, sizing, routing, or GMGN policy.
 - Added read-only owner tools:
   - `node scripts/verify-material-win-metrics.js`
   - `node scripts/analyze-material-wins.js --actions logs --json`
