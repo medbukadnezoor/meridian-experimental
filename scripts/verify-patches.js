@@ -17,7 +17,11 @@ import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
-const NANOCAP_USER_CONFIG_PATH = join(ROOT, "..", "archive", "vps-backups", "nanocap", "user-config.json");
+const SYNCED_NANOCAP_USER_CONFIG_PATH = join(ROOT, "..", "archive", "vps-backups", "nanocap", "user-config.json");
+const REPO_LOCAL_USER_CONFIG_PATH = join(ROOT, "user-config.json");
+const NANOCAP_USER_CONFIG_PATH = existsSync(SYNCED_NANOCAP_USER_CONFIG_PATH)
+  ? SYNCED_NANOCAP_USER_CONFIG_PATH
+  : REPO_LOCAL_USER_CONFIG_PATH;
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 
@@ -157,8 +161,8 @@ function buildChecks() {
         Number(defaultProof.management?.repeatDeployCooldownMinFeeEarnedPct) === 0,
     },
     {
-      file: "../archive/vps-backups/nanocap/user-config.json",
-      label: "[Runtime] nanocap cooldown proof resolves from the supplied synced backup path",
+      file: NANOCAP_USER_CONFIG_PATH,
+      label: "[Runtime] nanocap cooldown proof resolves from the supplied user-config path",
       test: () =>
         nanocapConfig != null &&
         nanocapConfig.userConfigExists === true &&
@@ -173,8 +177,8 @@ function buildChecks() {
         nanocapConfig.management?.repeatDeployCooldownScope === nanocapUserConfig.repeatDeployCooldownScope,
     },
     {
-      file: "../archive/vps-backups/nanocap/user-config.json",
-      label: "[Runtime] nanocap repeat deploy defaults resolve exactly from the supplied synced backup path",
+      file: NANOCAP_USER_CONFIG_PATH,
+      label: "[Runtime] nanocap repeat deploy defaults resolve exactly from the supplied user-config path",
       test: () =>
         nanocapConfig != null &&
         nanocapConfig.management?.repeatDeployCooldownEnabled === nanocapUserConfig.repeatDeployCooldownEnabled &&
@@ -193,8 +197,8 @@ function buildChecks() {
         defaultProof?.management?.repeatLowYieldCooldownScope === "token",
     },
     {
-      file: "../archive/vps-backups/nanocap/user-config.json",
-      label: "[Runtime] nanocap repeat low-yield config resolves exactly from the supplied synced backup path",
+      file: NANOCAP_USER_CONFIG_PATH,
+      label: "[Runtime] nanocap repeat low-yield config resolves exactly from the supplied user-config path",
       test: () =>
         nanocapConfig != null &&
         nanocapConfig.management?.repeatLowYieldCooldownEnabled === (nanocapUserConfig.repeatLowYieldCooldownEnabled ?? false) &&
@@ -301,7 +305,7 @@ function main() {
 
   for (const check of checks) {
     let src = "";
-    if (!check.file.startsWith("../archive/")) {
+    if (!check.file.startsWith("/")) {
       try {
         src = loadSource(check.file);
       } catch {
@@ -309,7 +313,7 @@ function main() {
         failed += 1;
         continue;
       }
-    } else if (!existsSync(join(ROOT, check.file))) {
+    } else if (!existsSync(check.file)) {
       console.log(`FAIL  [FILE MISSING] ${check.file} -- ${check.label}`);
       failed += 1;
       continue;
