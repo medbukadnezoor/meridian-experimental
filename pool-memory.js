@@ -41,6 +41,19 @@ function isOorCloseReason(reason) {
   return text === "oor" || text.includes("out of range") || text.includes("oor");
 }
 
+function isLowYieldCloseReason(reason) {
+  return /low.yield/i.test(String(reason || ""));
+}
+
+function isEarlyDumpCloseReason(reason) {
+  return /early.dump/i.test(String(reason || ""));
+}
+
+function isStopLossFamilyCloseReason(reason) {
+  const text = String(reason || "");
+  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text);
+}
+
 function isAdjustedWinRateExcludedReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
@@ -163,22 +176,24 @@ export function recordPoolDeploy(poolAddress, deployData) {
 
   // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
   // Match any reason containing "low yield" (reasons look like "Trailing TP: Low yield: fee/TVL 3.00% < min 7%")
-  if (deploy.close_reason && /low.yield/i.test(deploy.close_reason)) {
+  if (isLowYieldCloseReason(deploy.close_reason)) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy soon
-  // Duration configurable via config.management.stopLossCooldownHours (default: 12h)
-  // (6h was too short — Iroha hit SL, waited 6h, deployed again, hit SL again)
-  if (deploy.close_reason && /stop.loss/i.test(deploy.close_reason)) {
+  // Set cooldown for stop-loss-family closes — token dumped on us, don't redeploy soon.
+  // Early dump exits return STOP_LOSS and older records may be prefixed as
+  // "Trailing TP: Early dump...", so classify by close-reason content.
+  // Duration configurable via config.management.stopLossCooldownHours (default: 12h).
+  if (isStopLossFamilyCloseReason(deploy.close_reason)) {
     const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
-    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "stop loss");
-    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "stop loss");
-    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (stop loss close)`);
+    const cooldownReason = isEarlyDumpCloseReason(deploy.close_reason) ? "early dump" : "stop loss";
+    const cooldownUntil = setPoolCooldown(entry, cooldownHours, cooldownReason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, cooldownReason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (${cooldownReason} close)`);
     if (entry.base_mint && mintCooldownUntil) {
-      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (stop loss close)`);
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${cooldownReason} close)`);
     }
   }
 

@@ -17,11 +17,30 @@
  */
 
 import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+
+function runEarlyDumpCooldownProof() {
+  const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-early-dump-cooldown failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+const earlyDumpProof = runEarlyDumpCooldownProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
@@ -29,13 +48,35 @@ const checks = [
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)
   {
     file: 'pool-memory.js',
-    label: '[Patch 6] Stop-loss 6h cooldown on pool + base mint',
+    label: '[Patch 6] Stop-loss-family cooldown on pool + base mint',
     test: src => {
-      const hasStopLoss = /stop.loss/i.test(src);
-      const has6h = src.includes('6') && src.includes('stop loss');
-      const hasMintCooldown = src.includes('setBaseMintCooldown') && src.includes('stop loss');
-      return hasStopLoss && has6h && hasMintCooldown;
+      const hasStopLossFamily = src.includes('function isStopLossFamilyCloseReason') && /stop.loss/i.test(src);
+      const hasEarlyDump = src.includes('function isEarlyDumpCloseReason') && /early.dump/i.test(src);
+      const hasMintCooldown = src.includes('setBaseMintCooldown') && src.includes('cooldownReason');
+      return hasStopLossFamily && hasEarlyDump && hasMintCooldown;
     },
+  },
+
+  {
+    file: 'index.js',
+    label: '[Patch 6] Direct stop-loss close preserves original reason label',
+    test: src =>
+      !src.includes('reason: `Trailing TP: ${exit.reason}`') &&
+      !src.includes('reason: `Trailing TP: ${closeRule.reason}`') &&
+      src.includes('reason: exit.reason') &&
+      src.includes('reason: closeRule.reason'),
+  },
+
+  {
+    file: 'scripts/verify-early-dump-cooldown.js',
+    label: '[Runtime] Early-dump close writes pool and token cooldowns',
+    test: () =>
+      earlyDumpProof?.success === true &&
+      earlyDumpProof?.closeReasonMatched === true &&
+      earlyDumpProof?.poolCooldownReason === 'early dump' &&
+      earlyDumpProof?.tokenCooldownReason === 'early dump' &&
+      earlyDumpProof?.tempStateFileCreated === true &&
+      earlyDumpProof?.tempDirRemoved === true,
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)
@@ -131,7 +172,7 @@ let failed = 0;
 let passed = 0;
 
 console.log('\n── Meridian Patch Verification ─────────────────────────────────\n');
-console.log('  Rebase basis: upstream 4959d10 + 3 local security patches (6, 7, 8)\n');
+console.log('  Rebase basis: upstream 4959d10 + local safety patches, including early-dump cooldown proof\n');
 
 for (const check of checks) {
   const filePath = join(ROOT, check.file);

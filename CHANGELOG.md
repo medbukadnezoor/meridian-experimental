@@ -1,5 +1,18 @@
 # Changelog
 
+## [main early-dump cooldown fix] — 2026-04-24 — early dump is stop-loss-family
+
+### Fixed
+- Early-dump exits now preserve their original `Early dump: ...` close reason instead of being mislabeled as `Trailing TP: ...` in the direct PnL-poller close path.
+- `pool-memory.js` now treats early-dump close reasons as stop-loss-family cooldown events and writes both pool-level and base-mint/token cooldowns with the existing `stopLossCooldownHours` duration.
+- `/config` wording now says stop-loss bypasses the poll wait, clarifying that the fast close path bypasses the management/poller wait before close, not the post-close redeploy cooldown.
+
+### Verification
+- `scripts/verify-early-dump-cooldown.js` safely proves a synthetic legacy-prefixed early-dump close writes both cooldown records in a temporary pool-memory file.
+- `scripts/verify-patches.js` now includes that early-dump cooldown proof.
+
+---
+
 ## [position fallback order] — 2026-04-18 — LPAgent.io direct as intermediate fallback — both branches
 
 ### Change: Relay → LPAgent.io direct → Meteora (was: relay → Meteora)

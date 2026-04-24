@@ -861,7 +861,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
               try {
                 const result = await executeTool("close_position", {
                   position_address: p.position,
-                  reason: `Trailing TP: ${exit.reason}`,
+                  reason: exit.reason,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
@@ -902,7 +902,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
               try {
                 const result = await executeTool("close_position", {
                   position_address: p.position,
-                  reason: `Trailing TP: ${closeRule.reason}`,
+                  reason: closeRule.reason,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
@@ -1096,7 +1096,7 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.binsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses cooldown ✓`,
+    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses poll wait ✓`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
