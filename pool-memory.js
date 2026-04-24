@@ -41,6 +41,19 @@ function isOorCloseReason(reason) {
   return text === "oor" || text.includes("out of range") || text.includes("oor");
 }
 
+function isLowYieldCloseReason(reason) {
+  return /low.yield/i.test(String(reason || ""));
+}
+
+function isEarlyDumpCloseReason(reason) {
+  return /early.dump/i.test(String(reason || ""));
+}
+
+function isStopLossCooldownCloseReason(reason) {
+  const text = String(reason || "");
+  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text);
+}
+
 function isAdjustedWinRateExcludedReason(reason) {
   const text = String(reason || "").trim().toLowerCase();
   return text.includes("out of range") ||
@@ -76,6 +89,35 @@ function setBaseMintCooldown(db, baseMint, hours, reason) {
     }
   }
   return cooldownUntil;
+}
+
+function countRecentLowYieldPoolCloses(entry, lookbackHours) {
+  if (!entry?.deploys?.length) return 0;
+  const lookbackMs = Math.max(0, lookbackHours) * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
+  return entry.deploys.filter((deploy) => {
+    if (!isLowYieldCloseReason(deploy?.close_reason)) return false;
+    const closedAt = Date.parse(deploy?.closed_at || "");
+    return Number.isFinite(closedAt) && closedAt >= cutoff;
+  }).length;
+}
+
+function countRecentLowYieldBaseMintCloses(db, baseMint, lookbackHours) {
+  if (!baseMint) return 0;
+  const lookbackMs = Math.max(0, lookbackHours) * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
+  let count = 0;
+  for (const entry of Object.values(db)) {
+    if (entry?.base_mint !== baseMint || !Array.isArray(entry?.deploys)) continue;
+    for (const deploy of entry.deploys) {
+      if (!isLowYieldCloseReason(deploy?.close_reason)) continue;
+      const closedAt = Date.parse(deploy?.closed_at || "");
+      if (Number.isFinite(closedAt) && closedAt >= cutoff) {
+        count += 1;
+      }
+    }
+  }
+  return count;
 }
 
 // ─── Write ─────────────────────────────────────────────────────
@@ -163,22 +205,48 @@ export function recordPoolDeploy(poolAddress, deployData) {
 
   // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
   // Match any reason containing "low yield" (reasons look like "Trailing TP: Low yield: fee/TVL 3.00% < min 7%")
-  if (deploy.close_reason && /low.yield/i.test(deploy.close_reason)) {
+  if (isLowYieldCloseReason(deploy.close_reason)) {
     const cooldownHours = 4;
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-  // Set cooldown for stop-loss closes — token dumped on us, don't redeploy soon
-  // Duration configurable via config.management.stopLossCooldownHours (default: 12h)
-  // (6h was too short — Iroha hit SL, waited 6h, deployed again, hit SL again)
-  if (deploy.close_reason && /stop.loss/i.test(deploy.close_reason)) {
+  // Set cooldown for stop-loss style closes — token dumped on us, don't redeploy soon.
+  // Early-dump closes are emitted as STOP_LOSS actions but may be stored with a
+  // "Trailing TP: Early dump..." prefix by older callers, so classify by content.
+  // Duration configurable via config.management.stopLossCooldownHours (default fallback: 12h)
+  if (isStopLossCooldownCloseReason(deploy.close_reason)) {
     const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
-    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "stop loss");
-    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "stop loss");
-    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (stop loss close)`);
+    const cooldownReason = isEarlyDumpCloseReason(deploy.close_reason) ? "early dump" : "stop loss";
+    const cooldownUntil = setPoolCooldown(entry, cooldownHours, cooldownReason);
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, cooldownReason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (${cooldownReason} close)`);
     if (entry.base_mint && mintCooldownUntil) {
-      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (stop loss close)`);
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${cooldownReason} close)`);
+    }
+  }
+
+  if (config.management.repeatLowYieldCooldownEnabled && isLowYieldCloseReason(deploy.close_reason)) {
+    const triggerCount = Math.max(1, Number(config.management.repeatLowYieldCooldownTriggerCount ?? 3));
+    const lookbackHours = Math.max(1, Number(config.management.repeatLowYieldCooldownLookbackHours ?? 48));
+    const cooldownHours = Math.max(0, Number(config.management.repeatLowYieldCooldownHours ?? 12));
+    const rawScope = String(config.management.repeatLowYieldCooldownScope || "token").toLowerCase();
+    const scope = ["pool", "token", "both"].includes(rawScope) ? rawScope : "token";
+    const poolLowYieldCount = countRecentLowYieldPoolCloses(entry, lookbackHours);
+    const tokenLowYieldCount = countRecentLowYieldBaseMintCloses(db, entry.base_mint, lookbackHours);
+
+    if (cooldownHours > 0 && poolLowYieldCount >= triggerCount && (scope === "pool" || scope === "both" || !entry.base_mint)) {
+      const reason = `repeat low-yield closes (${poolLowYieldCount} within ${lookbackHours}h)`;
+      const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
+      log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    }
+
+    if (cooldownHours > 0 && tokenLowYieldCount >= triggerCount && (scope === "token" || scope === "both") && entry.base_mint) {
+      const reason = `repeat low-yield closes (${tokenLowYieldCount} within ${lookbackHours}h)`;
+      const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+      if (mintCooldownUntil) {
+        log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+      }
     }
   }
 

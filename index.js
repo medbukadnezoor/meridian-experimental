@@ -862,7 +862,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
               try {
                 const result = await executeTool("close_position", {
                   position_address: p.position,
-                  reason: `Trailing TP: ${exit.reason}`,
+                  reason: exit.reason,
                   urgent: true,
                 });
                 if (result?.success) {
@@ -904,7 +904,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
               try {
                 const result = await executeTool("close_position", {
                   position_address: p.position,
-                  reason: `Trailing TP: ${closeRule.reason}`,
+                  reason: closeRule.reason,
                   urgent: true,
                 });
                 if (result?.success) {
@@ -1033,7 +1033,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }

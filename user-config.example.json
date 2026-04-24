@@ -56,7 +56,7 @@
   "outOfRangeWaitMinutes": 60,
   "outOfRangeHardCloseMinutes": 120,
   "oorCooldownTriggerCount": 3,
-  "oorCooldownHours": 3,
+  "oorCooldownHours": 1.5,
   "minVolumeToRebalance": 500,
 
   "repeatDeployCooldownEnabled": true,
@@ -64,6 +64,11 @@
   "repeatDeployCooldownHours": 6,
   "repeatDeployCooldownScope": "token",
   "repeatDeployCooldownMinFeeEarnedPct": 0,
+  "repeatLowYieldCooldownEnabled": true,
+  "repeatLowYieldCooldownTriggerCount": 3,
+  "repeatLowYieldCooldownLookbackHours": 48,
+  "repeatLowYieldCooldownHours": 12,
+  "repeatLowYieldCooldownScope": "token",
 
   "stopLossPct": -25,
   "emergencyPriceDropPct": -15,
@@ -128,7 +133,7 @@
     "entryPreset": "rsi_reversal",
     "exitPreset": null,
     "rsiLength": 2,
-    "intervals": ["5_MINUTE"],
+    "intervals": ["15_MINUTE"],
     "rsiOversold": 30,
     "rsiOverbought": 80
   }
