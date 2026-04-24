@@ -22,6 +22,7 @@ const REPO_LOCAL_USER_CONFIG_PATH = join(ROOT, "user-config.json");
 const NANOCAP_USER_CONFIG_PATH = existsSync(SYNCED_NANOCAP_USER_CONFIG_PATH)
   ? SYNCED_NANOCAP_USER_CONFIG_PATH
   : REPO_LOCAL_USER_CONFIG_PATH;
+const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 
@@ -74,6 +75,7 @@ function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
   const defaultProof = runRuntimeConfigProof(defaultProofPath);
+  const exampleProof = runRuntimeConfigProof(NANOCAP_EXAMPLE_CONFIG_PATH);
   const nanocapConfig = existsSync(NANOCAP_USER_CONFIG_PATH)
     ? runRuntimeConfigProof(NANOCAP_USER_CONFIG_PATH)
     : null;
@@ -94,6 +96,14 @@ function buildChecks() {
       file: "config-builder.js",
       label: "[Patch 6] stopLossCooldownHours mapped into config.management",
       test: (src) => /stopLossCooldownHours:\s*u\.stopLossCooldownHours\s*\?\?\s*12/.test(src),
+    },
+    {
+      file: "config-builder.js",
+      label: "[Stop-loss trial] confirmed stop-loss and snapshot config keys mapped",
+      test: (src) =>
+        /stopLossConfirmDelayMs:\s*u\.stopLossConfirmDelayMs\s*\?\?\s*0/.test(src) &&
+        /hardStopLossPct:\s*u\.hardStopLossPct\s*\?\?\s*null/.test(src) &&
+        /pnlSnapshotLoggingEnabled:\s*u\.pnlSnapshotLoggingEnabled\s*\?\?\s*false/.test(src),
     },
     {
       file: "config-builder.js",
@@ -135,6 +145,47 @@ function buildChecks() {
         !src.includes("(position.age_minutes ?? 0) >= 60"),
     },
     {
+      file: "index.js",
+      label: "[Stop-loss trial] PnL snapshots write compact JSONL from poller",
+      test: (src) =>
+        src.includes("pnl-snapshots-") &&
+        src.includes("pnlSnapshotLoggingEnabled") &&
+        src.includes("appendPnlSnapshot(result.wallet, p, exit)") &&
+        src.includes('event: "pnl_snapshot"') &&
+        src.includes("stopCandidate"),
+    },
+    {
+      file: "state.js",
+      label: "[Stop-loss trial] soft stop-loss becomes a confirmation candidate when enabled",
+      test: (src) =>
+        src.includes('action: "STOP_LOSS_CANDIDATE"') &&
+        src.includes("stopLossConfirmDelayMs > 0") &&
+        src.includes("mgmtConfig.hardStopLossPct == null") &&
+        src.includes("Stop loss candidate:") &&
+        src.includes("Hard stop loss:"),
+    },
+    {
+      file: "index.js",
+      label: "[Stop-loss trial] confirmation scheduler logs confirmed and rejected candidates",
+      test: (src) =>
+        src.includes("_stopLossConfirmTimers") &&
+        src.includes("scheduleStopLossConfirmation") &&
+        src.includes("Stop loss confirmed:") &&
+        src.includes("Stop loss candidate rejected:") &&
+        src.includes("close_position"),
+    },
+    {
+      file: "scripts/analyze-pnl-snapshots.js",
+      label: "[Stop-loss trial] read-only PnL snapshot analyzer present",
+      test: (src) =>
+        src.includes("pnl-snapshots-") &&
+        src.includes("THRESHOLDS = [-8, -10, -12, -15, -25]") &&
+        src.includes("crossedMinus8RecoveredAbove0") &&
+        src.includes("crossedMinus8ReachedTrailingTrigger") &&
+        !src.includes("getMyPositions") &&
+        !src.includes("executeTool"),
+    },
+    {
       file: "pool-memory.js",
       label: "[Hygiene] repeat low-yield helper present and default-gated",
       test: (src) =>
@@ -149,6 +200,28 @@ function buildChecks() {
         Number(defaultProof?.management?.stopLossCooldownHours) === 12 &&
         Number(defaultProof?.management?.oorCooldownHours) === 12 &&
         Number(defaultProof?.management?.minAgeBeforeYieldCheck) === 60,
+    },
+    {
+      file: "scripts/verify-runtime-config.js",
+      label: "[Runtime] stop-loss trial defaults preserve legacy behavior until enabled",
+      test: () =>
+        defaultProof.userConfigExists === false &&
+        Number(defaultProof?.management?.stopLossConfirmDelayMs) === 0 &&
+        defaultProof?.management?.hardStopLossPct === null &&
+        defaultProof?.management?.pnlSnapshotLoggingEnabled === false,
+    },
+    {
+      file: "user-config.example.json",
+      label: "[Runtime] nanocap example resolves confirmed -8/-15 stop-loss trial config",
+      test: () =>
+        exampleProof.userConfigExists === true &&
+        Number(exampleProof?.management?.stopLossPct) === -8 &&
+        Number(exampleProof?.management?.stopLossConfirmDelayMs) === 15000 &&
+        Number(exampleProof?.management?.hardStopLossPct) === -15 &&
+        Number(exampleProof?.management?.earlyDumpPct) === -8 &&
+        Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
+        exampleProof?.management?.pnlSnapshotLoggingEnabled === true &&
+        exampleProof?.management?.pnlSnapshotBotName === "nanocap",
     },
     {
       file: "scripts/verify-runtime-config.js",
@@ -301,7 +374,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap stop-loss cooldown mapping and early-dump cooldown classification.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, and confirmed stop-loss trial config.\n");
 
   for (const check of checks) {
     let src = "";

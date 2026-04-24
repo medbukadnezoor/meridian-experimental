@@ -534,6 +534,29 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   // ── Stop loss ──────────────────────────────────────────────────
   if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+    const hardStopLossPct = mgmtConfig.hardStopLossPct == null || mgmtConfig.hardStopLossPct === ""
+      ? null
+      : Number(mgmtConfig.hardStopLossPct);
+    if (hardStopLossPct != null && Number.isFinite(hardStopLossPct) && currentPnlPct <= hardStopLossPct) {
+      return {
+        action: "STOP_LOSS",
+        reason: `Hard stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${hardStopLossPct}%`,
+        urgent: true,
+      };
+    }
+
+    const stopLossConfirmDelayMs = Math.max(0, Number(mgmtConfig.stopLossConfirmDelayMs ?? 0));
+    if (stopLossConfirmDelayMs > 0) {
+      return {
+        action: "STOP_LOSS_CANDIDATE",
+        reason: `Stop loss candidate: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
+        needs_confirmation: true,
+        current_pnl_pct: currentPnlPct,
+        stop_loss_pct: mgmtConfig.stopLossPct,
+        confirm_delay_ms: stopLossConfirmDelayMs,
+      };
+    }
+
     return {
       action: "STOP_LOSS",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,

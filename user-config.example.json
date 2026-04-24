@@ -70,9 +70,11 @@
   "repeatLowYieldCooldownHours": 12,
   "repeatLowYieldCooldownScope": "token",
 
-  "stopLossPct": -25,
+  "stopLossPct": -8,
+  "stopLossConfirmDelayMs": 15000,
+  "hardStopLossPct": -15,
   "emergencyPriceDropPct": -15,
-  "earlyDumpPct": -10,
+  "earlyDumpPct": -8,
   "earlyDumpMaxAgeMin": 20,
   "stopLossCooldownHours": 2,
 
@@ -84,6 +86,8 @@
   "trailingTriggerPct": 8,
   "trailingDropPct": 3,
   "pnlSanityMaxDiffPct": 5,
+  "pnlSnapshotLoggingEnabled": true,
+  "pnlSnapshotDebug": false,
   "solMode": true,
 
   "managementIntervalMin": 5,

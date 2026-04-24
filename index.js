@@ -1,4 +1,6 @@
 import "dotenv/config";
+import fs from "fs";
+import path from "path";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
@@ -71,10 +73,69 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
+const _stopLossConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
+const PNL_SNAPSHOT_LOG_DIR = "./logs";
+let _pnlSnapshotWarningLogged = false;
+
+function finiteNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatPct(value) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? "?" : num.toFixed(2);
+}
+
+function isSoftStopLossCandidate(position, managementConfig) {
+  const pnlPct = finiteNumberOrNull(position?.pnl_pct);
+  const stopLossPct = finiteNumberOrNull(managementConfig?.stopLossPct);
+  const hardStopLossPct = finiteNumberOrNull(managementConfig?.hardStopLossPct);
+  if (pnlPct == null || stopLossPct == null || position?.pnl_pct_suspicious) return false;
+  if (hardStopLossPct != null && pnlPct <= hardStopLossPct) return false;
+  return pnlPct <= stopLossPct;
+}
+
+function appendPnlSnapshot(wallet, position, exit = null) {
+  if (!config.management.pnlSnapshotLoggingEnabled) return;
+
+  try {
+    fs.mkdirSync(PNL_SNAPSHOT_LOG_DIR, { recursive: true });
+    const now = new Date();
+    const tracked = getTrackedPosition(position.position);
+    const entry = {
+      ts: now.toISOString(),
+      event: "pnl_snapshot",
+      bot: config.management.pnlSnapshotBotName ?? "meridian",
+      wallet: wallet ?? null,
+      pool: position.pool ?? position.pool_address ?? null,
+      poolName: position.pair ?? position.pool_name ?? null,
+      position: position.position ?? null,
+      baseMint: position.base_mint ?? null,
+      ageMin: finiteNumberOrNull(position.age_minutes),
+      pnlPct: finiteNumberOrNull(position.pnl_pct),
+      peakPnlPct: finiteNumberOrNull(tracked?.peak_pnl_pct),
+      trailingActive: Boolean(tracked?.trailing_active),
+      inRange: typeof position.in_range === "boolean" ? position.in_range : null,
+      stopCandidate: exit?.action === "STOP_LOSS_CANDIDATE" || isSoftStopLossCandidate(position, config.management),
+    };
+    const dateStr = now.toISOString().slice(0, 10);
+    fs.appendFileSync(path.join(PNL_SNAPSHOT_LOG_DIR, `pnl-snapshots-${dateStr}.jsonl`), JSON.stringify(entry) + "\n");
+    if (config.management.pnlSnapshotDebug) {
+      log("state", `[PnL snapshot] ${entry.poolName ?? entry.position?.slice(0, 8) ?? "position"} PnL=${entry.pnlPct ?? "?"}%`);
+    }
+  } catch (error) {
+    if (!_pnlSnapshotWarningLogged) {
+      _pnlSnapshotWarningLogged = true;
+      log("state_warn", `PnL snapshot logging failed: ${error.message}`);
+    }
+  }
+}
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
@@ -164,6 +225,66 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   _trailingDropConfirmTimers.set(positionAddress, timer);
 }
 
+function scheduleStopLossConfirmation(position, exit) {
+  const positionAddress = position?.position;
+  const delayMs = Math.max(0, Number(exit?.confirm_delay_ms ?? config.management.stopLossConfirmDelayMs ?? 0));
+  const stopLossPct = finiteNumberOrNull(exit?.stop_loss_pct ?? config.management.stopLossPct);
+  const candidatePnlPct = finiteNumberOrNull(exit?.current_pnl_pct ?? position?.pnl_pct);
+  const pair = position?.pair ?? positionAddress?.slice(0, 8) ?? "position";
+
+  if (!positionAddress || delayMs <= 0 || stopLossPct == null) return false;
+  if (_stopLossConfirmTimers.has(positionAddress)) return false;
+
+  log(
+    "state",
+    `[Stop loss candidate] ${pair} PnL=${formatPct(candidatePnlPct)}% <= ${stopLossPct}% — rechecking in ${Math.round(delayMs / 1000)}s`,
+  );
+
+  const timer = setTimeout(async () => {
+    _stopLossConfirmTimers.delete(positionAddress);
+    try {
+      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const latest = result?.positions?.find((p) => p.position === positionAddress);
+      const currentPnlPct = finiteNumberOrNull(latest?.pnl_pct);
+      const latestPair = latest?.pair ?? pair;
+
+      if (currentPnlPct != null && currentPnlPct <= stopLossPct) {
+        const reason = `Stop loss confirmed: PnL ${currentPnlPct.toFixed(2)}% <= ${stopLossPct}% after ${Math.round(delayMs / 1000)}s recheck (candidate ${formatPct(candidatePnlPct)}%)`;
+        log("state", `[Stop loss confirmed] ${latestPair} — ${reason} — closing directly`);
+        _pollTriggeredAt = Date.now();
+        try {
+          const closeResult = await executeTool("close_position", {
+            position_address: positionAddress,
+            reason,
+            urgent: true,
+          });
+          if (closeResult?.success) {
+            log("state", `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
+          } else {
+            log("state", `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+          }
+        } catch (error) {
+          log("cron_error", `Confirmed stop-loss close error: ${error.message}`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+        }
+        return;
+      }
+
+      const currentLabel = currentPnlPct == null ? "unavailable" : `${currentPnlPct.toFixed(2)}%`;
+      log(
+        "state",
+        `Stop loss candidate rejected: ${latestPair} PnL ${currentLabel} recovered above ${stopLossPct}% after ${Math.round(delayMs / 1000)}s recheck (candidate ${formatPct(candidatePnlPct)}%)`,
+      );
+    } catch (error) {
+      log("state_warn", `Stop-loss confirmation failed for ${positionAddress}: ${error.message}`);
+    }
+  }, delayMs);
+
+  _stopLossConfirmTimers.set(positionAddress, timer);
+  return true;
+}
+
 
 async function runBriefing() {
   log("cron", "Starting morning briefing");
@@ -200,6 +321,8 @@ async function maybeRunMissedBriefing() {
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  for (const timer of _stopLossConfirmTimers.values()) clearTimeout(timer);
+  _stopLossConfirmTimers.clear();
   _cronTasks = [];
 }
 
@@ -247,6 +370,10 @@ export async function runManagementCycle({ silent = false } = {}) {
           }
           continue;
         }
+        if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
+          scheduleStopLossConfirmation(p, exit);
+          continue;
+        }
         exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
@@ -286,6 +413,10 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
+          scheduleStopLossConfirmation(p, closeRule);
+          continue;
+        }
         if (closeRule.reason === "low yield") {
           const tracked = getTrackedPosition(p.position);
           if (!tracked) {
@@ -841,7 +972,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
           schedulePeakConfirmation(p.position);
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        appendPnlSnapshot(result.wallet, p, exit);
         if (exit) {
+          if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
+            scheduleStopLossConfirmation(p, exit);
+            continue;
+          }
           const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
           if (!indicatorConfirmation.confirmed) {
             log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
@@ -895,6 +1031,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
+            scheduleStopLossConfirmation(p, closeRule);
+            continue;
+          }
           // Rule 1 (stop loss) is time-critical — bypass indicator check and cooldown, close directly
           const isStopLossRule = closeRule.rule === 1;
           if (isStopLossRule) {
@@ -1002,7 +1142,31 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
+  const currentPnlPct = finiteNumberOrNull(position.pnl_pct);
+  if (!pnlSuspect && currentPnlPct != null && currentPnlPct <= managementConfig.stopLossPct) {
+    const hardStopLossPct = finiteNumberOrNull(managementConfig.hardStopLossPct);
+    if (hardStopLossPct != null && currentPnlPct <= hardStopLossPct) {
+      return {
+        action: "CLOSE",
+        rule: 1,
+        reason: `Hard stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${hardStopLossPct}%`,
+        urgent: true,
+      };
+    }
+
+    const stopLossConfirmDelayMs = Math.max(0, Number(managementConfig.stopLossConfirmDelayMs ?? 0));
+    if (stopLossConfirmDelayMs > 0) {
+      return {
+        action: "STOP_LOSS_CANDIDATE",
+        rule: 1,
+        reason: `Stop loss candidate: PnL ${currentPnlPct.toFixed(2)}% <= ${managementConfig.stopLossPct}%`,
+        needs_confirmation: true,
+        current_pnl_pct: currentPnlPct,
+        stop_loss_pct: managementConfig.stopLossPct,
+        confirm_delay_ms: stopLossConfirmDelayMs,
+      };
+    }
+
     return { action: "CLOSE", rule: 1, reason: "stop loss" };
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
@@ -1099,9 +1263,10 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.binsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses cooldown ✓`,
+    `Stop loss: ${config.management.stopLossPct}%${config.management.stopLossConfirmDelayMs ? ` confirmed after ${Math.round(config.management.stopLossConfirmDelayMs / 1000)}s` : ""} | hard ${config.management.hardStopLossPct ?? "off"}% | take profit: ${config.management.takeProfitPct}%`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `PnL snapshots: ${config.management.pnlSnapshotLoggingEnabled ? "on" : "off"}`,
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
