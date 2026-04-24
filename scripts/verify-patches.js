@@ -25,6 +25,7 @@ const NANOCAP_USER_CONFIG_PATH = existsSync(SYNCED_NANOCAP_USER_CONFIG_PATH)
 const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
+const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 
 function loadSource(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8");
@@ -71,6 +72,22 @@ function runEarlyDumpCooldownProof() {
   return JSON.parse(result.stdout);
 }
 
+function runStopLossTrialBehaviorProof() {
+  const result = spawnSync(process.execPath, [STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-stop-loss-trial-behavior failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -80,6 +97,7 @@ function buildChecks() {
     ? runRuntimeConfigProof(NANOCAP_USER_CONFIG_PATH)
     : null;
   const earlyDumpProof = runEarlyDumpCooldownProof();
+  const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
 
   return [
     {
@@ -166,13 +184,20 @@ function buildChecks() {
     },
     {
       file: "index.js",
-      label: "[Stop-loss trial] confirmation scheduler logs confirmed and rejected candidates",
+      label: "[Stop-loss trial] confirmation scheduler uses shared confirmed/rejected helper",
       test: (src) =>
         src.includes("_stopLossConfirmTimers") &&
         src.includes("scheduleStopLossConfirmation") &&
-        src.includes("Stop loss confirmed:") &&
-        src.includes("Stop loss candidate rejected:") &&
+        src.includes("buildStopLossConfirmationResult") &&
         src.includes("close_position"),
+    },
+    {
+      file: "stop-loss-policy.js",
+      label: "[Stop-loss trial] shared confirmation helper labels confirmed and rejected rechecks",
+      test: (src) =>
+        src.includes("buildStopLossConfirmationResult") &&
+        src.includes("Stop loss confirmed:") &&
+        src.includes("Stop loss candidate rejected:"),
     },
     {
       file: "scripts/analyze-pnl-snapshots.js",
@@ -184,6 +209,29 @@ function buildChecks() {
         src.includes("crossedMinus8ReachedTrailingTrigger") &&
         !src.includes("getMyPositions") &&
         !src.includes("executeTool"),
+    },
+    {
+      file: "scripts/verify-stop-loss-trial-behavior.js",
+      label: "[Stop-loss trial] synthetic behavior proof covers soft, hard, early, legacy, confirm, and reject",
+      test: () =>
+        stopLossBehaviorProof?.success === true &&
+        stopLossBehaviorProof?.softCandidate?.action === "STOP_LOSS_CANDIDATE" &&
+        stopLossBehaviorProof?.softCandidate?.needsConfirmation === true &&
+        Number(stopLossBehaviorProof?.softCandidate?.confirmDelayMs) === 15000 &&
+        String(stopLossBehaviorProof?.softCandidate?.reason || "").startsWith("Stop loss candidate:") &&
+        stopLossBehaviorProof?.hardStop?.action === "STOP_LOSS" &&
+        stopLossBehaviorProof?.hardStop?.urgent === true &&
+        String(stopLossBehaviorProof?.hardStop?.reason || "").startsWith("Hard stop loss:") &&
+        stopLossBehaviorProof?.earlyDump?.action === "STOP_LOSS" &&
+        String(stopLossBehaviorProof?.earlyDump?.reason || "").startsWith("Early dump:") &&
+        stopLossBehaviorProof?.legacyNoDelay?.action === "STOP_LOSS" &&
+        String(stopLossBehaviorProof?.legacyNoDelay?.reason || "").startsWith("Stop loss:") &&
+        stopLossBehaviorProof?.confirmedRecheck?.confirmed === true &&
+        String(stopLossBehaviorProof?.confirmedRecheck?.closeReason || "").startsWith("Stop loss confirmed:") &&
+        stopLossBehaviorProof?.rejectedRecheck?.rejected === true &&
+        String(stopLossBehaviorProof?.rejectedRecheck?.rejectionReason || "").startsWith("Stop loss candidate rejected:") &&
+        stopLossBehaviorProof?.tempStateFileCreated === true &&
+        stopLossBehaviorProof?.tempDirRemoved === true,
     },
     {
       file: "pool-memory.js",

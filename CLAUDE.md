@@ -1,7 +1,9 @@
+<!-- workflow-generated:version=workflow-managed-v1;tool=CLAUDE.md;source=AGENTS.md -->
 # Claude Code context — meridian-experimental
-# This file is auto-synced from AGENTS.md via project-sync.
-# To update: edit AGENTS.md, then run project-sync.
+# Generated from AGENTS.md by `workflow sync`.
+# Do not edit the managed section below.
 
+<!-- workflow-managed:start -->
 # meridian-experimental
 
 ## What This Repo Is
@@ -14,7 +16,7 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ## Current Operational Context
 [CONFIRMED] Bot Version: **v1.0.9** (Enabled solMode + TP 4% on 2026-04-13)
 [CONFIRMED] Bot Host: VPS **ohox** (TencentCloud Singapore, 43.156.182.93) under PM2.
-[CONFIRMED] Current VPS PM2 runtime state (2026-04-18): `stopped` during critical main/experimental update staging. Verify with `ssh ohox ms` before restart.
+[CONFIRMED] Current VPS PM2 runtime state (2026-04-24): main `stopped` and nanocap `online` after the relay-fallback + Telegram-visibility + update_config hardening rollout. Verify with `ssh ohox ms` / `ssh ohox ncs` before restart.
 [CONFIRMED] Security Status: ACTIVE (8 patches maintained).
 [CONFIRMED] Active Role Models: All use `qwen3.6-plus` via DashScope Singapore.
 [CONFIRMED] **takeProfitPct: 4%**. `takeProfitFeePct` is still present in live config for compatibility, but current live branches treat it as a fallback alias into `takeProfitPct`, not as a separate runtime fee gate.
@@ -27,6 +29,7 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ### Nanocap-specific patches (nanocap-v1 branch)
 [CONFIRMED] **skipClaim on URGENT stop-loss** (commit `c11e584`, 2026-04-16): `closePosition()` accepts `urgent: true`. When urgent, Step 1 (claimFees TX) is skipped — `removeLiquidity({ shouldClaimAndClose: true })` still captures fees atomically. Both URGENT close paths in `index.js` pass `urgent: true`. Fixes the Republicans-SOL incident where a 23s claim TX held the position open while price dropped -50% further (final PnL -65.79% vs -33% at trigger). Pending merge to `experimental` after 3–5 confirmed URGENT closes on nanocap.
 [CONFIRMED] **minOrganic: 55** on nanocap VPS (raised from 45, operator instruction 2026-04-16). Republicans-SOL had organic=77 and still rugged — organic alone insufficient, but this reduces nanocap's exposure to the lowest-quality tier.
+[CONFIRMED] **confirmed stop-loss trial live** (commit `628776e`, 2026-04-24): nanocap uses soft `stopLossPct=-8` with `stopLossConfirmDelayMs=15000`, immediate `hardStopLossPct=-15`, separate `earlyDumpPct=-8` within 20m, and compact 30s PnL snapshots in `logs/pnl-snapshots-YYYY-MM-DD.jsonl`. Main remains stopped; do not revive it.
 
 ## Safety Protocol
 **The bot runs on VPS ohox, NOT locally. Do NOT run `node index.js` on Mac.**
@@ -59,4 +62,10 @@ The strategy library (`strategy-library.json`) defines the LP posture injected i
 
 ---
 *Edit this file to update project context.*
-*Run project-sync after any edit to keep CLAUDE.md and GEMINI.md in sync.*
+*For current working context and handoff, read [.ai/handoffs/NEXT_STEP.md](/Users/user/Trading%20Project%20Files/DLMM/meridian-experimental/.ai/handoffs/NEXT_STEP.md), [.ai/context/PROJECT_STATE.md](/Users/user/Trading%20Project%20Files/DLMM/meridian-experimental/.ai/context/PROJECT_STATE.md), and [.ai/prompts/CURRENT_TASK.md](/Users/user/Trading%20Project%20Files/DLMM/meridian-experimental/.ai/prompts/CURRENT_TASK.md). `docs/continuity/*` is legacy/reference-only for now. Mirror files are derived from `AGENTS.md`; do not edit mirror files directly.*
+<!-- workflow-managed:end -->
+
+<!-- workflow-unmanaged:start -->
+No unmanaged notes.
+Add tool-specific notes here only when they cannot live in `AGENTS.md`.
+<!-- workflow-unmanaged:end -->

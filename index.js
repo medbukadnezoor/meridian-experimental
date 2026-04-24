@@ -25,6 +25,7 @@ import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnable
 import { appendDecision } from "./decision-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
+import { buildStopLossConfirmationResult } from "./stop-loss-policy.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -248,9 +249,17 @@ function scheduleStopLossConfirmation(position, exit) {
       const currentPnlPct = finiteNumberOrNull(latest?.pnl_pct);
       const latestPair = latest?.pair ?? pair;
 
-      if (currentPnlPct != null && currentPnlPct <= stopLossPct) {
-        const reason = `Stop loss confirmed: PnL ${currentPnlPct.toFixed(2)}% <= ${stopLossPct}% after ${Math.round(delayMs / 1000)}s recheck (candidate ${formatPct(candidatePnlPct)}%)`;
-        log("state", `[Stop loss confirmed] ${latestPair} — ${reason} — closing directly`);
+      const confirmation = buildStopLossConfirmationResult({
+        currentPnlPct,
+        stopLossPct,
+        delayMs,
+        candidatePnlPct,
+        pair: latestPair,
+      });
+
+      if (confirmation.confirmed) {
+        const reason = confirmation.closeReason;
+        log("state", confirmation.logMessage);
         _pollTriggeredAt = Date.now();
         try {
           const closeResult = await executeTool("close_position", {
@@ -271,11 +280,7 @@ function scheduleStopLossConfirmation(position, exit) {
         return;
       }
 
-      const currentLabel = currentPnlPct == null ? "unavailable" : `${currentPnlPct.toFixed(2)}%`;
-      log(
-        "state",
-        `Stop loss candidate rejected: ${latestPair} PnL ${currentLabel} recovered above ${stopLossPct}% after ${Math.round(delayMs / 1000)}s recheck (candidate ${formatPct(candidatePnlPct)}%)`,
-      );
+      log("state", confirmation.logMessage);
     } catch (error) {
       log("state_warn", `Stop-loss confirmation failed for ${positionAddress}: ${error.message}`);
     }
