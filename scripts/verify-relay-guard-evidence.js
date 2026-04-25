@@ -104,6 +104,28 @@ function gitContains(baseCommit) {
   return result.status === 0;
 }
 
+function chooseExperimentalRemote() {
+  const configured = getArg("--experimental-remote", null);
+  const candidates = [configured, "private", "origin"].filter(Boolean);
+  const fallbacks = [];
+
+  for (const remote of candidates) {
+    const result = run("git", ["ls-remote", remote, "experimental"], {
+      cwd: ROOT,
+      timeout: 60_000,
+    });
+    if (result.status !== 0 || !result.stdout.trim()) continue;
+    const [hash] = result.stdout.trim().split(/\s+/);
+    if (hash?.startsWith(EXPERIMENTAL_GUARD_BASE_COMMIT)) {
+      return { remote, hash };
+    }
+    fallbacks.push({ remote, hash });
+  }
+
+  if (fallbacks.length > 0) return fallbacks[0];
+  throw new Error("no git remote with an experimental branch was reachable");
+}
+
 function getPm2Process(name, list) {
   return list.find((entry) => entry?.name === name) || null;
 }
@@ -293,21 +315,27 @@ function proveExperimentalVerifier() {
   const tempRepo = join(tempRoot, "experimental");
   const dependencySource = join(ROOT, "node_modules");
   const cleanup = !args.has("--keep-temp");
+  let chosenRemote = null;
 
   try {
     if (!fs.existsSync(dependencySource)) {
       throw new Error(`missing installed dependencies at ${dependencySource}`);
     }
 
+    chosenRemote = chooseExperimentalRemote();
+    runRequired("git", ["fetch", "--quiet", chosenRemote.remote, "experimental:refs/remotes/proof/experimental"], {
+      cwd: ROOT,
+      timeout: 180_000,
+    });
     runRequired("git", ["clone", "--quiet", "--shared", "--no-checkout", ROOT, tempRepo], {
       cwd: ROOT,
       timeout: 120_000,
     });
-    runRequired("git", ["fetch", "--quiet", "origin", "experimental"], {
+    runRequired("git", ["fetch", "--quiet", "origin", "refs/remotes/proof/experimental:refs/heads/experimental-proof"], {
       cwd: tempRepo,
-      timeout: 180_000,
+      timeout: 120_000,
     });
-    runRequired("git", ["checkout", "--quiet", "FETCH_HEAD"], {
+    runRequired("git", ["checkout", "--quiet", "experimental-proof"], {
       cwd: tempRepo,
       timeout: 120_000,
     });
@@ -339,6 +367,8 @@ function proveExperimentalVerifier() {
       experimental_head: head,
       experimental_guard_base_commit: EXPERIMENTAL_GUARD_BASE_COMMIT,
       experimental_contains_guard_base: containsBase,
+      experimental_remote: chosenRemote.remote,
+      experimental_remote_head: chosenRemote.hash,
       experimental_dependency_mode: "temporary_checkout_with_current_node_modules_symlink",
       experimental_temp_path: args.has("--keep-temp") ? tempRepo : null,
       experimental_error: security.status === 0 && patches.status === 0 ? null : {
@@ -353,6 +383,8 @@ function proveExperimentalVerifier() {
       experimental_head: null,
       experimental_guard_base_commit: EXPERIMENTAL_GUARD_BASE_COMMIT,
       experimental_contains_guard_base: false,
+      experimental_remote: chosenRemote?.remote || null,
+      experimental_remote_head: chosenRemote?.hash || null,
       experimental_dependency_mode: "temporary_checkout_with_current_node_modules_symlink",
       experimental_temp_path: args.has("--keep-temp") ? tempRepo : null,
       experimental_error: error.message,
