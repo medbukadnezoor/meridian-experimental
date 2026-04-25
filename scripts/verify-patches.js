@@ -28,6 +28,7 @@ const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-coo
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
+const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -138,6 +139,22 @@ function runUpstreamSecurityHardeningProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRelayGuardEvidenceSelfTest() {
+  const result = spawnSync(process.execPath, [RELAY_GUARD_EVIDENCE_VERIFIER_PATH, "--self-test"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-relay-guard-evidence self-test failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -150,6 +167,7 @@ function buildChecks() {
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
+  const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
 
   return [
     {
@@ -170,6 +188,24 @@ function buildChecks() {
         upstreamSecurityProof?.relayProof?.simulationErrorRejected === true &&
         upstreamSecurityProof?.relayProof?.maxSolLossEnforced === true &&
         upstreamSecurityProof?.relayProof?.unrelatedTokenDebitRejected === true,
+    },
+    {
+      file: "scripts/verify-relay-guard-evidence.js",
+      label: "[Security] owner relay guard evidence report has safe status classifier",
+      test: (src) =>
+        relayGuardEvidenceProof?.success === true &&
+        Array.isArray(relayGuardEvidenceProof?.relay_status_values) &&
+        relayGuardEvidenceProof.relay_status_values.includes("not_yet_exercised") &&
+        relayGuardEvidenceProof.relay_status_values.includes("guard_approved") &&
+        relayGuardEvidenceProof.relay_status_values.includes("guard_rejected") &&
+        relayGuardEvidenceProof?.approved_status === "guard_approved" &&
+        relayGuardEvidenceProof?.rejected_status === "guard_rejected" &&
+        relayGuardEvidenceProof?.empty_status === "not_yet_exercised" &&
+        src.includes("deploys_or_closes_positions: false") &&
+        src.includes("restarts_processes: false") &&
+        src.includes("changes_config: false") &&
+        src.includes("experimental_security_verifier_passed") &&
+        src.includes("relay_guard_exercise_status"),
     },
     {
       file: "config.js",
@@ -655,7 +691,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, and upstream env/relay security hardening.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, upstream env/relay security hardening, and owner relay guard evidence.\n");
 
   for (const check of checks) {
     let src = "";

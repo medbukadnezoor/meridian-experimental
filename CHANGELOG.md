@@ -1,5 +1,16 @@
 # Changelog
 
+## [relay guard evidence hardening] - 2026-04-25 - owner proof for guarded relay rollout
+
+### Change: read-only guard exercise report
+
+- Added `scripts/verify-relay-guard-evidence.js`, an owner-facing proof command that reports the live nanocap head, PM2 main/nanocap status, relay guard exercise status, and latest guard event time if any.
+- The relay status is explicit: `not_yet_exercised`, `guard_approved`, or `guard_rejected`; no real trade is forced just to produce evidence.
+- The proof command runs the `experimental` security verifier in a temporary checkout with installed dependencies linked, proving source-parity verifier execution without pulling or restarting main.
+- `scripts/verify-patches.js` now self-tests the relay guard evidence classifier.
+
+---
+
 ## [upstream env + relay security hardening] — 2026-04-25 — envrypt loading and guarded relay signing — nanocap-v1
 
 ### Change: port upstream security hardening without merging upstream wholesale

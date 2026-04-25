@@ -83,6 +83,14 @@ npm run env:encrypt
 
 Meridian loads envrypt-style encrypted values automatically. This is local env obfuscation, not a substitute for key rotation after exposure. Keep `.env.raw` and `.envrypt` local; both are gitignored.
 
+Read-only relay guard evidence check:
+
+```bash
+node scripts/verify-relay-guard-evidence.js --json
+```
+
+On the VPS, run the same command from `~/meridian-nanocap`. The report does not deploy, close, restart, or change config. `relay_guard_exercise_status=not_yet_exercised` is acceptable until the first real relay zap-in or zap-out happens after the guarded runtime is active.
+
 **4. Copy the example config**
 
 ```bash
