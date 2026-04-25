@@ -28,6 +28,7 @@ const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-coo
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
+const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
@@ -142,6 +143,22 @@ function runFallingKnifeVetoProof() {
   return JSON.parse(result.stdout);
 }
 
+function runNarrowRangeGuardProof() {
+  const result = spawnSync(process.execPath, [NARROW_RANGE_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-narrow-range-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runMaterialWinMetricsProof() {
   const result = spawnSync(process.execPath, [MATERIAL_WIN_METRICS_VERIFIER_PATH], {
     cwd: ROOT,
@@ -218,6 +235,7 @@ function buildChecks() {
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const emergencyStopProof = runEmergencyStopPolicyProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
+  const narrowRangeGuardProof = runNarrowRangeGuardProof();
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
@@ -550,6 +568,30 @@ function buildChecks() {
         src.includes("Deterministic veto: dropped") &&
         src.includes("mcap_global_fees_ratio") &&
         src.includes("pushFilteredReason(filteredOut, p, vetoReason"),
+    },
+    {
+      file: "tools/dlmm.js",
+      label: "[Narrow range guard] deploy path ignores zero pct range overrides, audits raw/normalized ranges, and rejects tiny single-side SOL bid_ask ranges",
+      test: (src) =>
+        narrowRangeGuardProof?.success === true &&
+        Number(narrowRangeGuardProof?.guard_defaults?.minSingleSidedSolBins) === 35 &&
+        Number(narrowRangeGuardProof?.incident_zero_pct?.normalized?.activeBinsBelow) === 79 &&
+        narrowRangeGuardProof?.incident_zero_pct?.normalized?.percent_inputs?.downside_pct_used === false &&
+        narrowRangeGuardProof?.incident_zero_pct?.normalized?.percent_inputs?.upside_pct_used === false &&
+        narrowRangeGuardProof?.incident_zero_pct?.guard_ok === true &&
+        Array.isArray(narrowRangeGuardProof?.rejected) &&
+        narrowRangeGuardProof.rejected.some((entry) => Number(entry.bins_below) === 0) &&
+        narrowRangeGuardProof.rejected.some((entry) => Number(entry.bins_below) === 1) &&
+        narrowRangeGuardProof.rejected.some((entry) => Number(entry.bins_below) === 4) &&
+        narrowRangeGuardProof.rejected.every((entry) => String(entry.reason || "").includes("configured minimum 35")) &&
+        Array.isArray(narrowRangeGuardProof?.accepted) &&
+        narrowRangeGuardProof.accepted.some((entry) => Number(entry.bins_below) === 35) &&
+        narrowRangeGuardProof.accepted.some((entry) => Number(entry.bins_below) === 85) &&
+        src.includes("normalizeDeployRangeInputs") &&
+        src.includes("validateSingleSidedSolBidAskRange") &&
+        src.includes("[range-raw]") &&
+        src.includes("[range-normalized]") &&
+        src.includes("[narrow-range-guard]"),
     },
     {
       file: "scripts/analyze-pnl-snapshots.js",
@@ -1018,7 +1060,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, upstream env/relay security hardening, owner relay guard evidence, and CLIProxy screener routing.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, and CLIProxy screener routing.\n");
 
   for (const check of checks) {
     let src = "";

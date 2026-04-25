@@ -147,6 +147,8 @@ HARD RULES:
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
+- Do not send both bins and percentage ranges. If using bins_below, omit downside_pct/upside_pct entirely.
+  Zero or negative percentage fields are ignored by the deterministic range guard.
 
 Guidelines (only when user hasn't specified):
 - Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
@@ -180,7 +182,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           bins_below: {
             type: "number",
-            description: "Number of bins below the current active bin. For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin."
+            description: "Number of bins below the current active bin. For single-side SOL deploys, this is the main range input: lower bin = active bin - bins_below, upper bin = active bin. Do not also send downside_pct."
           },
           bins_above: {
             type: "number",
@@ -188,11 +190,11 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           },
           downside_pct: {
             type: "number",
-            description: "Optional human-friendly downside range in percent below the current active price. Converted to bins internally via the Meteora SDK."
+            description: "Optional human-friendly downside range in percent below the current active price. Converted to bins internally only when positive. Omit when sending bins_below; 0 is ignored."
           },
           upside_pct: {
             type: "number",
-            description: "Optional human-friendly upside range in percent above the current active price. Do not use this for single-side SOL deploys."
+            description: "Optional human-friendly upside range in percent above the current active price. Positive values are rejected for single-side SOL deploys; omit when sending bins_below."
           },
           pool_name: { type: "string", description: "Human-readable pool name for record-keeping" },
           base_mint: { type: "string", description: "Base token mint address — used to prevent duplicate token exposure across pools" },

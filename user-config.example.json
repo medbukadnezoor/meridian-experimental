@@ -17,6 +17,8 @@
 
   "strategy": "bid_ask",
   "binsBelow": 85,
+  "minSingleSidedSolBins": 35,
+  "minSingleSidedSolDownsidePct": 1,
 
   "timeframe": "4h",
   "category": "trending",
