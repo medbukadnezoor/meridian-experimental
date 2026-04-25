@@ -29,6 +29,7 @@ const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
+const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -155,6 +156,22 @@ function runRelayGuardEvidenceSelfTest() {
   return JSON.parse(result.stdout);
 }
 
+function runGpt54RiskReportSelfTest() {
+  const result = spawnSync(process.execPath, [GPT54_RISK_REPORT_PATH, "--self-test"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`report-gpt54-risk self-test failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -168,6 +185,7 @@ function buildChecks() {
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
+  const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
 
   return [
     {
@@ -286,6 +304,30 @@ function buildChecks() {
         src.includes("route_counts") &&
         src.includes("status_counts") &&
         src.includes("p95_latency_ms"),
+    },
+    {
+      file: "scripts/report-gpt54-risk.js",
+      label: "[CLIProxy] owner risk report flags GPT-5.4 high-effort drift, fallback/error spikes, latency, PM2, and docs mismatch",
+      test: (src) =>
+        gpt54RiskReportProof?.success === true &&
+        gpt54RiskReportProof?.safe_read_only_markers?.deploys_or_closes_positions === false &&
+        gpt54RiskReportProof?.safe_read_only_markers?.restarts_processes === false &&
+        gpt54RiskReportProof?.safe_read_only_markers?.changes_config === false &&
+        gpt54RiskReportProof?.ok_status === "ok" &&
+        gpt54RiskReportProof?.bad_reasoning_status === "escalate" &&
+        gpt54RiskReportProof?.repeated_fallback_status === "escalate" &&
+        gpt54RiskReportProof?.high_latency_status === "escalate" &&
+        gpt54RiskReportProof?.main_online_status === "escalate" &&
+        gpt54RiskReportProof?.docs_mismatch_status === "escalate" &&
+        gpt54RiskReportProof?.reason_codes?.includes("reasoning_effort_reverted_or_missing") &&
+        gpt54RiskReportProof?.reason_codes?.includes("repeated_screener_fallbacks") &&
+        gpt54RiskReportProof?.reason_codes?.includes("main_online_unexpectedly") &&
+        gpt54RiskReportProof?.reason_codes?.includes("context_docs_disagree_with_live_routing") &&
+        src.includes("deploys_or_closes_positions: false") &&
+        src.includes("restarts_processes: false") &&
+        src.includes("changes_config: false") &&
+        src.includes("p95_latency_above_escalate_threshold") &&
+        src.includes("context_docs_disagree_with_live_routing"),
     },
     {
       file: "scripts/verify-runtime-config.js",

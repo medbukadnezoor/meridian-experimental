@@ -10,9 +10,9 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ## Current Operational Context
 [CONFIRMED] Bot Version: **v1.0.9** (Enabled solMode + TP 4% on 2026-04-13)
 [CONFIRMED] Bot Host: VPS **ohox** (TencentCloud Singapore, 43.156.182.93) under PM2.
-[CONFIRMED] Current VPS PM2 runtime state (2026-04-24): main `stopped` and nanocap `online` after the relay-fallback + Telegram-visibility + update_config hardening rollout. Verify with `ssh ohox ms` / `ssh ohox ncs` before restart.
+[CONFIRMED] Current VPS PM2 runtime state (2026-04-25): main `stopped` and nanocap `online` after the relay-fallback + Telegram-visibility + update_config hardening rollout. Verify with `ssh ohox ms` / `ssh ohox ncs` before restart.
 [CONFIRMED] Security Status: ACTIVE (8 patches maintained).
-[CONFIRMED] Active Role Models: All use `qwen3.6-plus` via DashScope Singapore.
+[CONFIRMED] Active Role Models: main uses `qwen3.6-plus` via DashScope Singapore for all roles. Nanocap uses GPT-5.4 via CLIProxy on `ohox` for SCREENER only with `screeningReasoningEffort=high`; nanocap MANAGER and GENERAL remain `qwen3.6-plus` via DashScope Singapore.
 [CONFIRMED] **takeProfitPct: 4%**. `takeProfitFeePct` is still present in live config for compatibility, but current live branches treat it as a fallback alias into `takeProfitPct`, not as a separate runtime fee gate.
 [CONFIRMED] **solMode: true** — All PnL/balance reporting in SOL. Close path now correctly reads `.sol` fields from Meteora datapi (fixed 2026-04-14, commit `f4911a1`). Both relay and non-relay paths branch on `solMode`. Fallback cache reads also use SOL-denominated fields. `lessons.json` performance records now store SOL values in `initial_value_usd`, `final_value_usd`, `fees_earned_usd` when solMode=true.
 [CONFIRMED] **minFeeActiveTvlRatio: 0.08** (example baseline; evolved by Darwin).
@@ -25,6 +25,7 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 [CONFIRMED] **minOrganic: 55** on nanocap VPS (raised from 45, operator instruction 2026-04-16). Republicans-SOL had organic=77 and still rugged — organic alone insufficient, but this reduces nanocap's exposure to the lowest-quality tier.
 [CONFIRMED] **confirmed stop-loss trial live** (2026-04-24): nanocap uses soft `stopLossPct=-8` with `stopLossConfirmDelayMs=15000`, immediate `hardStopLossPct=-15`, separate `earlyDumpPct=-8` within 20m, and compact 30s PnL snapshots in `logs/pnl-snapshots-YYYY-MM-DD.jsonl`. Synthetic behavior proof is in `scripts/verify-stop-loss-trial-behavior.js`. Main remains stopped; do not revive it.
 [CONFIRMED] **material-win metrics live** (2026-04-24): raw win rate stays visible, but material outcome classification now treats low-yield/operator/dust closes as neutral unless materially losing. Pool memory and operator summaries show `Raw WR` vs `Material WR`; Darwin material mode learns only from material wins/losses. Material thresholds (`materialWinPct`, `materialLossPct`, `dustNeutralAbsPct`, and Darwin material flags) are live-tunable only through operator config paths (`meridian config set` or Telegram `/setcfg`) and affect reporting/learning only, not stop-loss, TP, entry, sizing, routing, or GMGN policy. Read-only proof/analyzer: `scripts/verify-material-win-metrics.js` and `scripts/analyze-material-wins.js`.
+[CONFIRMED] **GPT-5.4 SCREENER high-effort rollout live** (2026-04-25): nanocap SCREENER calls route to GPT-5.4 through CLIProxy with `reasoning_effort=high`; provider fallback remains Qwen/DashScope, and MANAGER/GENERAL remain Qwen. Owner risk report: `node scripts/report-gpt54-risk.js --json` on VPS; this is read-only and flags latency, fallback/error spikes, missing/reverted reasoning effort, PM2 state, and context-doc mismatch.
 
 ## Safety Protocol
 **The bot runs on VPS ohox, NOT locally. Do NOT run `node index.js` on Mac.**
