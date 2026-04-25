@@ -1,5 +1,20 @@
 # Changelog
 
+## [upstream env + relay security hardening] — 2026-04-25 — envrypt loading and guarded relay signing — experimental
+
+### Security
+- Ported upstream envrypt-style env loading to `experimental`: `index.js`, `setup.js`, and `cli.js` now load through `envcrypt.js`; `.envrypt` is gitignored; `npm run env:encrypt` writes encrypted env values from `.env.raw`.
+- Relay-provided zap-out close/swap transactions now pass through a signing guard that requires expected static accounts, rejects unsafe owner SOL transfers, simulates before submit, enforces SOL debit limits, and blocks unrelated token debits.
+- Relay-provided zap-in deploy add-liquidity/swap transactions use the same guard so deploy-side relay transactions are verified before wallet signing.
+- Zap-out no longer falls back to local close after a relay submit attempt has started, avoiding duplicate close execution if a post-submit network error occurs.
+
+### Verification
+- Added `scripts/verify-upstream-security-hardening.js`, a local-only synthetic proof for envrypt loading and relay signing guards.
+- `scripts/verify-patches.js` now includes the upstream env/relay proof alongside the early-dump cooldown proof.
+- Main runtime remains stopped; this is source parity only until an explicit main deploy/restart is requested.
+
+---
+
 ## [main early-dump cooldown fix] — 2026-04-24 — early dump is stop-loss-family
 
 ### Fixed

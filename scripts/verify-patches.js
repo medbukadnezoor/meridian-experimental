@@ -40,10 +40,50 @@ function runEarlyDumpCooldownProof() {
   return JSON.parse(result.stdout);
 }
 
+function runUpstreamSecurityHardeningProof() {
+  const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-upstream-security-hardening.js')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error', MERIDIAN_ENVCRYPT_AUTOLOAD: 'false' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-upstream-security-hardening failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
+const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
+
+  {
+    file: 'scripts/verify-upstream-security-hardening.js',
+    label: '[Security] upstream envcrypt and relay-signing synthetic proof passes',
+    test: () =>
+      upstreamSecurityProof?.success === true &&
+      upstreamSecurityProof?.sourceProof?.envryptIgnored === true &&
+      upstreamSecurityProof?.sourceProof?.envcryptEntrypoints === true &&
+      upstreamSecurityProof?.sourceProof?.cliHomeEnvrypt === true &&
+      upstreamSecurityProof?.sourceProof?.relayGuardWiredForZapOut === true &&
+      upstreamSecurityProof?.sourceProof?.relayGuardWiredForZapIn === true &&
+      upstreamSecurityProof?.sourceProof?.postSubmitFallbackBlocked === true &&
+      upstreamSecurityProof?.envcryptProof?.roundTrip === true &&
+      upstreamSecurityProof?.envcryptProof?.markerOnlyDecrypt === true &&
+      upstreamSecurityProof?.envcryptProof?.missingKeyFails === true &&
+      upstreamSecurityProof?.envcryptProof?.encryptEnvRawWritesEncryptedSecrets === true &&
+      upstreamSecurityProof?.relayProof?.unsafeSystemTransferRejected === true &&
+      upstreamSecurityProof?.relayProof?.safeSimulationSigns === true &&
+      upstreamSecurityProof?.relayProof?.requiredStaticAccountEnforced === true &&
+      upstreamSecurityProof?.relayProof?.simulationErrorRejected === true &&
+      upstreamSecurityProof?.relayProof?.maxSolLossEnforced === true &&
+      upstreamSecurityProof?.relayProof?.unrelatedTokenDebitRejected === true,
+  },
 
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)
   {
@@ -172,7 +212,7 @@ let failed = 0;
 let passed = 0;
 
 console.log('\n── Meridian Patch Verification ─────────────────────────────────\n');
-console.log('  Rebase basis: upstream 4959d10 + local safety patches, including early-dump cooldown proof\n');
+console.log('  Rebase basis: upstream 4959d10 + local safety patches, including early-dump cooldown proof and upstream env/relay security hardening\n');
 
 for (const check of checks) {
   const filePath = join(ROOT, check.file);

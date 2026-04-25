@@ -26,6 +26,7 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { signAndSimulateRelayTransactions } from "./relay-security.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -215,27 +216,6 @@ async function meridianJson(pathname, options = {}) {
   }
 
   throw lastError || new Error(`${pathname} retry budget exhausted`);
-}
-
-function signSerializedTransaction(serialized, wallet) {
-  const bytes = Buffer.from(serialized, "base64");
-  try {
-    const versioned = VersionedTransaction.deserialize(bytes);
-    versioned.sign([wallet]);
-    return Buffer.from(versioned.serialize()).toString("base64");
-  } catch {
-    const legacy = Transaction.from(bytes);
-    legacy.partialSign(wallet);
-    return legacy
-      .serialize({ requireAllSignatures: false, verifySignatures: false })
-      .toString("base64");
-  }
-}
-
-function signSerializedTransactions(serializedTxs, wallet) {
-  return (serializedTxs || [])
-    .filter((entry) => typeof entry === "string" && entry.length > 0)
-    .map((entry) => signSerializedTransaction(entry, wallet));
 }
 
 function normalizeExecutionSignatures(result) {
@@ -616,8 +596,26 @@ export async function deployPosition({
       }
       assertNoInitializeBinArrayInstructions(addLiquidityUnsigned);
 
-      const addLiquidity = signSerializedTransactions(addLiquidityUnsigned, wallet);
-      const swap = signSerializedTransactions(swapUnsigned, wallet);
+      const relayAllowedDebitMints = [
+        pool.lbPair.tokenXMint.toString(),
+        pool.lbPair.tokenYMint.toString(),
+        config.tokens.SOL,
+      ];
+      const maxDeploySolLoss = Math.max(0.05, Number(finalAmountY || 0) + 0.15);
+      const addLiquidity = await signAndSimulateRelayTransactions(addLiquidityUnsigned, wallet, {
+        connection: getConnection(),
+        label: "zap-in addLiquidity",
+        allowedDebitMints: relayAllowedDebitMints,
+        maxSolLoss: maxDeploySolLoss,
+        requiredStaticAccounts: [wallet.publicKey.toString(), pool_address],
+      });
+      const swap = await signAndSimulateRelayTransactions(swapUnsigned, wallet, {
+        connection: getConnection(),
+        label: "zap-in swap",
+        allowedDebitMints: relayAllowedDebitMints,
+        maxSolLoss: maxDeploySolLoss,
+        requiredStaticAccounts: [wallet.publicKey.toString()],
+      });
       const submit = await meridianJson("/execution/zap-in/submit", {
         method: "POST",
         headers: getMeridianHeaders(),
@@ -1557,46 +1555,71 @@ export async function closePosition({ position_address, reason, urgent }) {
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
     if (shouldUseLpAgentRelay()) {
-      const livePositions = await getMyPositions({ force: true, silent: true });
-      const livePosition = livePositions?.positions?.find((position) => position.position === position_address);
-      const closeFromBinId = livePosition?.lower_bin ?? tracked?.bin_range?.min ?? -887272;
-      const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
-      const closeOutput = "allToken1";
+      let relaySubmitted = false;
+      try {
+        const pool = await getPool(poolAddress);
+        const relayAllowedDebitMints = [
+          pool.lbPair.tokenXMint.toString(),
+          pool.lbPair.tokenYMint.toString(),
+          config.tokens.SOL,
+        ];
+        const livePositions = await getMyPositions({ force: true, silent: true });
+        const livePosition = livePositions?.positions?.find((position) => position.position === position_address);
+        const closeFromBinId = livePosition?.lower_bin ?? tracked?.bin_range?.min ?? -887272;
+        const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
+        const closeOutput = "allToken1";
 
-      const quotes = await meridianJson("/execution/zap-out/quotes", {
-        method: "POST",
-        headers: getMeridianHeaders(),
-        body: JSON.stringify({
-          agentId: config.hiveMind.agentId || "agent-local",
-          positionId: position_address,
-          bps: 10000,
-        }),
-      });
+        const quotes = await meridianJson("/execution/zap-out/quotes", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            agentId: config.hiveMind.agentId || "agent-local",
+            positionId: position_address,
+            bps: 10000,
+          }),
+        });
 
-      const order = await meridianJson("/execution/zap-out/order", {
-        method: "POST",
-        headers: getMeridianHeaders(),
-        body: JSON.stringify({
-          agentId: config.hiveMind.agentId || "agent-local",
-          idempotencyKey: `close:${position_address}:10000`,
-          positionId: position_address,
-          owner: wallet.publicKey.toString(),
-          bps: 10000,
-          slippageBps: 5000,
-          output: closeOutput,
-          provider: "OKX",
-          type: "meteora",
-          fromBinId: closeFromBinId,
-          toBinId: closeToBinId,
-          quoteRequestId: quotes.requestId,
-        }),
-      });
+        const order = await meridianJson("/execution/zap-out/order", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            agentId: config.hiveMind.agentId || "agent-local",
+            idempotencyKey: `close:${position_address}:10000`,
+            positionId: position_address,
+            owner: wallet.publicKey.toString(),
+            bps: 10000,
+            slippageBps: 5000,
+            output: closeOutput,
+            provider: "OKX",
+            type: "meteora",
+            fromBinId: closeFromBinId,
+            toBinId: closeToBinId,
+            quoteRequestId: quotes.requestId,
+          }),
+        });
 
-      const closeUnsigned = order?.order?.transactions?.close || [];
-      const swapUnsigned = order?.order?.transactions?.swap || [];
-      if (closeUnsigned.length + swapUnsigned.length === 0) {
-        log("close_warn", `Relay close returned no transactions for ${position_address} — falling back to direct SDK close`);
-      } else {
+        const closeUnsigned = order?.order?.transactions?.close || [];
+        const swapUnsigned = order?.order?.transactions?.swap || [];
+        if (closeUnsigned.length + swapUnsigned.length === 0) {
+          throw new Error(`Relay close returned no transactions for ${position_address}.`);
+        }
+
+        const closeSigned = await signAndSimulateRelayTransactions(closeUnsigned, wallet, {
+          connection: getConnection(),
+          label: "zap-out close",
+          allowedDebitMints: relayAllowedDebitMints,
+          maxSolLoss: 0.05,
+          requiredStaticAccounts: [wallet.publicKey.toString(), position_address],
+        });
+        const swapSigned = await signAndSimulateRelayTransactions(swapUnsigned, wallet, {
+          connection: getConnection(),
+          label: "zap-out swap",
+          allowedDebitMints: relayAllowedDebitMints,
+          maxSolLoss: 0.05,
+          requiredStaticAccounts: [wallet.publicKey.toString()],
+        });
+
+        relaySubmitted = true;
         const submit = await meridianJson("/execution/zap-out/submit", {
           method: "POST",
           headers: getMeridianHeaders(),
@@ -1604,8 +1627,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             requestId: order.requestId,
             lastValidBlockHeight: order?.order?.lastValidBlockHeight,
             transactions: {
-              close: signSerializedTransactions(closeUnsigned, wallet),
-              swap: signSerializedTransactions(swapUnsigned, wallet),
+              close: closeSigned,
+              swap: swapSigned,
             },
           }),
         });
@@ -1763,6 +1786,9 @@ export async function closePosition({ position_address, reason, urgent }) {
           txs: txHashes,
           base_mint: livePosition?.base_mint || null,
         };
+      } catch (relayError) {
+        if (relaySubmitted) throw relayError;
+        log("close_warn", `Relay zap-out failed before submit; falling back to local close + Jupiter autoswap: ${relayError.message}`);
       }
     }
 
