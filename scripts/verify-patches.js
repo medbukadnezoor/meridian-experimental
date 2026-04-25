@@ -294,7 +294,7 @@ function buildChecks() {
         exampleProof?.llm?.screeningModel === "gpt-5.4" &&
         exampleProof?.llm?.screeningBaseUrl === "http://127.0.0.1:8317" &&
         exampleProof?.llm?.screeningApiKeySet === "set" &&
-        exampleProof?.llm?.screeningReasoningEffort === "low" &&
+        exampleProof?.llm?.screeningReasoningEffort === "high" &&
         exampleProof?.llm?.screeningFallbackModel === "qwen3.6-plus" &&
         exampleProof?.llm?.screeningFallbackBaseUrl === "https://dashscope-intl.aliyuncs.com" &&
         exampleProof?.llm?.screeningFallbackApiKeySet === "set" &&
@@ -312,7 +312,7 @@ function buildChecks() {
         src.includes("ssh -N -o ExitOnForwardFailure=yes -L 1455:127.0.0.1:1455 ohox") &&
         src.includes("node scripts/verify-llm-endpoint.js") &&
         src.includes("screeningReasoningEffort") &&
-        src.includes("reasoning_effort=low") &&
+        src.includes("reasoning_effort=high") &&
         src.includes("Do not restart the main `meridian`") &&
         src.includes("Rollback"),
     },

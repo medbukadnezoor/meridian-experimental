@@ -116,7 +116,7 @@ On `ohox`:
 ```bash
 curl -s http://127.0.0.1:8317/v1/models | jq -r '.data[].id' | grep -E 'gpt-5.4|gpt-5.5|gpt-5.4-mini'
 cd ~/meridian-nanocap
-node scripts/verify-llm-endpoint.js --base-url http://127.0.0.1:8317/v1 --model gpt-5.4 --api-key NO_API_KEY --reasoning-effort low --chat-smoke --tool-call-smoke --json
+node scripts/verify-llm-endpoint.js --base-url http://127.0.0.1:8317/v1 --model gpt-5.4 --api-key NO_API_KEY --reasoning-effort high --chat-smoke --tool-call-smoke --json
 ```
 
 Do not switch live config if chat completions or tool calls fail. If CLIProxy only supports a Responses-style API for the model, create a separate implementation ticket instead.
@@ -137,7 +137,7 @@ Set only screener primary to CLIProxy and keep Qwen/DashScope for fallback, mana
   "screeningModel": "gpt-5.4",
   "screeningBaseUrl": "http://127.0.0.1:8317/v1",
   "screeningApiKey": "NO_API_KEY",
-  "screeningReasoningEffort": "low",
+  "screeningReasoningEffort": "high",
   "screeningFallbackModel": "qwen3.6-plus",
   "screeningFallbackBaseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   "screeningFallbackApiKey": "YOUR_DASHSCOPE_API_KEY",
@@ -172,7 +172,7 @@ tail -n 20 logs/api-activity-$(date -u +%F).jsonl
 Expected:
 
 - SCREENER primary calls show `model=gpt-5.4`, `route_kind=primary`, and `base_url_host=127.0.0.1:8317`.
-- SCREENER primary calls show `reasoning_effort=low`.
+- SCREENER primary calls show `reasoning_effort=high`.
 - SCREENER fallback calls show `model=qwen3.6-plus`, `route_kind=fallback`, and DashScope host.
 - MANAGER and GENERAL stay on `qwen3.6-plus`.
 - No OAuth files, API keys, or wallet material appear in logs.
