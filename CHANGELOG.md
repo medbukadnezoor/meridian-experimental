@@ -1,5 +1,16 @@
 # Changelog
 
+## [upstream env + relay security hardening] — 2026-04-25 — envrypt loading and guarded relay signing — nanocap-v1
+
+### Change: port upstream security hardening without merging upstream wholesale
+
+- Added envrypt-style environment loading while preserving plain `.env` compatibility.
+- Added `.envrypt` ignore and `npm run env:encrypt` helper for optional local env obfuscation.
+- Wired `index.js`, `setup.js`, and `cli.js` through `envcrypt.js`; CLI keeps `~/.meridian/.env` support and can use `~/.meridian/.envrypt`.
+- Added relay transaction guard helpers that inspect static accounts, reject unsafe owner SOL transfers, simulate signed relay transactions, cap owner SOL debit, and reject unrelated token debits.
+- Hardened both zap-out close and zap-in deploy relay signing before submit; after a relay submit starts, close no longer falls back to the local close path for the same request.
+- Added synthetic proof in `scripts/verify-upstream-security-hardening.js`, wired into `scripts/verify-patches.js`.
+
 ## [nanocap material-win metrics] — 2026-04-24 — Raw WR separated from Material WR — nanocap-v1
 
 ### Change: Low-yield/dust closes no longer inflate strategy-health learning

@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./envcrypt.js";
 import fs from "fs";
 import path from "path";
 import cron from "node-cron";

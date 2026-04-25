@@ -27,6 +27,7 @@ const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js")
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
+const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -121,6 +122,22 @@ function runMaterialWinMetricsProof() {
   return JSON.parse(result.stdout);
 }
 
+function runUpstreamSecurityHardeningProof() {
+  const result = spawnSync(process.execPath, [UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error", MERIDIAN_ENVCRYPT_AUTOLOAD: "false" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-upstream-security-hardening failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -132,8 +149,28 @@ function buildChecks() {
   const earlyDumpProof = runEarlyDumpCooldownProof();
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const materialProof = runMaterialWinMetricsProof();
+  const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 
   return [
+    {
+      file: "scripts/verify-upstream-security-hardening.js",
+      label: "[Security] upstream envcrypt and relay-signing synthetic proof passes",
+      test: () =>
+        upstreamSecurityProof?.success === true &&
+        upstreamSecurityProof?.sourceProof?.envryptIgnored === true &&
+        upstreamSecurityProof?.sourceProof?.relayGuardWiredForZapOut === true &&
+        upstreamSecurityProof?.sourceProof?.relayGuardWiredForZapIn === true &&
+        upstreamSecurityProof?.sourceProof?.postSubmitFallbackBlocked === true &&
+        upstreamSecurityProof?.envcryptProof?.roundTrip === true &&
+        upstreamSecurityProof?.envcryptProof?.markerOnlyDecrypt === true &&
+        upstreamSecurityProof?.envcryptProof?.missingKeyFails === true &&
+        upstreamSecurityProof?.relayProof?.unsafeSystemTransferRejected === true &&
+        upstreamSecurityProof?.relayProof?.safeSimulationSigns === true &&
+        upstreamSecurityProof?.relayProof?.requiredStaticAccountEnforced === true &&
+        upstreamSecurityProof?.relayProof?.simulationErrorRejected === true &&
+        upstreamSecurityProof?.relayProof?.maxSolLossEnforced === true &&
+        upstreamSecurityProof?.relayProof?.unrelatedTokenDebitRejected === true,
+    },
     {
       file: "config.js",
       label: "[Verifier] config.js no longer supports MERIDIAN_USER_CONFIG_PATH overrides",
@@ -618,7 +655,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, and material win metrics.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, and upstream env/relay security hardening.\n");
 
   for (const check of checks) {
     let src = "";
