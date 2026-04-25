@@ -208,6 +208,92 @@ function buildChecks() {
         src.includes("relay_guard_exercise_status"),
     },
     {
+      file: "config-builder.js",
+      label: "[CLIProxy] screener provider-level fallback config maps into runtime config",
+      test: (src) =>
+        src.includes("screeningFallbackModel") &&
+        src.includes("screeningFallbackBaseUrl") &&
+        src.includes("screeningFallbackApiKey"),
+    },
+    {
+      file: "agent.js",
+      label: "[CLIProxy] SCREENER can fall back to Qwen on a separate provider route",
+      test: (src) =>
+        src.includes("buildLlmRoute") &&
+        src.includes("hasScreeningFallbackRoute") &&
+        src.includes('routeKind === "fallback"') &&
+        src.includes("SCREENER primary route failed") &&
+        src.includes("route_kind"),
+    },
+    {
+      file: "agent.js",
+      label: "[CLIProxy] OpenRouter provider ignore is omitted for CLIProxy and DashScope",
+      test: (src) =>
+        src.includes("function isOpenRouterBaseUrl") &&
+        src.includes("function providerIgnoreForBaseUrl") &&
+        src.includes('providerIgnoreForBaseUrl(baseUrl) ? ["Parasail", "Nebius", "Together"] : []') === false &&
+        src.includes('return isOpenRouterBaseUrl(baseUrl) ? ["Parasail", "Nebius", "Together"] : []'),
+    },
+    {
+      file: "agent.js",
+      label: "[CLIProxy] VPS-safe daily LLM usage logging is enabled",
+      test: (src) =>
+        src.includes("api-activity-${dateKey(date)}.jsonl") &&
+        src.includes("API_LOGS_PATH") &&
+        src.includes("base_url_host") &&
+        src.includes("prompt_tokens") &&
+        src.includes("completion_tokens") &&
+        src.includes("total_tokens") &&
+        src.includes("sanitizeErrorMessage"),
+    },
+    {
+      file: "scripts/verify-llm-endpoint.js",
+      label: "[CLIProxy] read-only endpoint verifier covers chat completions and tool calls",
+      test: (src) =>
+        src.includes("--chat-smoke") &&
+        src.includes("--tool-call-smoke") &&
+        src.includes("client.chat.completions.create") &&
+        src.includes("tool_calls") &&
+        src.includes("loads_wallet_or_trading_modules: false"),
+    },
+    {
+      file: "scripts/analyze-llm-usage.js",
+      label: "[CLIProxy] read-only LLM usage analyzer reports models, routes, status, tokens, and latency",
+      test: (src) =>
+        src.includes("calls_by_day") &&
+        src.includes("calls_by_agent_role") &&
+        src.includes("calls_by_model") &&
+        src.includes("route_counts") &&
+        src.includes("status_counts") &&
+        src.includes("p95_latency_ms"),
+    },
+    {
+      file: "scripts/verify-runtime-config.js",
+      label: "[CLIProxy] runtime config proof masks role routes and provider-param policy",
+      test: () =>
+        exampleProof?.llm?.screeningModel === "gpt-5.4" &&
+        exampleProof?.llm?.screeningBaseUrl === "http://127.0.0.1:8317" &&
+        exampleProof?.llm?.screeningApiKeySet === "set" &&
+        exampleProof?.llm?.screeningFallbackModel === "qwen3.6-plus" &&
+        exampleProof?.llm?.screeningFallbackBaseUrl === "https://dashscope-intl.aliyuncs.com" &&
+        exampleProof?.llm?.screeningFallbackApiKeySet === "set" &&
+        exampleProof?.llm?.managementModel === "qwen3.6-plus" &&
+        exampleProof?.llm?.generalModel === "qwen3.6-plus" &&
+        exampleProof?.llm?.providerParamPolicy?.cliProxyOmitsProviderIgnore === true &&
+        exampleProof?.llm?.providerParamPolicy?.dashScopeOmitsProviderIgnore === true &&
+        exampleProof?.llm?.providerParamPolicy?.openRouterIncludesProviderIgnore === true,
+    },
+    {
+      file: "docs/cliproxy-nanocap-runbook.md",
+      label: "[CLIProxy] ohox-first runbook documents OAuth tunnel, verifier, and rollback",
+      test: (src) =>
+        src.includes("CLIProxyAPI runs on VPS `ohox`") &&
+        src.includes("ssh -N -o ExitOnForwardFailure=yes -L 1455:127.0.0.1:1455 ohox") &&
+        src.includes("node scripts/verify-llm-endpoint.js") &&
+        src.includes("Do not restart the main `meridian`") &&
+        src.includes("Rollback"),
+    },
+    {
       file: "config.js",
       label: "[Verifier] config.js no longer supports MERIDIAN_USER_CONFIG_PATH overrides",
       test: (src) => !src.includes("MERIDIAN_USER_CONFIG_PATH"),
@@ -691,7 +777,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, upstream env/relay security hardening, and owner relay guard evidence.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, material win metrics, upstream env/relay security hardening, owner relay guard evidence, and CLIProxy screener routing.\n");
 
   for (const check of checks) {
     let src = "";

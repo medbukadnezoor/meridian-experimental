@@ -51,6 +51,7 @@ function parseArgs(argv) {
 }
 
 function buildProof(imported, requestedUserConfigPath) {
+  const llm = imported.config.llm;
   return {
     runtimeConfigPath: RUNTIME_CONFIG_PATH,
     configBuilderPath: CONFIG_BUILDER_PATH,
@@ -88,7 +89,49 @@ function buildProof(imported, requestedUserConfigPath) {
       darwinUseMaterialOutcomes: imported.config.performance.darwinUseMaterialOutcomes,
       darwinExcludeNeutralOutcomes: imported.config.performance.darwinExcludeNeutralOutcomes,
     },
+    llm: {
+      screeningModel: llm.screeningModel,
+      screeningBaseUrl: sanitizeBaseUrl(llm.screeningBaseUrl),
+      screeningApiKeySet: maskSecretPresence(llm.screeningApiKey),
+      screeningFallbackModel: llm.screeningFallbackModel,
+      screeningFallbackBaseUrl: sanitizeBaseUrl(llm.screeningFallbackBaseUrl),
+      screeningFallbackApiKeySet: maskSecretPresence(llm.screeningFallbackApiKey),
+      managementModel: llm.managementModel,
+      managementBaseUrl: sanitizeBaseUrl(llm.managementBaseUrl),
+      managementApiKeySet: maskSecretPresence(llm.managementApiKey),
+      generalModel: llm.generalModel,
+      generalBaseUrl: sanitizeBaseUrl(llm.generalBaseUrl),
+      generalApiKeySet: maskSecretPresence(llm.generalApiKey),
+      providerParamPolicy: {
+        openRouterIncludesProviderIgnore: shouldIncludeProviderParams("https://openrouter.ai/api/v1"),
+        cliProxyOmitsProviderIgnore: !shouldIncludeProviderParams("http://127.0.0.1:8317/v1"),
+        dashScopeOmitsProviderIgnore: !shouldIncludeProviderParams("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+      },
+    },
   };
+}
+
+function maskSecretPresence(value) {
+  return typeof value === "string" && value.trim() !== "" ? "set" : "not_set";
+}
+
+function sanitizeBaseUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "invalid";
+  }
+}
+
+function shouldIncludeProviderParams(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+  } catch {
+    return false;
+  }
 }
 
 async function main() {
@@ -114,6 +157,7 @@ async function main() {
   console.log(JSON.stringify({
     management: proof.management,
     performance: proof.performance,
+    llm: proof.llm,
   }, null, 2));
   console.log("");
 }
