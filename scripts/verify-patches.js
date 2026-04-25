@@ -33,6 +33,7 @@ const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
+const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -223,6 +224,22 @@ function runGpt54RiskReportSelfTest() {
   return JSON.parse(result.stdout);
 }
 
+function runScreenerTrialTelemetryProof() {
+  const result = spawnSync(process.execPath, [SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-screener-trial-telemetry failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -240,6 +257,7 @@ function buildChecks() {
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
+  const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
 
   return [
     {
@@ -360,6 +378,36 @@ function buildChecks() {
         src.includes("p95_latency_ms"),
     },
     {
+      file: "scripts/analyze-screener-trial.js",
+      label: "[CLIProxy] GPT-5.5 screener trial analyzer reports latency, fallback, validity, deploy rejects, range audits, and realized quality",
+      test: (src) =>
+        screenerTrialTelemetryProof?.success === true &&
+        screenerTrialTelemetryProof?.gpt55_primary?.calls === 3 &&
+        screenerTrialTelemetryProof?.gpt55_primary?.timeout_errors === 1 &&
+        screenerTrialTelemetryProof?.fallback_route_calls === 1 &&
+        screenerTrialTelemetryProof?.deploy_audits?.raw_count === 1 &&
+        screenerTrialTelemetryProof?.deploy_audits?.normalized_count === 1 &&
+        screenerTrialTelemetryProof?.deploy_audits?.narrow_range_reject_count === 1 &&
+        screenerTrialTelemetryProof?.deploys?.successes === 1 &&
+        screenerTrialTelemetryProof?.deploys?.action_rejects_or_errors === 1 &&
+        screenerTrialTelemetryProof?.deploys?.safety_blocks_from_agent_log === 1 &&
+        screenerTrialTelemetryProof?.realized_position_quality?.closed_positions_opened_in_window === 1 &&
+        screenerTrialTelemetryProof?.realized_position_quality?.first_material_outcome === "material_win" &&
+        screenerTrialTelemetryProof?.safe_read_only_markers?.deploys_or_closes_positions === false &&
+        screenerTrialTelemetryProof?.safe_read_only_markers?.network_calls === false &&
+        screenerTrialTelemetryProof?.source_safety?.deploys_or_closes_positions === false &&
+        screenerTrialTelemetryProof?.source_safety?.changes_config === false &&
+        src.includes("gpt-5.5") &&
+        src.includes("calls_by_model_route") &&
+        src.includes("json_tool_validity") &&
+        src.includes("deploy_audits") &&
+        src.includes("realized_position_quality") &&
+        src.includes("measurement_limitations") &&
+        src.includes("[range-raw]") &&
+        src.includes("[range-normalized]") &&
+        src.includes("[narrow-range-guard]"),
+    },
+    {
       file: "scripts/report-gpt54-risk.js",
       label: "[CLIProxy] owner risk report flags GPT-5.4 high-effort drift, fallback/error spikes, latency, PM2, and docs mismatch",
       test: (src) =>
@@ -387,10 +435,10 @@ function buildChecks() {
       file: "scripts/verify-runtime-config.js",
       label: "[CLIProxy] runtime config proof masks role routes and provider-param policy",
       test: () =>
-        exampleProof?.llm?.screeningModel === "gpt-5.4" &&
+        exampleProof?.llm?.screeningModel === "gpt-5.5" &&
         exampleProof?.llm?.screeningBaseUrl === "http://127.0.0.1:8317" &&
         exampleProof?.llm?.screeningApiKeySet === "set" &&
-        exampleProof?.llm?.screeningReasoningEffort === "high" &&
+        exampleProof?.llm?.screeningReasoningEffort === "medium" &&
         exampleProof?.llm?.screeningFallbackModel === "qwen3.6-plus" &&
         exampleProof?.llm?.screeningFallbackBaseUrl === "https://dashscope-intl.aliyuncs.com" &&
         exampleProof?.llm?.screeningFallbackApiKeySet === "set" &&
@@ -408,7 +456,9 @@ function buildChecks() {
         src.includes("ssh -N -o ExitOnForwardFailure=yes -L 1455:127.0.0.1:1455 ohox") &&
         src.includes("node scripts/verify-llm-endpoint.js") &&
         src.includes("screeningReasoningEffort") &&
-        src.includes("reasoning_effort=high") &&
+        src.includes("gpt-5.5") &&
+        src.includes("reasoning_effort=medium") &&
+        src.includes("node scripts/analyze-screener-trial.js --logs logs --hours 48 --json") &&
         src.includes("Do not restart the main `meridian`") &&
         src.includes("Rollback"),
     },
@@ -1060,7 +1110,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, and CLIProxy screener routing.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, and GPT-5.5 screener trial telemetry.\n");
 
   for (const check of checks) {
     let src = "";
