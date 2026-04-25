@@ -13,7 +13,7 @@ function usage() {
 node scripts/verify-llm-endpoint.js --base-url <url> --model <model> --api-key <key> [--chat-smoke] [--tool-call-smoke] [--json]
 
 Examples:
-node scripts/verify-llm-endpoint.js --base-url http://127.0.0.1:8317/v1 --model gpt-5.4 --api-key NO_API_KEY --chat-smoke --tool-call-smoke
+node scripts/verify-llm-endpoint.js --base-url http://127.0.0.1:8317/v1 --model gpt-5.4 --api-key NO_API_KEY --reasoning-effort low --chat-smoke --tool-call-smoke
 `);
 }
 
@@ -24,6 +24,7 @@ function parseArgs(argv) {
     apiKey: "NO_API_KEY",
     chatSmoke: false,
     toolCallSmoke: false,
+    reasoningEffort: null,
     json: false,
   };
 
@@ -43,6 +44,10 @@ function parseArgs(argv) {
     }
     if (arg === "--api-key") {
       options.apiKey = argv[++i] || "NO_API_KEY";
+      continue;
+    }
+    if (arg === "--reasoning-effort") {
+      options.reasoningEffort = argv[++i] || null;
       continue;
     }
     if (arg === "--chat-smoke") {
@@ -107,7 +112,11 @@ async function runTimed(label, fn) {
   }
 }
 
-async function runChatSmoke(client, model) {
+function maybeReasoningEffort(reasoningEffort) {
+  return reasoningEffort ? { reasoning_effort: reasoningEffort } : {};
+}
+
+async function runChatSmoke(client, model, reasoningEffort) {
   return runTimed("chat_smoke", async () => {
     const response = await client.chat.completions.create({
       model,
@@ -117,6 +126,7 @@ async function runChatSmoke(client, model) {
       ],
       temperature: 0,
       max_tokens: 32,
+      ...maybeReasoningEffort(reasoningEffort),
     });
     const content = response?.choices?.[0]?.message?.content || "";
     if (!content.trim()) throw new Error("chat smoke returned empty content");
@@ -127,7 +137,7 @@ async function runChatSmoke(client, model) {
   });
 }
 
-async function runToolCallSmoke(client, model) {
+async function runToolCallSmoke(client, model, reasoningEffort) {
   return runTimed("tool_call_smoke", async () => {
     const response = await client.chat.completions.create({
       model,
@@ -159,6 +169,7 @@ async function runToolCallSmoke(client, model) {
       },
       temperature: 0,
       max_tokens: 96,
+      ...maybeReasoningEffort(reasoningEffort),
     });
     const toolCalls = response?.choices?.[0]?.message?.tool_calls || [];
     if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
@@ -186,8 +197,8 @@ async function main() {
   });
 
   const checks = [];
-  if (options.chatSmoke) checks.push(await runChatSmoke(client, options.model));
-  if (options.toolCallSmoke) checks.push(await runToolCallSmoke(client, options.model));
+  if (options.chatSmoke) checks.push(await runChatSmoke(client, options.model, options.reasoningEffort));
+  if (options.toolCallSmoke) checks.push(await runToolCallSmoke(client, options.model, options.reasoningEffort));
 
   const proof = {
     success: checks.every((check) => check.ok),
@@ -196,6 +207,7 @@ async function main() {
     loads_wallet_or_trading_modules: false,
     base_url_host: sanitizeHost(options.baseUrl),
     model: options.model,
+    reasoning_effort: options.reasoningEffort,
     api_key_set: options.apiKey ? "set" : "not_set",
     checks,
   };

@@ -216,6 +216,14 @@ function buildChecks() {
         src.includes("screeningFallbackApiKey"),
     },
     {
+      file: "config-builder.js",
+      label: "[CLIProxy] screener reasoning effort config maps into runtime config",
+      test: (src) =>
+        src.includes("normalizeScreeningReasoningEffort") &&
+        src.includes('new Set(["low", "medium", "high"])') &&
+        src.includes("screeningReasoningEffort"),
+    },
+    {
       file: "agent.js",
       label: "[CLIProxy] SCREENER can fall back to Qwen on a separate provider route",
       test: (src) =>
@@ -224,6 +232,14 @@ function buildChecks() {
         src.includes('routeKind === "fallback"') &&
         src.includes("SCREENER primary route failed") &&
         src.includes("route_kind"),
+    },
+    {
+      file: "agent.js",
+      label: "[CLIProxy] SCREENER sends and logs explicit Chat Completions reasoning_effort",
+      test: (src) =>
+        src.includes("reasoningEffort: llmCfg.screeningReasoningEffort || null") &&
+        src.includes("callParams.reasoning_effort = activeRoute.reasoningEffort") &&
+        src.includes("reasoning_effort: activeRoute.reasoningEffort || null"),
     },
     {
       file: "agent.js",
@@ -241,6 +257,7 @@ function buildChecks() {
         src.includes("api-activity-${dateKey(date)}.jsonl") &&
         src.includes("API_LOGS_PATH") &&
         src.includes("base_url_host") &&
+        src.includes("reasoning_effort") &&
         src.includes("prompt_tokens") &&
         src.includes("completion_tokens") &&
         src.includes("total_tokens") &&
@@ -252,6 +269,8 @@ function buildChecks() {
       test: (src) =>
         src.includes("--chat-smoke") &&
         src.includes("--tool-call-smoke") &&
+        src.includes("--reasoning-effort") &&
+        src.includes("reasoning_effort") &&
         src.includes("client.chat.completions.create") &&
         src.includes("tool_calls") &&
         src.includes("loads_wallet_or_trading_modules: false"),
@@ -263,6 +282,7 @@ function buildChecks() {
         src.includes("calls_by_day") &&
         src.includes("calls_by_agent_role") &&
         src.includes("calls_by_model") &&
+        src.includes("calls_by_reasoning_effort") &&
         src.includes("route_counts") &&
         src.includes("status_counts") &&
         src.includes("p95_latency_ms"),
@@ -274,6 +294,7 @@ function buildChecks() {
         exampleProof?.llm?.screeningModel === "gpt-5.4" &&
         exampleProof?.llm?.screeningBaseUrl === "http://127.0.0.1:8317" &&
         exampleProof?.llm?.screeningApiKeySet === "set" &&
+        exampleProof?.llm?.screeningReasoningEffort === "low" &&
         exampleProof?.llm?.screeningFallbackModel === "qwen3.6-plus" &&
         exampleProof?.llm?.screeningFallbackBaseUrl === "https://dashscope-intl.aliyuncs.com" &&
         exampleProof?.llm?.screeningFallbackApiKeySet === "set" &&
@@ -290,6 +311,8 @@ function buildChecks() {
         src.includes("CLIProxyAPI runs on VPS `ohox`") &&
         src.includes("ssh -N -o ExitOnForwardFailure=yes -L 1455:127.0.0.1:1455 ohox") &&
         src.includes("node scripts/verify-llm-endpoint.js") &&
+        src.includes("screeningReasoningEffort") &&
+        src.includes("reasoning_effort=low") &&
         src.includes("Do not restart the main `meridian`") &&
         src.includes("Rollback"),
     },

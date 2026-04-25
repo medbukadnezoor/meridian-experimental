@@ -93,6 +93,7 @@ function buildProof(imported, requestedUserConfigPath) {
       screeningModel: llm.screeningModel,
       screeningBaseUrl: sanitizeBaseUrl(llm.screeningBaseUrl),
       screeningApiKeySet: maskSecretPresence(llm.screeningApiKey),
+      screeningReasoningEffort: llm.screeningReasoningEffort,
       screeningFallbackModel: llm.screeningFallbackModel,
       screeningFallbackBaseUrl: sanitizeBaseUrl(llm.screeningFallbackBaseUrl),
       screeningFallbackApiKeySet: maskSecretPresence(llm.screeningFallbackApiKey),

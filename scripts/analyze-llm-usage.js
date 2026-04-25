@@ -103,6 +103,7 @@ function analyze(rows) {
   const byDay = {};
   const byRole = {};
   const byModel = {};
+  const byReasoningEffort = {};
   const routeCounts = {};
   const statusCounts = {};
   const allLatencies = [];
@@ -112,6 +113,7 @@ function analyze(rows) {
     bump(byDay, dayFromTimestamp(row.timestamp), row);
     bump(byRole, row.agent_role ?? row.agent, row);
     bump(byModel, row.model, row);
+    bump(byReasoningEffort, row.reasoning_effort ?? "unset", row);
     routeCounts[row.route_kind || "unknown"] = (routeCounts[row.route_kind || "unknown"] || 0) + 1;
     statusCounts[row.status || "unknown"] = (statusCounts[row.status || "unknown"] || 0) + 1;
     totalTokens += Number(row.total_tokens ?? row.tokens ?? 0) || 0;
@@ -125,6 +127,7 @@ function analyze(rows) {
     calls_by_day: finalizeMap(byDay),
     calls_by_agent_role: finalizeMap(byRole),
     calls_by_model: finalizeMap(byModel),
+    calls_by_reasoning_effort: finalizeMap(byReasoningEffort),
     route_counts: routeCounts,
     status_counts: statusCounts,
     total_tokens: totalTokens,

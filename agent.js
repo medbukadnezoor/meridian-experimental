@@ -163,6 +163,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       model: llmCfg.screeningFallbackModel,
       baseURL: llmCfg.screeningFallbackBaseUrl,
       apiKey: llmCfg.screeningFallbackApiKey || globalKey,
+      reasoningEffort: null,
     };
   }
 
@@ -173,6 +174,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       model: modelOverride || llmCfg.screeningModel || process.env.LLM_MODEL || "openrouter/hunter-alpha",
       baseURL: llmCfg.screeningBaseUrl || globalUrl,
       apiKey: llmCfg.screeningApiKey || globalKey,
+      reasoningEffort: llmCfg.screeningReasoningEffort || null,
     };
   }
 
@@ -183,6 +185,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       model: modelOverride || llmCfg.managementModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
       baseURL: llmCfg.managementBaseUrl || globalUrl,
       apiKey: llmCfg.managementApiKey || globalKey,
+      reasoningEffort: null,
     };
   }
 
@@ -192,6 +195,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
     model: modelOverride || llmCfg.generalModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
     baseURL: llmCfg.generalBaseUrl || globalUrl,
     apiKey: llmCfg.generalApiKey || globalKey,
+    reasoningEffort: null,
   };
 }
 
@@ -344,12 +348,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          // Chat Completions uses reasoning_effort; Responses uses reasoning.effort.
+          if (activeRoute.reasoningEffort) callParams.reasoning_effort = activeRoute.reasoningEffort;
           response = await getClientForRoute(activeRoute).chat.completions.create(callParams);
           logApiActivity({
             agent_role: agentType,
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "success",
             prompt_tokens: response?.usage?.prompt_tokens ?? null,
@@ -364,6 +371,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "error",
             error: sanitizeErrorMessage(error),
@@ -418,6 +426,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "error",
             error: "provider returned no choices",

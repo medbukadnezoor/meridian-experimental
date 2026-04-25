@@ -102,6 +102,7 @@
   "generalModel": "qwen3.6-plus",
   "screeningBaseUrl": "http://127.0.0.1:8317/v1",
   "screeningApiKey": "NO_API_KEY",
+  "screeningReasoningEffort": "low",
   "screeningFallbackModel": "qwen3.6-plus",
   "screeningFallbackBaseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   "screeningFallbackApiKey": "YOUR_DASHSCOPE_API_KEY",

@@ -11,6 +11,13 @@ export function normalizeOptionalString(value) {
   return trimmed === "" ? undefined : trimmed;
 }
 
+const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+
+export function normalizeScreeningReasoningEffort(value) {
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return SCREENING_REASONING_EFFORTS.has(normalized) ? normalized : null;
+}
+
 export function firstNonEmptyString(...values) {
   for (const value of values) {
     const normalized = normalizeOptionalString(value);
@@ -150,6 +157,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       fallbackModel,
       screeningBaseUrl: u.screeningBaseUrl ?? null,
       screeningApiKey: u.screeningApiKey ?? null,
+      screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
       screeningFallbackModel: u.screeningFallbackModel ?? null,
       screeningFallbackBaseUrl: u.screeningFallbackBaseUrl ?? null,
       screeningFallbackApiKey: u.screeningFallbackApiKey ?? null,
