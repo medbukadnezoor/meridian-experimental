@@ -57,6 +57,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
   const indicatorUserConfig = u.chartIndicators ?? {};
   const performanceUserConfig = u.performance ?? {};
   const fallbackModel = normalizeOptionalString(u.fallbackModel);
+  const isNanocapPreset = String(u.preset ?? "").toLowerCase().includes("nanocap");
 
   return {
     risk: {
@@ -92,6 +93,16 @@ export function buildConfig(userConfig = {}, env = process.env) {
       minTokenAgeHours: u.minTokenAgeHours ?? null,
       maxTokenAgeHours: u.maxTokenAgeHours ?? null,
       athFilterPct: u.athFilterPct ?? null,
+      fallingKnifeVetoEnabled: u.fallingKnifeVetoEnabled ?? isNanocapPreset,
+      fallingKnifeMaxPriceChange1hPct: u.fallingKnifeMaxPriceChange1hPct ?? -35,
+      fallingKnifeSeverePriceChangePct: u.fallingKnifeSeverePriceChangePct ?? -45,
+      fallingKnifeMinSellBuyRatio: u.fallingKnifeMinSellBuyRatio ?? 1.25,
+      fallingKnifeRequireOversoldRsi: u.fallingKnifeRequireOversoldRsi ?? false,
+      suspiciousVolumeVetoEnabled: u.suspiciousVolumeVetoEnabled ?? isNanocapPreset,
+      suspiciousVolumeMaxMcapToGlobalFeesRatio: u.suspiciousVolumeMaxMcapToGlobalFeesRatio ?? 12000,
+      suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
+      suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
+      suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
     },
 
     management: {
@@ -117,6 +128,9 @@ export function buildConfig(userConfig = {}, env = process.env) {
       stopLossPct: u.stopLossPct ?? u.emergencyPriceDropPct ?? -50,
       stopLossConfirmDelayMs: u.stopLossConfirmDelayMs ?? 0,
       hardStopLossPct: u.hardStopLossPct ?? null,
+      stopLossFastClosePct: u.stopLossFastClosePct ?? (isNanocapPreset ? -10 : null),
+      stopLossVelocityWindowMs: u.stopLossVelocityWindowMs ?? (isNanocapPreset ? 90_000 : null),
+      stopLossVelocityClosePct: u.stopLossVelocityClosePct ?? (isNanocapPreset ? -3 : null),
       takeProfitPct: u.takeProfitPct ?? u.takeProfitFeePct ?? 5,
       minFeePerTvl24h: u.minFeePerTvl24h ?? 7,
       minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60,

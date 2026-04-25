@@ -25,7 +25,7 @@ import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnable
 import { appendDecision } from "./decision-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
-import { buildStopLossConfirmationResult } from "./stop-loss-policy.js";
+import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -1148,31 +1148,21 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   const currentPnlPct = finiteNumberOrNull(position.pnl_pct);
-  if (!pnlSuspect && currentPnlPct != null && currentPnlPct <= managementConfig.stopLossPct) {
-    const hardStopLossPct = finiteNumberOrNull(managementConfig.hardStopLossPct);
-    if (hardStopLossPct != null && currentPnlPct <= hardStopLossPct) {
-      return {
-        action: "CLOSE",
-        rule: 1,
-        reason: `Hard stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${hardStopLossPct}%`,
-        urgent: true,
-      };
-    }
-
-    const stopLossConfirmDelayMs = Math.max(0, Number(managementConfig.stopLossConfirmDelayMs ?? 0));
-    if (stopLossConfirmDelayMs > 0) {
-      return {
-        action: "STOP_LOSS_CANDIDATE",
-        rule: 1,
-        reason: `Stop loss candidate: PnL ${currentPnlPct.toFixed(2)}% <= ${managementConfig.stopLossPct}%`,
-        needs_confirmation: true,
-        current_pnl_pct: currentPnlPct,
-        stop_loss_pct: managementConfig.stopLossPct,
-        confirm_delay_ms: stopLossConfirmDelayMs,
-      };
-    }
-
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  if (!pnlSuspect) {
+    const velocity = calculatePnlVelocityDrop(
+      tracked?.pnl_history,
+      currentPnlPct,
+      managementConfig.stopLossVelocityWindowMs,
+    );
+    const stopLossDecision = buildStopLossExitDecision({
+      currentPnlPct,
+      managementConfig,
+      velocityDropPct: velocity.dropPct,
+      velocityElapsedMs: velocity.elapsedMs,
+      immediateAction: "CLOSE",
+      rule: 1,
+    });
+    if (stopLossDecision) return stopLossDecision;
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };

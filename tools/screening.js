@@ -15,6 +15,12 @@ const PVP_MIN_ACTIVE_TVL = 5_000;
 const PVP_MIN_HOLDERS = 500;
 const PVP_MIN_GLOBAL_FEES_SOL = 30;
 
+function finiteNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
 function normalizeSymbol(symbol) {
   return String(symbol || "").trim().toUpperCase();
 }
@@ -43,6 +49,59 @@ async function searchAssetsBySymbol(symbol) {
   return Array.isArray(data) ? data : [data];
 }
 
+async function fetchJupiterTokenSnapshot(mint) {
+  if (!mint) return null;
+  const res = await fetch(`${DATAPI_JUP}/assets/search?query=${encodeURIComponent(mint)}`);
+  if (!res.ok) throw new Error(`assets/search ${res.status}`);
+  const data = await res.json();
+  const tokens = Array.isArray(data) ? data : [data];
+  const token = tokens.find((item) => item?.id === mint) || tokens[0];
+  if (!token) return null;
+  const createdAtRaw = token.createdAt ?? token.created_at ?? token.firstPool?.createdAt ?? null;
+  const createdAtMs = createdAtRaw == null
+    ? null
+    : (Number(createdAtRaw) < 10_000_000_000 ? Number(createdAtRaw) * 1000 : Number(createdAtRaw));
+
+  return {
+    mint: token.id ?? mint,
+    mcap: finiteNumberOrNull(token.mcap ?? token.marketCap),
+    global_fees_sol: finiteNumberOrNull(token.fees),
+    token_age_hours: Number.isFinite(createdAtMs)
+      ? Math.floor((Date.now() - createdAtMs) / 3_600_000)
+      : null,
+    stats_1h: token.stats1h ? {
+      price_change: finiteNumberOrNull(token.stats1h.priceChange),
+      buy_vol: finiteNumberOrNull(token.stats1h.buyVolume),
+      sell_vol: finiteNumberOrNull(token.stats1h.sellVolume),
+    } : null,
+  };
+}
+
+async function enrichJupiterTokenSnapshots(pools) {
+  const results = await Promise.allSettled(
+    pools.map((pool) => fetchJupiterTokenSnapshot(pool.base?.mint)),
+  );
+
+  results.forEach((result, index) => {
+    if (result.status !== "fulfilled" || !result.value) {
+      const mint = pools[index]?.base?.mint;
+      if (mint) log("screening", `Jupiter token snapshot unavailable for ${pools[index].name} (${mint.slice(0, 8)})`);
+      return;
+    }
+
+    const snapshot = result.value;
+    pools[index].token_info = snapshot;
+    pools[index].global_fees_sol = snapshot.global_fees_sol;
+    pools[index].stats_1h = snapshot.stats_1h;
+    pools[index].buy_vol = snapshot.stats_1h?.buy_vol ?? null;
+    pools[index].sell_vol = snapshot.stats_1h?.sell_vol ?? null;
+    if (pools[index].mcap == null && snapshot.mcap != null) pools[index].mcap = snapshot.mcap;
+    if (pools[index].token_age_hours == null && snapshot.token_age_hours != null) {
+      pools[index].token_age_hours = snapshot.token_age_hours;
+    }
+  });
+}
+
 async function findRivalPool(mint) {
   const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}&filter_by=${encodeURIComponent(`tvl>${PVP_MIN_ACTIVE_TVL}`)}`;
   const res = await fetch(url);
@@ -50,6 +109,146 @@ async function findRivalPool(mint) {
   const data = await res.json();
   const pools = Array.isArray(data?.data) ? data.data : [];
   return pools.find((pool) => pool?.token_x?.address === mint || pool?.token_y?.address === mint) || null;
+}
+
+function getMostNegativeNumber(...values) {
+  const nums = values
+    .map(finiteNumberOrNull)
+    .filter((value) => value != null);
+  return nums.length > 0 ? Math.min(...nums) : null;
+}
+
+function getCandidatePriceChange1hPct(candidate = {}) {
+  return getMostNegativeNumber(
+    candidate.price_change_pct,
+    candidate.price_change_1h,
+    candidate.change_1h,
+    candidate.stats_1h?.price_change,
+    candidate.token_info?.stats_1h?.price_change,
+  );
+}
+
+function getCandidateSellBuyRatio(candidate = {}) {
+  const sellVol = finiteNumberOrNull(
+    candidate.sell_vol ?? candidate.stats_1h?.sell_vol ?? candidate.token_info?.stats_1h?.sell_vol,
+  );
+  const buyVol = finiteNumberOrNull(
+    candidate.buy_vol ?? candidate.stats_1h?.buy_vol ?? candidate.token_info?.stats_1h?.buy_vol,
+  );
+  if (sellVol == null || buyVol == null || buyVol <= 0) {
+    return { sellVol, buyVol, ratio: null };
+  }
+  return { sellVol, buyVol, ratio: sellVol / buyVol };
+}
+
+function candidateHasOversoldRsi(candidate = {}) {
+  const values = [
+    candidate.rsi,
+    candidate.rsi_1h,
+    candidate.rsi_5m,
+    candidate.indicator_confirmation?.rsi,
+    ...(Array.isArray(candidate.indicator_confirmation?.intervals)
+      ? candidate.indicator_confirmation.intervals.map((interval) => interval?.rsi)
+      : []),
+  ].map(finiteNumberOrNull).filter((value) => value != null);
+  return values.some((value) => value <= 35);
+}
+
+export function getFallingKnifeVetoReason(candidate = {}, screeningConfig = {}) {
+  if (!screeningConfig.fallingKnifeVetoEnabled) return null;
+
+  const priceChange = getCandidatePriceChange1hPct(candidate);
+  if (priceChange == null) return null;
+  if (screeningConfig.fallingKnifeRequireOversoldRsi && !candidateHasOversoldRsi(candidate)) return null;
+
+  const severeDrop = finiteNumberOrNull(screeningConfig.fallingKnifeSeverePriceChangePct) ?? -45;
+  const maxDrop = finiteNumberOrNull(screeningConfig.fallingKnifeMaxPriceChange1hPct) ?? -35;
+  const minSellBuyRatio = finiteNumberOrNull(screeningConfig.fallingKnifeMinSellBuyRatio) ?? 1.25;
+  const { ratio } = getCandidateSellBuyRatio(candidate);
+
+  if (priceChange <= severeDrop) {
+    const ratioLabel = ratio == null ? "unavailable" : ratio.toFixed(2);
+    return `falling knife veto: 1h price_change=${priceChange.toFixed(1)}%, sell/buy=${ratioLabel}`;
+  }
+
+  if (priceChange <= maxDrop && ratio != null && ratio >= minSellBuyRatio) {
+    return `falling knife veto: 1h price_change=${priceChange.toFixed(1)}%, sell/buy=${ratio.toFixed(2)}`;
+  }
+
+  return null;
+}
+
+export function getSuspiciousVolumeVetoReason(candidate = {}, screeningConfig = {}) {
+  if (!screeningConfig.suspiciousVolumeVetoEnabled) return null;
+
+  const mcap = finiteNumberOrNull(candidate.mcap ?? candidate.token_info?.mcap);
+  const globalFeesSol = finiteNumberOrNull(candidate.global_fees_sol ?? candidate.token_info?.global_fees_sol);
+  const ageHours = finiteNumberOrNull(candidate.token_age_hours ?? candidate.token_info?.token_age_hours);
+  const priceChange = getCandidatePriceChange1hPct(candidate);
+  const maxRatio = finiteNumberOrNull(screeningConfig.suspiciousVolumeMaxMcapToGlobalFeesRatio) ?? 12000;
+  const minGlobalFees = finiteNumberOrNull(screeningConfig.suspiciousVolumeMinGlobalFeesSol) ?? 20;
+  const maxAgeHours = finiteNumberOrNull(screeningConfig.suspiciousVolumeMaxTokenAgeHours) ?? 96;
+  const minPriceDrop = finiteNumberOrNull(screeningConfig.suspiciousVolumeMinPriceDropPct) ?? -25;
+
+  if (mcap == null || globalFeesSol == null || globalFeesSol <= 0 || ageHours == null || priceChange == null) {
+    return null;
+  }
+
+  const ratio = mcap / globalFeesSol;
+  if (
+    ageHours <= maxAgeHours &&
+    globalFeesSol >= minGlobalFees &&
+    ratio <= maxRatio &&
+    priceChange <= minPriceDrop
+  ) {
+    return `suspicious volume/fees veto: mcap/global_fees=${Math.round(ratio)}, age=${Math.round(ageHours)}h, price_change=${priceChange.toFixed(1)}%`;
+  }
+
+  return null;
+}
+
+export function getDeterministicCandidateVetoReason(candidate = {}, screeningConfig = {}) {
+  return getFallingKnifeVetoReason(candidate, screeningConfig)
+    || getSuspiciousVolumeVetoReason(candidate, screeningConfig);
+}
+
+function formatAuditNumber(value, decimals) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? null : num.toFixed(decimals);
+}
+
+export function getDeterministicVetoAuditSnapshot(candidate = {}) {
+  const priceChange = getCandidatePriceChange1hPct(candidate);
+  const { ratio: sellBuyRatio } = getCandidateSellBuyRatio(candidate);
+  const mcap = finiteNumberOrNull(candidate.mcap ?? candidate.token_info?.mcap);
+  const globalFeesSol = finiteNumberOrNull(candidate.global_fees_sol ?? candidate.token_info?.global_fees_sol);
+  const tokenAgeHours = finiteNumberOrNull(candidate.token_age_hours ?? candidate.token_info?.token_age_hours);
+  const mcapGlobalFeesRatio = mcap != null && globalFeesSol != null && globalFeesSol > 0
+    ? mcap / globalFeesSol
+    : null;
+
+  return {
+    price_change_pct: priceChange,
+    sell_buy_ratio: sellBuyRatio,
+    mcap_global_fees_ratio: mcapGlobalFeesRatio,
+    token_age_hours: tokenAgeHours,
+  };
+}
+
+export function formatDeterministicVetoAuditLine(candidate = {}, reason = "deterministic veto") {
+  const name = candidate.name || `${candidate.base?.symbol || "?"}-${candidate.quote?.symbol || "?"}`;
+  const snapshot = getDeterministicVetoAuditSnapshot(candidate);
+  const fields = [
+    ["price_change", formatAuditNumber(snapshot.price_change_pct, 1), "%"],
+    ["sell/buy", formatAuditNumber(snapshot.sell_buy_ratio, 2), ""],
+    ["mcap/global_fees", snapshot.mcap_global_fees_ratio == null ? null : String(Math.round(snapshot.mcap_global_fees_ratio)), ""],
+    ["token_age_hours", snapshot.token_age_hours == null ? null : String(Math.round(snapshot.token_age_hours)), ""],
+  ]
+    .filter(([, value]) => value != null)
+    .map(([label, value, suffix]) => `${label}=${value}${suffix}`);
+
+  const detail = fields.length > 0 ? ` | ${fields.join(", ")}` : "";
+  return `Deterministic veto: dropped ${name} — ${reason}${detail}`;
 }
 
 async function enrichPvpRisk(pools) {
@@ -370,6 +569,23 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         eligible[i].top_cluster_hold_pct = clusters[0]?.holding_pct ?? null;
       }
     }
+
+    await enrichJupiterTokenSnapshots(eligible);
+
+    // Deterministic nanocap safety gates. These run before the LLM sees candidates.
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
+      if (vetoReason) {
+        log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
+        pushFilteredReason(filteredOut, p, vetoReason, {
+          priority: true,
+          audit: getDeterministicVetoAuditSnapshot(p),
+        });
+        return false;
+      }
+      return true;
+    }));
+
     // Wash trading hard filter — fake volume = misleading fee yield
     eligible.splice(0, eligible.length, ...eligible.filter((p) => {
       if (p.is_wash) {
@@ -643,10 +859,17 @@ function fix(n, decimals) {
   return n != null ? Number(n.toFixed(decimals)) : null;
 }
 
-function pushFilteredReason(list, pool, reason) {
+function pushFilteredReason(list, pool, reason, options = {}) {
   if (!list || !pool) return;
-  list.push({
+  const entry = {
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
-  });
+  };
+  if (options.audit) {
+    for (const [key, value] of Object.entries(options.audit)) {
+      if (value != null) entry[key] = value;
+    }
+  }
+  if (options.priority) list.unshift(entry);
+  else list.push(entry);
 }

@@ -26,6 +26,8 @@ const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
+const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
+const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
@@ -108,6 +110,38 @@ function runStopLossTrialBehaviorProof() {
   return JSON.parse(result.stdout);
 }
 
+function runEmergencyStopPolicyProof() {
+  const result = spawnSync(process.execPath, [EMERGENCY_STOP_POLICY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-emergency-stop-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runFallingKnifeVetoProof() {
+  const result = spawnSync(process.execPath, [FALLING_KNIFE_VETO_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-falling-knife-veto failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runMaterialWinMetricsProof() {
   const result = spawnSync(process.execPath, [MATERIAL_WIN_METRICS_VERIFIER_PATH], {
     cwd: ROOT,
@@ -182,6 +216,8 @@ function buildChecks() {
     : null;
   const earlyDumpProof = runEarlyDumpCooldownProof();
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
+  const emergencyStopProof = runEmergencyStopPolicyProof();
+  const fallingKnifeProof = runFallingKnifeVetoProof();
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
@@ -383,6 +419,29 @@ function buildChecks() {
     },
     {
       file: "config-builder.js",
+      label: "[Emergency stop] fast and velocity stop config maps into runtime config",
+      test: (src) =>
+        src.includes("stopLossFastClosePct") &&
+        src.includes("stopLossVelocityWindowMs") &&
+        src.includes("stopLossVelocityClosePct") &&
+        src.includes("isNanocapPreset ? -10 : null") &&
+        src.includes("isNanocapPreset ? 90_000 : null") &&
+        src.includes("isNanocapPreset ? -3 : null"),
+    },
+    {
+      file: "config-builder.js",
+      label: "[Falling-knife veto] deterministic nanocap veto config maps into runtime config",
+      test: (src) =>
+        src.includes("fallingKnifeVetoEnabled") &&
+        src.includes("fallingKnifeMaxPriceChange1hPct") &&
+        src.includes("fallingKnifeSeverePriceChangePct") &&
+        src.includes("fallingKnifeMinSellBuyRatio") &&
+        src.includes("suspiciousVolumeVetoEnabled") &&
+        src.includes("suspiciousVolumeMaxMcapToGlobalFeesRatio") &&
+        src.includes("suspiciousVolumeMinGlobalFeesSol"),
+    },
+    {
+      file: "config-builder.js",
       label: "[Patch 6] repeat low-yield config defaults mapped",
       test: (src) =>
         src.includes("repeatLowYieldCooldownEnabled") &&
@@ -434,11 +493,18 @@ function buildChecks() {
       file: "state.js",
       label: "[Stop-loss trial] soft stop-loss becomes a confirmation candidate when enabled",
       test: (src) =>
-        src.includes('action: "STOP_LOSS_CANDIDATE"') &&
-        src.includes("stopLossConfirmDelayMs > 0") &&
-        src.includes("mgmtConfig.hardStopLossPct == null") &&
-        src.includes("Stop loss candidate:") &&
-        src.includes("Hard stop loss:"),
+        src.includes("buildStopLossExitDecision") &&
+        src.includes("appendPnlHistory"),
+    },
+    {
+      file: "state.js",
+      label: "[Emergency stop] state persists compact PnL history for velocity stop decisions",
+      test: (src) =>
+        src.includes("MAX_PNL_HISTORY_POINTS") &&
+        src.includes("pnl_history") &&
+        src.includes("pnl_history_started_at") &&
+        src.includes("calculatePnlVelocityDrop") &&
+        src.includes("velocity stop needs one prior sample"),
     },
     {
       file: "index.js",
@@ -456,6 +522,34 @@ function buildChecks() {
         src.includes("buildStopLossConfirmationResult") &&
         src.includes("Stop loss confirmed:") &&
         src.includes("Stop loss candidate rejected:"),
+    },
+    {
+      file: "stop-loss-policy.js",
+      label: "[Emergency stop] shared policy helper labels hard, fast, velocity, and soft stop outcomes",
+      test: (src) =>
+        src.includes("buildStopLossExitDecision") &&
+        src.includes("calculatePnlVelocityDrop") &&
+        src.includes("Hard stop loss:") &&
+        src.includes("Fast stop loss:") &&
+        src.includes("Velocity stop loss:") &&
+        src.includes("Stop loss candidate:") &&
+        src.includes("includeSoftStop"),
+    },
+    {
+      file: "tools/screening.js",
+      label: "[Falling-knife veto] screening drops deterministic falling-knife and suspicious-volume candidates before LLM with audit logging",
+      test: (src) =>
+        src.includes("getFallingKnifeVetoReason") &&
+        src.includes("getSuspiciousVolumeVetoReason") &&
+        src.includes("getDeterministicCandidateVetoReason") &&
+        src.includes("getDeterministicVetoAuditSnapshot") &&
+        src.includes("formatDeterministicVetoAuditLine") &&
+        src.includes("enrichJupiterTokenSnapshots") &&
+        src.includes("falling knife veto:") &&
+        src.includes("suspicious volume/fees veto:") &&
+        src.includes("Deterministic veto: dropped") &&
+        src.includes("mcap_global_fees_ratio") &&
+        src.includes("pushFilteredReason(filteredOut, p, vetoReason"),
     },
     {
       file: "scripts/analyze-pnl-snapshots.js",
@@ -490,6 +584,57 @@ function buildChecks() {
         String(stopLossBehaviorProof?.rejectedRecheck?.rejectionReason || "").startsWith("Stop loss candidate rejected:") &&
         stopLossBehaviorProof?.tempStateFileCreated === true &&
         stopLossBehaviorProof?.tempDirRemoved === true,
+    },
+    {
+      file: "scripts/verify-emergency-stop-policy.js",
+      label: "[Emergency stop] synthetic behavior proof covers fast, velocity, ordinary soft, and hard stops",
+      test: () =>
+        emergencyStopProof?.success === true &&
+        emergencyStopProof?.fastStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.fastStop?.urgent === true &&
+        String(emergencyStopProof?.fastStop?.reason || "").startsWith("Fast stop loss:") &&
+        emergencyStopProof?.velocityStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.velocityStop?.urgent === true &&
+        String(emergencyStopProof?.velocityStop?.reason || "").startsWith("Velocity stop loss:") &&
+        emergencyStopProof?.ordinarySoft?.action === "STOP_LOSS_CANDIDATE" &&
+        emergencyStopProof?.ordinarySoft?.needsConfirmation === true &&
+        Number(emergencyStopProof?.ordinarySoft?.confirmDelayMs) === 15000 &&
+        emergencyStopProof?.hardStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.hardStop?.urgent === true &&
+        String(emergencyStopProof?.hardStop?.reason || "").startsWith("Hard stop loss:") &&
+        emergencyStopProof?.youngHardStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.youngHardStop?.urgent === true &&
+        String(emergencyStopProof?.youngHardStop?.reason || "").startsWith("Hard stop loss:") &&
+        emergencyStopProof?.youngFastStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.youngFastStop?.urgent === true &&
+        String(emergencyStopProof?.youngFastStop?.reason || "").startsWith("Fast stop loss:") &&
+        emergencyStopProof?.youngVelocityStop?.action === "STOP_LOSS" &&
+        emergencyStopProof?.youngVelocityStop?.urgent === true &&
+        String(emergencyStopProof?.youngVelocityStop?.reason || "").startsWith("Velocity stop loss:") &&
+        emergencyStopProof?.youngEarlyDump?.action === "STOP_LOSS" &&
+        String(emergencyStopProof?.youngEarlyDump?.reason || "").startsWith("Early dump:") &&
+        emergencyStopProof?.tempStateFileCreated === true &&
+        emergencyStopProof?.tempDirRemoved === true,
+    },
+    {
+      file: "scripts/verify-falling-knife-veto.js",
+      label: "[Falling-knife veto] synthetic proof vetoes LARP-like setup, audits fields, and preserves benign 5m setup",
+      test: () =>
+        fallingKnifeProof?.success === true &&
+        fallingKnifeProof?.larpLike?.vetoed === true &&
+        String(fallingKnifeProof?.larpLike?.reason || "").startsWith("falling knife veto:") &&
+        String(fallingKnifeProof?.larpLike?.reason || "").includes("price_change=-48.8%") &&
+        String(fallingKnifeProof?.larpLike?.reason || "").includes("sell/buy=1.66") &&
+        Number(fallingKnifeProof?.larpLike?.audit?.price_change_pct?.toFixed(1)) === -48.8 &&
+        Number(fallingKnifeProof?.larpLike?.audit?.sell_buy_ratio?.toFixed(2)) === 1.66 &&
+        Math.round(Number(fallingKnifeProof?.larpLike?.audit?.mcap_global_fees_ratio)) === 21090 &&
+        Number(fallingKnifeProof?.larpLike?.audit?.token_age_hours) === 66 &&
+        String(fallingKnifeProof?.larpLike?.auditLine || "").includes("Deterministic veto: dropped LARP-SOL") &&
+        String(fallingKnifeProof?.larpLike?.auditLine || "").includes("mcap/global_fees=21090") &&
+        fallingKnifeProof?.benignOversold?.vetoed === false &&
+        fallingKnifeProof?.benign5mFrequency?.vetoed === false &&
+        fallingKnifeProof?.ratioFallingKnife?.vetoed === true &&
+        fallingKnifeProof?.suspiciousVolume?.vetoed === true,
     },
     {
       file: "performance-metrics.js",
@@ -658,16 +803,47 @@ function buildChecks() {
     },
     {
       file: "user-config.example.json",
-      label: "[Runtime] nanocap example resolves confirmed -8/-15 stop-loss trial config",
+      label: "[Runtime] nanocap example resolves post-LARP -8/-10/-15 emergency stop config",
       test: () =>
         exampleProof.userConfigExists === true &&
         Number(exampleProof?.management?.stopLossPct) === -8 &&
         Number(exampleProof?.management?.stopLossConfirmDelayMs) === 15000 &&
         Number(exampleProof?.management?.hardStopLossPct) === -15 &&
+        Number(exampleProof?.management?.stopLossFastClosePct) === -10 &&
+        Number(exampleProof?.management?.stopLossVelocityWindowMs) === 90000 &&
+        Number(exampleProof?.management?.stopLossVelocityClosePct) === -3 &&
         Number(exampleProof?.management?.earlyDumpPct) === -8 &&
         Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
         exampleProof?.management?.pnlSnapshotLoggingEnabled === true &&
         exampleProof?.management?.pnlSnapshotBotName === "nanocap",
+    },
+    {
+      file: "user-config.example.json",
+      label: "[Runtime] nanocap example resolves falling-knife and suspicious-volume veto config",
+      test: () =>
+        exampleProof.userConfigExists === true &&
+        exampleProof?.screening?.fallingKnifeVetoEnabled === true &&
+        Number(exampleProof?.screening?.fallingKnifeMaxPriceChange1hPct) === -35 &&
+        Number(exampleProof?.screening?.fallingKnifeSeverePriceChangePct) === -45 &&
+        Number(exampleProof?.screening?.fallingKnifeMinSellBuyRatio) === 1.25 &&
+        exampleProof?.screening?.fallingKnifeRequireOversoldRsi === false &&
+        exampleProof?.screening?.suspiciousVolumeVetoEnabled === true &&
+        Number(exampleProof?.screening?.suspiciousVolumeMaxMcapToGlobalFeesRatio) === 12000 &&
+        Number(exampleProof?.screening?.suspiciousVolumeMinGlobalFeesSol) === 20 &&
+        Number(exampleProof?.screening?.suspiciousVolumeMaxTokenAgeHours) === 96 &&
+        Number(exampleProof?.screening?.suspiciousVolumeMinPriceDropPct) === -25,
+    },
+    {
+      file: "user-config.example.json",
+      label: "[Runtime] nanocap example resolves 5m RSI entry interval",
+      test: () =>
+        exampleProof.userConfigExists === true &&
+        exampleProof?.indicators?.enabled === true &&
+        exampleProof?.indicators?.entryPreset === "rsi_reversal" &&
+        exampleProof?.indicators?.exitPreset === null &&
+        Array.isArray(exampleProof?.indicators?.intervals) &&
+        exampleProof.indicators.intervals.length === 1 &&
+        exampleProof.indicators.intervals[0] === "5_MINUTE",
     },
     {
       file: "user-config.example.json",
