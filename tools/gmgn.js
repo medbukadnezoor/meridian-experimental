@@ -40,6 +40,7 @@ const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const GMGN_V1_BASE = "https://openapi.gmgn.ai/v1";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "3h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
+let gmgnRequestQueue = Promise.resolve();
 
 // Tags indicating smart-money tool activity (positive context)
 const SMART_TOOL_TAGS = new Set(["photon", "padre", "gmgn", "axiom", "bullx", "trojan", "gmgnkol"]);
@@ -149,11 +150,15 @@ function sleep(ms) {
 }
 
 async function paceGmgnRequest() {
-  const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 1200));
-  if (!delayMs) return;
-  const elapsed = Date.now() - lastGmgnRequestAt;
-  if (elapsed < delayMs) await sleep(delayMs - elapsed);
-  lastGmgnRequestAt = Date.now();
+  const run = gmgnRequestQueue.then(async () => {
+    const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 1200));
+    if (!delayMs) return;
+    const elapsed = Date.now() - lastGmgnRequestAt;
+    if (elapsed < delayMs) await sleep(delayMs - elapsed);
+    lastGmgnRequestAt = Date.now();
+  });
+  gmgnRequestQueue = run.catch(() => {});
+  await run;
 }
 
 function normalizeInterval(value, fallback = "5m") {
