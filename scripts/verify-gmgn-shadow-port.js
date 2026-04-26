@@ -63,6 +63,8 @@ assert.ok(shadowScript.includes('runSource("meteora"'), "shadow script runs Mete
 assert.ok(shadowScript.includes('runSource("gmgn"'), "shadow script runs GMGN source");
 assert.ok(shadowScript.includes("--gmgn-order-by"), "shadow script can override GMGN rank sort");
 assert.ok(shadowScript.includes("--gmgn-interval"), "shadow script can override GMGN rank interval");
+assert.ok(shadowScript.includes("temporary_rate_limit_ban"), "shadow script classifies GMGN temporary rate-limit bans");
+assert.ok(gmgnSource.includes("x-ratelimit-reset"), "GMGN fetch captures rate-limit reset header");
 assert.ok(!shadowScript.includes("deployPosition"), "shadow script does not import deployPosition");
 
 console.log(JSON.stringify({

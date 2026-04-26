@@ -118,10 +118,18 @@ function candidateSummary(candidate = {}) {
 
 function classifyError(error) {
   const message = String(error?.message || error || "");
+  const resetSeconds = Number(error?.rateLimitReset);
+  const retryAfterSeconds = Number(error?.retryAfter);
   return {
     message,
     status: error?.status ?? null,
     code: error?.code ?? null,
+    api_error: error?.apiError ?? null,
+    endpoint: error?.pathname ?? null,
+    retry_after_seconds: Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : null,
+    rate_limit_reset: error?.rateLimitReset ?? null,
+    rate_limit_reset_at: Number.isFinite(resetSeconds) ? new Date(resetSeconds * 1000).toISOString() : null,
+    temporary_rate_limit_ban: error?.apiError === "RATE_LIMIT_BANNED",
     account_warning: Boolean(error?.accountWarning) || /temporarily banned|account|1010|forbidden|whitelist/i.test(message),
     rate_limited: /rate limit|temporarily banned|429/i.test(message),
   };
