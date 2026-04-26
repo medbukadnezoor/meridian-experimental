@@ -38,7 +38,7 @@ setDefaultResultOrder("ipv4first");
 const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const GMGN_V1_BASE = "https://openapi.gmgn.ai/v1";
-const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
+const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "3h", "6h", "24h"]);
 let lastGmgnRequestAt = 0;
 
 // Tags indicating smart-money tool activity (positive context)

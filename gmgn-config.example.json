@@ -1,8 +1,8 @@
 {
   "apiKey": "",
   "baseUrl": "https://openapi.gmgn.ai",
-  "interval": "5m",
-  "orderBy": "default",
+  "interval": "1h",
+  "orderBy": "volume",
   "direction": "desc",
   "limit": 25,
   "enrichLimit": 5,
