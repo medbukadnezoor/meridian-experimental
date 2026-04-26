@@ -61,6 +61,8 @@ assert.ok(chartSource.includes('case "fibo_reject"'), "fibo_reject preset exists
 assert.ok(shadowScript.includes('live_entries_enabled: false'), "shadow script marks live entries disabled");
 assert.ok(shadowScript.includes('runSource("meteora"'), "shadow script runs Meteora source");
 assert.ok(shadowScript.includes('runSource("gmgn"'), "shadow script runs GMGN source");
+assert.ok(shadowScript.includes("--gmgn-order-by"), "shadow script can override GMGN rank sort");
+assert.ok(shadowScript.includes("--gmgn-interval"), "shadow script can override GMGN rank interval");
 assert.ok(!shadowScript.includes("deployPosition"), "shadow script does not import deployPosition");
 
 console.log(JSON.stringify({

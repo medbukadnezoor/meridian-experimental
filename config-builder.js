@@ -129,8 +129,8 @@ export function buildConfig(userConfig = {}, env = process.env, gmgnConfig = {})
     gmgn: {
       apiKey: firstNonEmptyString(g.apiKey, u.gmgnApiKey, env.GMGN_API_KEY) ?? null,
       baseUrl: firstNonEmptyString(g.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai") ?? "https://openapi.gmgn.ai",
-      interval: configValue(g, "interval", u, "gmgnInterval", "5m"),
-      orderBy: configValue(g, "orderBy", u, "gmgnOrderBy", "default"),
+      interval: configValue(g, "interval", u, "gmgnInterval", "1h"),
+      orderBy: configValue(g, "orderBy", u, "gmgnOrderBy", "volume"),
       direction: configValue(g, "direction", u, "gmgnDirection", "desc"),
       limit: configValue(g, "limit", u, "gmgnLimit", 100),
       enrichLimit: configValue(g, "enrichLimit", u, "gmgnEnrichLimit", 20),

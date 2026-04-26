@@ -13,6 +13,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     limit: 5,
     gmgnRankLimit: null,
     gmgnEnrichLimit: null,
+    gmgnInterval: null,
+    gmgnOrderBy: null,
+    gmgnDirection: null,
     gmgnDelayMs: null,
     gmgnHoldersLimit: null,
     gmgnMaxRetries: 0,
@@ -30,6 +33,9 @@ function parseArgs(argv = process.argv.slice(2)) {
     else if (arg === "--limit") args.limit = Number(next());
     else if (arg === "--gmgn-rank-limit") args.gmgnRankLimit = Number(next());
     else if (arg === "--gmgn-enrich-limit" || arg === "--gmgn-max-tokens") args.gmgnEnrichLimit = Number(next());
+    else if (arg === "--gmgn-interval") args.gmgnInterval = next();
+    else if (arg === "--gmgn-order-by") args.gmgnOrderBy = next();
+    else if (arg === "--gmgn-direction") args.gmgnDirection = next();
     else if (arg === "--gmgn-delay-ms") args.gmgnDelayMs = Number(next());
     else if (arg === "--gmgn-holders-limit") args.gmgnHoldersLimit = Number(next());
     else if (arg === "--gmgn-max-retries") args.gmgnMaxRetries = Number(next());
@@ -53,6 +59,9 @@ Options:
   --limit N                  Final candidates per source (default: 5)
   --gmgn-rank-limit N        GMGN /market/rank limit override
   --gmgn-enrich-limit N      GMGN downstream token cap override
+  --gmgn-interval VALUE      GMGN rank interval override (e.g. 5m, 1h, 6h)
+  --gmgn-order-by FIELD      GMGN rank sort override (e.g. volume, swaps)
+  --gmgn-direction asc|desc  GMGN rank sort direction override
   --gmgn-delay-ms N          GMGN request pacing override
   --gmgn-holders-limit N     GMGN holders/traders limit override
   --gmgn-max-retries N       GMGN retries override (default: 0)
@@ -79,6 +88,9 @@ function applyOverrides(args) {
   }
   if (Number.isFinite(args.gmgnRankLimit)) config.gmgn.limit = args.gmgnRankLimit;
   if (Number.isFinite(args.gmgnEnrichLimit)) config.gmgn.enrichLimit = args.gmgnEnrichLimit;
+  if (args.gmgnInterval) config.gmgn.interval = args.gmgnInterval;
+  if (args.gmgnOrderBy) config.gmgn.orderBy = args.gmgnOrderBy;
+  if (args.gmgnDirection) config.gmgn.direction = args.gmgnDirection;
   if (Number.isFinite(args.gmgnDelayMs)) config.gmgn.requestDelayMs = args.gmgnDelayMs;
   if (Number.isFinite(args.gmgnHoldersLimit)) config.gmgn.holdersLimit = args.gmgnHoldersLimit;
   if (Number.isFinite(args.gmgnMaxRetries)) config.gmgn.maxRetries = args.gmgnMaxRetries;
@@ -198,6 +210,8 @@ async function main() {
       gmgn: {
         keyConfigured: Boolean(config.gmgn.apiKey || process.env.GMGN_API_KEY),
         interval: config.gmgn.interval,
+        orderBy: config.gmgn.orderBy,
+        direction: config.gmgn.direction,
         rankLimit: config.gmgn.limit,
         enrichLimit: config.gmgn.enrichLimit,
         requestDelayMs: config.gmgn.requestDelayMs,
