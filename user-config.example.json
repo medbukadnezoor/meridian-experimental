@@ -31,7 +31,7 @@
   "minQuoteOrganic": 45,
   "minHolders": 100,
   "minMcap": 30000,
-  "maxMcap": 800000,
+  "maxMcap": 600000,
   "minBinStep": 50,
   "maxBinStep": 250,
   "minFeeActiveTvlRatio": 0.02,
