@@ -30,6 +30,7 @@ import { execSync, spawn } from "child_process";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 import { log, logAction } from "../logger.js";
+import { appendDecisionContext } from "../decision-context-log.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
 const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
@@ -340,6 +341,21 @@ export async function executeTool(name, args) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
+      if (name === "deploy_position") {
+        appendDecisionContext({
+          stage: "deploy_reject",
+          actor: "SCREENER",
+          pool: args?.pool_address ?? null,
+          poolName: args?.pool_name ?? null,
+          baseMint: args?.base_mint ?? null,
+          reason: safetyCheck.reason,
+          deploy: {
+            safety_block: true,
+            args,
+          },
+          source: "executor.safety_block",
+        });
+      }
       return {
         blocked: true,
         reason: safetyCheck.reason,

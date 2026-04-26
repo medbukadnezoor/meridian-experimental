@@ -34,6 +34,7 @@ const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstre
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
+const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -240,6 +241,22 @@ function runScreenerTrialTelemetryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runDecisionContextLoggingProof() {
+  const result = spawnSync(process.execPath, [DECISION_CONTEXT_LOGGING_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-decision-context-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -258,8 +275,30 @@ function buildChecks() {
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
+  const decisionContextLoggingProof = runDecisionContextLoggingProof();
 
   return [
+    {
+      file: "decision-context-log.js",
+      label: "[Birdeye context] live bot emits offline-first decision-context JSONL without Birdeye in the trading loop",
+      test: (src) =>
+        decisionContextLoggingProof?.success === true &&
+        decisionContextLoggingProof?.log_file_pattern_present === true &&
+        decisionContextLoggingProof?.secret_redaction_present === true &&
+        decisionContextLoggingProof?.no_birdeye_in_live_runtime === true &&
+        decisionContextLoggingProof?.stages?.deterministic_veto === true &&
+        decisionContextLoggingProof?.stages?.indicator_reject === true &&
+        decisionContextLoggingProof?.stages?.cooldown_block === true &&
+        decisionContextLoggingProof?.stages?.deploy_attempt === true &&
+        decisionContextLoggingProof?.stages?.deploy_success === true &&
+        decisionContextLoggingProof?.stages?.deploy_reject === true &&
+        decisionContextLoggingProof?.stages?.close === true &&
+        decisionContextLoggingProof?.stages?.pnl_snapshot_link === true &&
+        decisionContextLoggingProof?.source_safety?.deploys_or_closes_positions === false &&
+        decisionContextLoggingProof?.source_safety?.changes_config === false &&
+        src.includes("appendDecisionContext") &&
+        src.includes("summarizeIndicatorConfirmation"),
+    },
     {
       file: "scripts/verify-upstream-security-hardening.js",
       label: "[Security] upstream envcrypt and relay-signing synthetic proof passes",
@@ -1110,7 +1149,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, and GPT-5.5 screener trial telemetry.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, GPT-5.5 screener trial telemetry, and offline Birdeye decision-context logging.\n");
 
   for (const check of checks) {
     let src = "";

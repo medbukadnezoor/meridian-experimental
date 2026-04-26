@@ -25,6 +25,7 @@ import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
+import { appendDecisionContext } from "../decision-context-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { signAndSimulateRelayTransactions } from "./relay-security.js";
 import {
@@ -432,6 +433,15 @@ export async function deployPosition({
 
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: "Pool on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.pool_cooldown",
+    });
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
   }
 
@@ -440,6 +450,16 @@ export async function deployPosition({
   const baseMint = pool.lbPair.tokenXMint.toString();
   if (isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: "Token on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.token_cooldown",
+    });
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
   const activeBin = await pool.getActiveBin();
@@ -565,6 +585,36 @@ export async function deployPosition({
     range_coverage: rangeCoverage,
   };
   log("deploy_audit", `[range-normalized] ${JSON.stringify(normalizedRangeAudit)}`);
+  appendDecisionContext({
+    stage: "deploy_attempt",
+    actor: "SCREENER",
+    pool: pool_address,
+    poolName: pool_name ?? null,
+    baseMint,
+    reason: "deploy_position called",
+    metrics: {
+      bin_step: actualBinStep,
+      base_fee: base_fee ?? null,
+      volatility: volatility ?? null,
+      fee_tvl_ratio: fee_tvl_ratio ?? null,
+      organic_score: organic_score ?? null,
+      initial_value_usd: initial_value_usd ?? null,
+    },
+    deploy: {
+      raw: {
+        strategy: activeStrategy,
+        amount_x: amount_x ?? null,
+        amount_y: amount_y ?? null,
+        amount_sol: amount_sol ?? null,
+        bins_below: bins_below ?? null,
+        bins_above: bins_above ?? null,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+      normalized: normalizedRangeAudit,
+    },
+    source: "dlmm.deploy.range_normalized",
+  });
 
   const narrowRangeGuard = validateSingleSidedSolBidAskRange({
     activeStrategy,
@@ -579,6 +629,19 @@ export async function deployPosition({
   });
   if (!narrowRangeGuard.ok) {
     log("deploy_reject", `[narrow-range-guard] ${narrowRangeGuard.reason} ${JSON.stringify(narrowRangeGuard.details)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: narrowRangeGuard.reason,
+      deploy: {
+        normalized: normalizedRangeAudit,
+        guard: narrowRangeGuard.details,
+      },
+      source: "dlmm.deploy.narrow_range_guard",
+    });
     throw new Error(narrowRangeGuard.reason);
   }
 
@@ -737,6 +800,32 @@ export async function deployPosition({
           upside_pct: upside_pct ?? upsideCoveragePct,
         },
       });
+      appendDecisionContext({
+        stage: "deploy_success",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        position: positionAddress,
+        reason: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+        metrics: {
+          bin_step: actualBinStep,
+          base_fee: actualBaseFee,
+          volatility: volatility ?? null,
+          fee_tvl_ratio: fee_tvl_ratio ?? null,
+          organic_score: organic_score ?? null,
+        },
+        deploy: {
+          relay: true,
+          request_id: order.requestId,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          range_coverage: rangeCoverage,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_success",
+      });
 
       return {
         success: true,
@@ -763,6 +852,21 @@ export async function deployPosition({
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        reason: error.message,
+        deploy: {
+          relay: true,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_error",
+      });
       return { success: false, error: error.message };
     }
   }
@@ -872,6 +976,31 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
       },
     });
+    appendDecisionContext({
+      stage: "deploy_success",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      position: newPosition.publicKey.toString(),
+      reason: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      metrics: {
+        bin_step: actualBinStep,
+        base_fee: actualBaseFee,
+        volatility: volatility ?? null,
+        fee_tvl_ratio: fee_tvl_ratio ?? null,
+        organic_score: organic_score ?? null,
+      },
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_success",
+    });
 
     return {
       success: true,
@@ -896,6 +1025,21 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_error",
+    });
     return { success: false, error: error.message };
   }
 }
@@ -1802,6 +1946,29 @@ export async function closePosition({ position_address, reason, urgent }) {
               minutes_held: minutesHeld,
             },
           });
+          appendDecisionContext({
+            stage: "close",
+            actor: "MANAGER",
+            pool: poolAddress,
+            poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            baseMint: livePosition?.base_mint || null,
+            position: position_address,
+            reason: reason || "agent decision",
+            metrics: {
+              pnl_sol: pnlUsd,
+              pnl_pct: pnlPct,
+              fees_sol: feesUsd,
+              minutes_held: minutesHeld,
+              minutes_out_of_range: minutesOOR,
+            },
+            close: {
+              relay: true,
+              urgent: !!urgent,
+              request_id: order.requestId,
+              txs: txHashes,
+            },
+            source: "dlmm.close.relay_success",
+          });
 
           return {
             success: true,
@@ -1828,6 +1995,23 @@ export async function closePosition({ position_address, reason, urgent }) {
           summary: "Relay closed position",
           reason: reason || "agent decision",
           metrics: {},
+        });
+        appendDecisionContext({
+          stage: "close",
+          actor: "MANAGER",
+          pool: poolAddress,
+          poolName: poolMeta.name || poolAddress.slice(0, 8),
+          baseMint: livePosition?.base_mint || null,
+          position: position_address,
+          reason: reason || "agent decision",
+          metrics: {},
+          close: {
+            relay: true,
+            urgent: !!urgent,
+            request_id: order.requestId,
+            txs: txHashes,
+          },
+          source: "dlmm.close.relay_success_untracked",
         });
 
         return {
@@ -2095,6 +2279,28 @@ export async function closePosition({ position_address, reason, urgent }) {
           minutes_held: minutesHeld,
         },
       });
+      appendDecisionContext({
+        stage: "close",
+        actor: "MANAGER",
+        pool: poolAddress,
+        poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+        baseMint: pool.lbPair.tokenXMint.toString(),
+        position: position_address,
+        reason: reason || "agent decision",
+        metrics: {
+          pnl_sol: pnlUsd,
+          pnl_pct: pnlPct,
+          fees_sol: feesUsd,
+          minutes_held: minutesHeld,
+          minutes_out_of_range: minutesOOR,
+        },
+        close: {
+          relay: false,
+          urgent: !!urgent,
+          txs: txHashes,
+        },
+        source: "dlmm.close.local_success",
+      });
 
       return {
         success: true,
@@ -2120,6 +2326,22 @@ export async function closePosition({ position_address, reason, urgent }) {
       reason: reason || "agent decision",
       metrics: {},
     });
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      pool: poolAddress,
+      poolName: poolMeta.name || poolAddress.slice(0, 8),
+      baseMint: pool.lbPair.tokenXMint.toString(),
+      position: position_address,
+      reason: reason || "agent decision",
+      metrics: {},
+      close: {
+        relay: false,
+        urgent: !!urgent,
+        txs: txHashes,
+      },
+      source: "dlmm.close.local_success_untracked",
+    });
 
     return {
       success: true,
@@ -2133,6 +2355,18 @@ export async function closePosition({ position_address, reason, urgent }) {
     };
   } catch (error) {
     log("close_error", error.message);
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      position: position_address,
+      reason: error.message,
+      close: {
+        success: false,
+        urgent: !!urgent,
+        requested_reason: reason || null,
+      },
+      source: "dlmm.close.error",
+    });
     return { success: false, error: error.message };
   }
 }

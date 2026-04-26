@@ -23,6 +23,7 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import { appendDecisionContext } from "./decision-context-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
@@ -127,6 +128,25 @@ function appendPnlSnapshot(wallet, position, exit = null) {
     };
     const dateStr = now.toISOString().slice(0, 10);
     fs.appendFileSync(path.join(PNL_SNAPSHOT_LOG_DIR, `pnl-snapshots-${dateStr}.jsonl`), JSON.stringify(entry) + "\n");
+    appendDecisionContext({
+      ts: entry.ts,
+      stage: "pnl_snapshot_link",
+      actor: "MANAGER",
+      pool: entry.pool,
+      poolName: entry.poolName,
+      baseMint: entry.baseMint,
+      position: entry.position,
+      reason: entry.stopCandidate ? "PnL snapshot crossed stop candidate state" : "PnL snapshot",
+      metrics: {
+        age_min: entry.ageMin,
+        pnl_pct: entry.pnlPct,
+        peak_pnl_pct: entry.peakPnlPct,
+        trailing_active: entry.trailingActive,
+        in_range: entry.inRange,
+        stop_candidate: entry.stopCandidate,
+      },
+      source: `pnl-snapshots-${dateStr}.jsonl`,
+    });
     if (config.management.pnlSnapshotDebug) {
       log("state", `[PnL snapshot] ${entry.poolName ?? entry.position?.slice(0, 8) ?? "position"} PnL=${entry.pnlPct ?? "?"}%`);
     }

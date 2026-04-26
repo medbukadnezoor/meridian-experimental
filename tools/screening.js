@@ -5,6 +5,11 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
+import {
+  appendDecisionContext,
+  buildCandidateDecisionContext,
+  summarizeIndicatorConfirmation,
+} from "../decision-context-log.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -486,11 +491,33 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       if (isPoolOnCooldown(p.pool)) {
         log("screening", `Filtered cooldown pool ${p.name} (${p.pool.slice(0, 8)})`);
+        appendDecisionContext({
+          stage: "cooldown_block",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: "pool cooldown active",
+          metrics: buildCandidateDecisionContext(p),
+          source: "screening.pool_cooldown",
+        });
         pushFilteredReason(filteredOut, p, "pool cooldown active");
         return false;
       }
       if (isBaseMintOnCooldown(p.base?.mint)) {
         log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        appendDecisionContext({
+          stage: "cooldown_block",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: "token cooldown active",
+          metrics: buildCandidateDecisionContext(p),
+          source: "screening.token_cooldown",
+        });
         pushFilteredReason(filteredOut, p, "token cooldown active");
         return false;
       }
@@ -577,6 +604,20 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
       if (vetoReason) {
         log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
+        appendDecisionContext({
+          stage: "deterministic_veto",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: vetoReason,
+          metrics: {
+            ...buildCandidateDecisionContext(p),
+            veto_audit: getDeterministicVetoAuditSnapshot(p),
+          },
+          source: "screening.deterministic_veto",
+        });
         pushFilteredReason(filteredOut, p, vetoReason, {
           priority: true,
           audit: getDeterministicVetoAuditSnapshot(p),
@@ -660,6 +701,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
+      appendDecisionContext({
+        stage: "indicator_reject",
+        actor: "SCREENER",
+        pool: pool.pool,
+        poolName: pool.name,
+        baseMint: pool.base?.mint ?? null,
+        quoteMint: pool.quote?.mint ?? null,
+        reason: confirmation.reason,
+        metrics: buildCandidateDecisionContext(pool),
+        chart: summarizeIndicatorConfirmation(confirmation),
+        source: "screening.indicator_confirmation",
+      });
       return false;
     });
     eligible.splice(0, eligible.length, ...confirmedEligible);
