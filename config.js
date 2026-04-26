@@ -110,6 +110,11 @@ export const config = {
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
+    stopLossConfirmDelayMs: Math.max(0, Number(u.stopLossConfirmDelayMs ?? 0)),
+    hardStopLossPct:        u.hardStopLossPct        ?? null,
+    stopLossFastClosePct:   u.stopLossFastClosePct   ?? null,
+    stopLossVelocityWindowMs: Math.max(0, Number(u.stopLossVelocityWindowMs ?? 0)),
+    stopLossVelocityClosePct: u.stopLossVelocityClosePct ?? null,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close

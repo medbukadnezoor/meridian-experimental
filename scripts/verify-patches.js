@@ -24,6 +24,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
+const STOP_LOSS_TRIAL_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -73,9 +74,26 @@ function runNarrowRangeGuardProof() {
   return JSON.parse(result.stdout);
 }
 
+function runStopLossTrialProof() {
+  const result = spawnSync(process.execPath, [STOP_LOSS_TRIAL_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-stop-loss-trial-behavior failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
+const stopLossTrialProof = runStopLossTrialProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
@@ -153,6 +171,26 @@ const checks = [
       narrowRangeGuardProof?.source_markers?.normalized_audit_log === true &&
       narrowRangeGuardProof?.source_markers?.rejection_audit_log === true &&
       narrowRangeGuardProof?.source_markers?.schema_zero_pct_warning === true,
+  },
+
+  {
+    file: 'scripts/verify-stop-loss-trial-behavior.js',
+    label: '[Runtime] Confirmed soft stop-loss, fast/hard urgent stop-loss, and early-dump behavior',
+    test: () =>
+      stopLossTrialProof?.success === true &&
+      stopLossTrialProof?.softCandidate?.action === 'STOP_LOSS_CANDIDATE' &&
+      stopLossTrialProof?.softCandidate?.needsConfirmation === true &&
+      Number(stopLossTrialProof?.softCandidate?.confirmDelayMs) === 15000 &&
+      stopLossTrialProof?.fastStop?.action === 'STOP_LOSS' &&
+      stopLossTrialProof?.fastStop?.urgent === true &&
+      stopLossTrialProof?.hardStop?.action === 'STOP_LOSS' &&
+      stopLossTrialProof?.hardStop?.urgent === true &&
+      stopLossTrialProof?.earlyDump?.action === 'STOP_LOSS' &&
+      stopLossTrialProof?.legacyNoDelay?.action === 'STOP_LOSS' &&
+      stopLossTrialProof?.confirmedRecheck?.confirmed === true &&
+      stopLossTrialProof?.rejectedRecheck?.rejected === true &&
+      stopLossTrialProof?.tempStateFileCreated === true &&
+      stopLossTrialProof?.tempDirRemoved === true,
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)

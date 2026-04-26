@@ -10,10 +10,12 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 
 const STATE_FILE = "./state.json";
 
 const MAX_RECENT_EVENTS = 20;
+const MAX_PNL_HISTORY_POINTS = 30;
 const MAX_INSTRUCTION_LENGTH = 280;
 const GHOST_POSITION_GRACE_MS = 10 * 60_000;
 const GHOST_VALUE_EPSILON = 0.0001;
@@ -60,6 +62,40 @@ function save(state) {
 function toFiniteNumber(value, fallback = 0) {
   const num = Number(value);
   return Number.isFinite(num) ? num : fallback;
+}
+
+function toFiniteNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, nowMs = Date.now()) {
+  const current = toFiniteNumberOrNull(currentPnlPct);
+  if (!pos || current == null) {
+    return { changed: false, velocity: { dropPct: null, elapsedMs: null, baselinePnlPct: null }, initialized: false };
+  }
+
+  const existing = Array.isArray(pos.pnl_history) ? pos.pnl_history : [];
+  const velocity = calculatePnlVelocityDrop(existing, current, velocityWindowMs, nowMs);
+  const historyWindowMs = Math.max(Number(velocityWindowMs ?? 0) * 3, 10 * 60_000);
+  const cutoffMs = nowMs - historyWindowMs;
+  const pruned = existing
+    .filter((point) => {
+      const tsMs = new Date(point?.ts).getTime();
+      return Number.isFinite(tsMs) && tsMs >= cutoffMs && toFiniteNumberOrNull(point?.pnl_pct) != null;
+    })
+    .slice(-(MAX_PNL_HISTORY_POINTS - 1));
+
+  pruned.push({
+    ts: new Date(nowMs).toISOString(),
+    pnl_pct: Number(current.toFixed(4)),
+  });
+
+  const initialized = existing.length === 0;
+  pos.pnl_history = pruned;
+  if (initialized) pos.pnl_history_started_at = new Date(nowMs).toISOString();
+  return { changed: true, velocity, initialized };
 }
 
 function isGhostLikeLivePosition(position) {
@@ -138,6 +174,8 @@ export function trackPosition({
     pending_trailing_current_pnl_pct: null,
     pending_trailing_peak_pnl_pct: null,
     pending_trailing_drop_pct: null,
+    pnl_history: [],
+    pnl_history_started_at: null,
     pending_trailing_started_at: null,
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
@@ -514,6 +552,31 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
+  const velocityWindowMs = Math.max(0, Number(mgmtConfig.stopLossVelocityWindowMs ?? 0));
+  const pnlHistory = appendPnlHistory(pos, currentPnlPct, velocityWindowMs);
+  if (pnlHistory.changed) {
+    if (pnlHistory.initialized && velocityWindowMs > 0) {
+      log("state", `Position ${position_address} PnL velocity history initialized; velocity stop needs one prior sample`);
+    }
+    save(state);
+  }
+
+  // Hard/fast/velocity stops outrank early dump so the owner sees the strongest
+  // time-critical reason instead of a generic young-position label.
+  if (!pnl_pct_suspicious) {
+    const immediateStopLossDecision = buildStopLossExitDecision({
+      currentPnlPct,
+      managementConfig: mgmtConfig,
+      velocityDropPct: pnlHistory.velocity.dropPct,
+      velocityElapsedMs: pnlHistory.velocity.elapsedMs,
+      immediateAction: "STOP_LOSS",
+      includeSoftStop: false,
+    });
+    if (immediateStopLossDecision) {
+      return immediateStopLossDecision;
+    }
+  }
+
   // ── Early dump detection (young position losing fast) ─────────
   const earlyDumpPct = mgmtConfig.earlyDumpPct ?? null;        // e.g. -2
   const earlyDumpMaxAgeMin = mgmtConfig.earlyDumpMaxAgeMin ?? 30;
@@ -533,11 +596,17 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
-    return {
-      action: "STOP_LOSS",
-      reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
-    };
+  if (!pnl_pct_suspicious) {
+    const stopLossDecision = buildStopLossExitDecision({
+      currentPnlPct,
+      managementConfig: mgmtConfig,
+      velocityDropPct: pnlHistory.velocity.dropPct,
+      velocityElapsedMs: pnlHistory.velocity.elapsedMs,
+      immediateAction: "STOP_LOSS",
+    });
+    if (stopLossDecision) {
+      return stopLossDecision;
+    }
   }
 
   // ── Trailing TP ────────────────────────────────────────────────

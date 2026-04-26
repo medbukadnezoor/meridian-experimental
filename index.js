@@ -23,6 +23,7 @@ import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnable
 import { appendDecision } from "./decision-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
+import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -71,6 +72,7 @@ let _screeningLastTriggered = 0; // epoch ms — prevents management from spammi
 let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered management
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
+const _stopLossConfirmTimers = new Map();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
@@ -164,6 +166,81 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   _trailingDropConfirmTimers.set(positionAddress, timer);
 }
 
+function finiteNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatPct(value) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? "?" : num.toFixed(2);
+}
+
+function scheduleStopLossConfirmation(position, exit) {
+  const positionAddress = position?.position;
+  const delayMs = Math.max(0, Number(exit?.confirm_delay_ms ?? config.management.stopLossConfirmDelayMs ?? 0));
+  const stopLossPct = finiteNumberOrNull(exit?.stop_loss_pct ?? config.management.stopLossPct);
+  const candidatePnlPct = finiteNumberOrNull(exit?.current_pnl_pct ?? position?.pnl_pct);
+  const pair = position?.pair ?? positionAddress?.slice(0, 8) ?? "position";
+
+  if (!positionAddress || delayMs <= 0 || stopLossPct == null) return false;
+  if (_stopLossConfirmTimers.has(positionAddress)) return false;
+
+  log(
+    "state",
+    `[Stop loss candidate] ${pair} PnL=${formatPct(candidatePnlPct)}% <= ${stopLossPct}% - rechecking in ${Math.round(delayMs / 1000)}s`,
+  );
+
+  const timer = setTimeout(async () => {
+    _stopLossConfirmTimers.delete(positionAddress);
+    try {
+      const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const latest = result?.positions?.find((p) => p.position === positionAddress);
+      const currentPnlPct = finiteNumberOrNull(latest?.pnl_pct);
+      const latestPair = latest?.pair ?? pair;
+
+      const confirmation = buildStopLossConfirmationResult({
+        currentPnlPct,
+        stopLossPct,
+        delayMs,
+        candidatePnlPct,
+        pair: latestPair,
+      });
+
+      if (confirmation.confirmed) {
+        const reason = confirmation.closeReason;
+        log("state", confirmation.logMessage);
+        _pollTriggeredAt = Date.now();
+        try {
+          const closeResult = await executeTool("close_position", {
+            position_address: positionAddress,
+            reason,
+            urgent: true,
+          });
+          if (closeResult?.success) {
+            log("state", `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
+          } else {
+            log("state", `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+          }
+        } catch (error) {
+          log("cron_error", `Confirmed stop-loss close error: ${error.message}`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+        }
+        return;
+      }
+
+      log("state", confirmation.logMessage);
+    } catch (error) {
+      log("state_warn", `Stop-loss confirmation failed for ${positionAddress}: ${error.message}`);
+    }
+  }, delayMs);
+
+  _stopLossConfirmTimers.set(positionAddress, timer);
+  return true;
+}
+
 
 async function runBriefing() {
   log("cron", "Starting morning briefing");
@@ -200,6 +277,8 @@ async function maybeRunMissedBriefing() {
 function stopCronJobs() {
   for (const task of _cronTasks) task.stop();
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
+  for (const timer of _stopLossConfirmTimers.values()) clearTimeout(timer);
+  _stopLossConfirmTimers.clear();
   _cronTasks = [];
 }
 
@@ -247,6 +326,10 @@ export async function runManagementCycle({ silent = false } = {}) {
           }
           continue;
         }
+        if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
+          scheduleStopLossConfirmation(p, exit);
+          continue;
+        }
         exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
@@ -286,6 +369,10 @@ export async function runManagementCycle({ silent = false } = {}) {
 
       const closeRule = getDeterministicCloseRule(p, config.management);
       if (closeRule) {
+        if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
+          scheduleStopLossConfirmation(p, closeRule);
+          continue;
+        }
         if (closeRule.reason === "low yield") {
           const tracked = getTrackedPosition(p.position);
           if (!tracked) {
@@ -841,6 +928,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         if (exit) {
+          if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
+            scheduleStopLossConfirmation(p, exit);
+            continue;
+          }
           const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
           if (!indicatorConfirmation.confirmed) {
             log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
@@ -862,6 +953,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
                 const result = await executeTool("close_position", {
                   position_address: p.position,
                   reason: exit.reason,
+                  urgent: true,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
@@ -893,6 +985,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
+          if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
+            scheduleStopLossConfirmation(p, closeRule);
+            continue;
+          }
           // Rule 1 (stop loss) is time-critical — bypass indicator check and cooldown, close directly
           const isStopLossRule = closeRule.rule === 1;
           if (isStopLossRule) {
@@ -903,6 +999,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
                 const result = await executeTool("close_position", {
                   position_address: p.position,
                   reason: closeRule.reason,
+                  urgent: true,
                 });
                 if (result?.success) {
                   log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
@@ -999,8 +1096,22 @@ function getDeterministicCloseRule(position, managementConfig) {
     return false;
   })();
 
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct <= managementConfig.stopLossPct) {
-    return { action: "CLOSE", rule: 1, reason: "stop loss" };
+  const currentPnlPct = finiteNumberOrNull(position.pnl_pct);
+  if (!pnlSuspect) {
+    const velocity = calculatePnlVelocityDrop(
+      tracked?.pnl_history,
+      currentPnlPct,
+      managementConfig.stopLossVelocityWindowMs,
+    );
+    const stopLossDecision = buildStopLossExitDecision({
+      currentPnlPct,
+      managementConfig,
+      velocityDropPct: velocity.dropPct,
+      velocityElapsedMs: velocity.elapsedMs,
+      immediateAction: "CLOSE",
+      rule: 1,
+    });
+    if (stopLossDecision) return stopLossDecision;
   }
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
@@ -1096,7 +1207,7 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.binsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}% | stop-loss bypasses poll wait ✓`,
+    `Stop loss: ${config.management.stopLossPct}%${config.management.stopLossConfirmDelayMs ? ` confirmed after ${Math.round(config.management.stopLossConfirmDelayMs / 1000)}s` : ""} | fast ${config.management.stopLossFastClosePct ?? "off"}% | hard ${config.management.hardStopLossPct ?? "off"}% | take profit: ${config.management.takeProfitPct}%`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,

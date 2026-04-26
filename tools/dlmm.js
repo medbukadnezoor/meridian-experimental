@@ -1858,7 +1858,9 @@ export async function closePosition({ position_address, reason, urgent }) {
     // ─── Step 1: Claim Fees (to clear account state) ───────────
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
     try {
-      if (recentlyClaimed) {
+      if (urgent) {
+        log("close", `Step 1: Skipping separate fee claim for urgent close — removeLiquidity will claim and close atomically`);
+      } else if (recentlyClaimed) {
         log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
       } else {
         log("close", `Step 1: Claiming fees for ${position_address}`);
