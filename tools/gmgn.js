@@ -216,9 +216,11 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
     const codeFailure = payload?.code != null && Number(payload.code) !== 0;
     const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+    const retryAfterHeader = res.headers.get("retry-after");
+    const rateLimitResetHeader = res.headers.get("x-ratelimit-reset");
     if (res.ok && !codeFailure) return payload;
     if (rateLimited && attempt < maxRetries) {
-      const retryAfter = Number(res.headers.get("retry-after"));
+      const retryAfter = Number(retryAfterHeader);
       const backoffMs = Number.isFinite(retryAfter)
         ? retryAfter * 1000
         : /temporarily banned/i.test(String(message))
@@ -230,6 +232,10 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     const error = new Error(message);
     error.status = res.status;
     error.code = payload?.code ?? null;
+    error.apiError = payload?.error ?? null;
+    error.retryAfter = retryAfterHeader ?? null;
+    error.rateLimitReset = rateLimitResetHeader ?? null;
+    error.pathname = pathname;
     error.accountWarning = /temporarily banned|account|1010|forbidden|whitelist/i.test(String(message));
     throw error;
   }
