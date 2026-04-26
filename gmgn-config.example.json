@@ -11,7 +11,7 @@
   "holdersLimit": 20,
   "filters": ["renounced", "frozen", "not_wash_trading"],
   "platforms": ["Pump.fun", "meteora_virtual_curve", "pool_meteora"],
-  "minMcap": 800000,
+  "minMcap": 700000,
   "maxMcap": 5000000,
   "minTvl": 20000,
   "minVolume": 1000,
