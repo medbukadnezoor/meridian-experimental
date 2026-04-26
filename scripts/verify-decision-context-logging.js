@@ -41,7 +41,9 @@ const proof = {
   no_birdeye_in_live_runtime: activeRuntimeSources.every(([, text]) => !/birdeye/i.test(text)),
   stages: {
     deterministic_veto: screening.includes('stage: "deterministic_veto"'),
-    indicator_reject: screening.includes('stage: "indicator_reject"'),
+    indicator_reject: screening.includes('"indicator_reject"') && screening.includes("getIndicatorDecisionStage"),
+    indicator_accept: screening.includes('"indicator_accept"') && screening.includes("getIndicatorDecisionStage"),
+    indicator_skip: screening.includes('"indicator_skip"') && screening.includes("getIndicatorDecisionStage"),
     cooldown_block: screening.includes('stage: "cooldown_block"'),
     deploy_attempt: dlmm.includes('stage: "deploy_attempt"'),
     deploy_success: dlmm.includes('stage: "deploy_success"'),

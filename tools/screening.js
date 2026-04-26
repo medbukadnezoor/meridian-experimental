@@ -240,6 +240,11 @@ export function getDeterministicVetoAuditSnapshot(candidate = {}) {
   };
 }
 
+function getIndicatorDecisionStage(confirmation = {}) {
+  if (confirmation.skipped) return "indicator_skip";
+  return confirmation.confirmed ? "indicator_accept" : "indicator_reject";
+}
+
 export function formatDeterministicVetoAuditLine(candidate = {}, reason = "deterministic veto") {
   const name = candidate.name || `${candidate.base?.symbol || "?"}-${candidate.quote?.symbol || "?"}`;
   const snapshot = getDeterministicVetoAuditSnapshot(candidate);
@@ -698,21 +703,23 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     const confirmedEligible = eligible.filter((pool) => {
       const confirmation = confirmationByPool.get(pool.pool);
       pool.indicator_confirmation = confirmation || null;
+      if (confirmation) {
+        appendDecisionContext({
+          stage: getIndicatorDecisionStage(confirmation),
+          actor: "SCREENER",
+          pool: pool.pool,
+          poolName: pool.name,
+          baseMint: pool.base?.mint ?? null,
+          quoteMint: pool.quote?.mint ?? null,
+          reason: confirmation.reason,
+          metrics: buildCandidateDecisionContext(pool),
+          chart: summarizeIndicatorConfirmation(confirmation),
+          source: "screening.indicator_confirmation",
+        });
+      }
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
-      appendDecisionContext({
-        stage: "indicator_reject",
-        actor: "SCREENER",
-        pool: pool.pool,
-        poolName: pool.name,
-        baseMint: pool.base?.mint ?? null,
-        quoteMint: pool.quote?.mint ?? null,
-        reason: confirmation.reason,
-        metrics: buildCandidateDecisionContext(pool),
-        chart: summarizeIndicatorConfirmation(confirmation),
-        source: "screening.indicator_confirmation",
-      });
       return false;
     });
     eligible.splice(0, eligible.length, ...confirmedEligible);

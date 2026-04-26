@@ -10,7 +10,7 @@ Live DLMM LP bot for Meteora on Solana. This is the production codebase — `exp
 ## Current Operational Context
 [CONFIRMED] Bot Version: **v1.0.9** (Enabled solMode + TP 4% on 2026-04-13)
 [CONFIRMED] Bot Host: VPS **ohox** (TencentCloud Singapore, 43.156.182.93) under PM2.
-[CONFIRMED] Current VPS PM2 runtime state (2026-04-25): main `stopped` and nanocap `online` after the relay-fallback + Telegram-visibility + update_config hardening rollout. Verify with `ssh ohox ms` / `ssh ohox ncs` before restart.
+[CONFIRMED] Current VPS PM2 runtime state (2026-04-26): main `stopped` and nanocap `online` after the relay-fallback + Telegram-visibility + update_config hardening rollout. Verify with `ssh ohox ms` / `ssh ohox ncs` before restart.
 [CONFIRMED] Security Status: ACTIVE (8 patches maintained).
 [CONFIRMED] Active Role Models: main uses `qwen3.6-plus` via DashScope Singapore for all roles. Nanocap uses GPT-5.4 via CLIProxy on `ohox` for SCREENER only with `screeningReasoningEffort=high`; nanocap MANAGER and GENERAL remain `qwen3.6-plus` via DashScope Singapore.
 [CONFIRMED] **takeProfitPct: 4%**. `takeProfitFeePct` is still present in live config for compatibility, but current live branches treat it as a fallback alias into `takeProfitPct`, not as a separate runtime fee gate.

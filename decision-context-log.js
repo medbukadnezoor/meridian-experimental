@@ -71,6 +71,7 @@ export function summarizeIndicatorConfirmation(confirmation = null) {
     side: confirmation.side ?? null,
     requireAllIntervals: confirmation.requireAllIntervals ?? null,
     reason: confirmation.reason ?? null,
+    shadow_quality_gates: confirmation.shadow_quality_gates ?? null,
     intervals,
   };
 }

@@ -104,6 +104,7 @@ function buildProof(imported, requestedUserConfigPath) {
       rsiLength: imported.config.indicators.rsiLength,
       rsiOversold: imported.config.indicators.rsiOversold,
       rsiOverbought: imported.config.indicators.rsiOverbought,
+      requireAllIntervals: imported.config.indicators.requireAllIntervals,
     },
     performance: {
       materialWinPct: imported.config.performance.materialWinPct,

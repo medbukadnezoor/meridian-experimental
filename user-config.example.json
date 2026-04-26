@@ -160,10 +160,11 @@
 
   "chartIndicators": {
     "enabled": true,
-    "entryPreset": "rsi_reversal",
+    "entryPreset": "bollinger_reversion",
     "exitPreset": null,
     "rsiLength": 2,
-    "intervals": ["5_MINUTE"],
+    "intervals": ["5_MINUTE", "15_MINUTE"],
+    "requireAllIntervals": false,
     "rsiOversold": 30,
     "rsiOverbought": 80
   }

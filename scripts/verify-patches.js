@@ -35,6 +35,7 @@ const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-e
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
+const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -257,6 +258,22 @@ function runDecisionContextLoggingProof() {
   return JSON.parse(result.stdout);
 }
 
+function runNanocapBollingerCanaryProof() {
+  const result = spawnSync(process.execPath, [NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-nanocap-bollinger-canary failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -276,6 +293,7 @@ function buildChecks() {
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
+  const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
 
   return [
     {
@@ -966,15 +984,29 @@ function buildChecks() {
     },
     {
       file: "user-config.example.json",
-      label: "[Runtime] nanocap example resolves 5m RSI entry interval",
+      label: "[Runtime] nanocap example resolves Bollinger 5m OR 15m entry canary",
       test: () =>
         exampleProof.userConfigExists === true &&
         exampleProof?.indicators?.enabled === true &&
-        exampleProof?.indicators?.entryPreset === "rsi_reversal" &&
+        exampleProof?.indicators?.entryPreset === "bollinger_reversion" &&
         exampleProof?.indicators?.exitPreset === null &&
+        Number(exampleProof?.indicators?.rsiLength) === 2 &&
+        exampleProof?.indicators?.requireAllIntervals === false &&
         Array.isArray(exampleProof?.indicators?.intervals) &&
-        exampleProof.indicators.intervals.length === 1 &&
-        exampleProof.indicators.intervals[0] === "5_MINUTE",
+        exampleProof.indicators.intervals.length === 2 &&
+        exampleProof.indicators.intervals[0] === "5_MINUTE" &&
+        exampleProof.indicators.intervals[1] === "15_MINUTE",
+    },
+    {
+      file: "scripts/verify-nanocap-bollinger-canary.js",
+      label: "[Runtime] nanocap Bollinger canary proof wires shadow quality gates",
+      test: () =>
+        nanocapBollingerCanaryProof?.success === true &&
+        nanocapBollingerCanaryProof?.exampleConfig?.entryPreset === "bollinger_reversion" &&
+        nanocapBollingerCanaryProof?.exampleConfig?.requireAllIntervals === false &&
+        nanocapBollingerCanaryProof?.shadowGate?.strictPass === true &&
+        nanocapBollingerCanaryProof?.decisionContext?.shadowQualityGatesSummarized === true &&
+        nanocapBollingerCanaryProof?.sourceSafety?.noBirdeyeInLiveRuntime === true,
     },
     {
       file: "user-config.example.json",
