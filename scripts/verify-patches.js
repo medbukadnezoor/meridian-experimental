@@ -23,6 +23,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
+const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -56,8 +57,25 @@ function runUpstreamSecurityHardeningProof() {
   return JSON.parse(result.stdout);
 }
 
+function runNarrowRangeGuardProof() {
+  const result = spawnSync(process.execPath, [NARROW_RANGE_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-narrow-range-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
+const narrowRangeGuardProof = runNarrowRangeGuardProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
@@ -116,7 +134,25 @@ const checks = [
       earlyDumpProof?.poolCooldownReason === 'early dump' &&
       earlyDumpProof?.tokenCooldownReason === 'early dump' &&
       earlyDumpProof?.tempStateFileCreated === true &&
-      earlyDumpProof?.tempDirRemoved === true,
+        earlyDumpProof?.tempDirRemoved === true,
+  },
+
+  {
+    file: 'scripts/verify-narrow-range-guard.js',
+    label: '[Runtime] Narrow single-side SOL deploy guard ignores zero pct overrides and rejects zero/1-bin ranges',
+    test: () =>
+      narrowRangeGuardProof?.success === true &&
+      Number(narrowRangeGuardProof?.incident_zero_pct?.normalized?.activeBinsBelow) === 47 &&
+      narrowRangeGuardProof?.incident_zero_pct?.normalized?.percent_inputs?.downside_pct_used === false &&
+      narrowRangeGuardProof?.incident_zero_pct?.normalized?.percent_inputs?.upside_pct_used === false &&
+      narrowRangeGuardProof?.incident_zero_pct?.guard_ok === true &&
+      Array.isArray(narrowRangeGuardProof?.rejected) &&
+      narrowRangeGuardProof.rejected.some((row) => row?.bins_below === 0 && String(row?.reason || '').includes('zero-width bin range')) &&
+      narrowRangeGuardProof.rejected.some((row) => row?.bins_below === 1 && String(row?.reason || '').includes('absolute floor 5')) &&
+      narrowRangeGuardProof?.source_markers?.raw_audit_log === true &&
+      narrowRangeGuardProof?.source_markers?.normalized_audit_log === true &&
+      narrowRangeGuardProof?.source_markers?.rejection_audit_log === true &&
+      narrowRangeGuardProof?.source_markers?.schema_zero_pct_warning === true,
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)

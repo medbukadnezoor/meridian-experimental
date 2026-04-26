@@ -29,6 +29,13 @@ export function firstNonEmptyString(...values) {
   return undefined;
 }
 
+const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+
+export function normalizeScreeningReasoningEffort(value) {
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return SCREENING_REASONING_EFFORTS.has(normalized) ? normalized : null;
+}
+
 export const INTERNAL_FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
 
 export function resolveFallbackModel(configuredFallbackModel) {
@@ -126,6 +133,8 @@ export const config = {
   strategy: {
     strategy:  u.strategy  ?? "bid_ask",
     binsBelow: u.binsBelow ?? 69,
+    minSingleSidedSolBins: u.minSingleSidedSolBins ?? 5,
+    minSingleSidedSolDownsidePct: u.minSingleSidedSolDownsidePct ?? null,
   },
 
   // ─── Scheduling ─────────────────────────
@@ -147,6 +156,7 @@ export const config = {
     // Per-role endpoint overrides — null falls back to global llmBaseUrl / llmApiKey
     screeningBaseUrl: u.screeningBaseUrl ?? null,
     screeningApiKey:  u.screeningApiKey  ?? null,
+    screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
     managementBaseUrl: u.managementBaseUrl ?? null,
     managementApiKey:  u.managementApiKey  ?? null,
     generalBaseUrl: u.generalBaseUrl ?? null,

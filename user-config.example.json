@@ -17,6 +17,8 @@
 
   "strategy": "bid_ask",
   "binsBelow": 69,
+  "minSingleSidedSolBins": 35,
+  "minSingleSidedSolDownsidePct": 1,
 
   "timeframe": "4h",
   "category": "trending",
@@ -81,6 +83,7 @@
   "generalModel": "qwen3.6-plus",
   "screeningBaseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   "screeningApiKey": "YOUR_DASHSCOPE_API_KEY",
+  "screeningReasoningEffort": null,
   "managementBaseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   "managementApiKey": "YOUR_DASHSCOPE_API_KEY",
   "generalBaseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",

@@ -252,10 +252,14 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          if (agentType === "SCREENER" && config.llm.screeningReasoningEffort) {
+            callParams.reasoning_effort = config.llm.screeningReasoningEffort;
+          }
           response = await getClient(agentType).chat.completions.create(callParams);
           logApiActivity({
             agent: agentType,
             model: usedModel,
+            reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null,
             duration_ms: Date.now() - startTime,
             status: "success",
             tokens: response?.usage?.total_tokens || 0,
@@ -266,6 +270,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           logApiActivity({
             agent: agentType,
             model: usedModel,
+            reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null,
             duration_ms: Date.now() - startTime,
             status: "error",
             error: String(error?.message || error?.error?.message || error),

@@ -27,6 +27,10 @@ import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { signAndSimulateRelayTransactions } from "./relay-security.js";
+import {
+  normalizeDeployRangeInputs,
+  validateSingleSidedSolBidAskRange,
+} from "./deploy-range-guard.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -442,25 +446,39 @@ export async function deployPosition({
   const actualBinStep = pool.lbPair.binStep;
   const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
 
-  if (downside_pct != null || upside_pct != null) {
-    const downsidePct = Math.max(0, Number(downside_pct ?? 0));
-    const upsidePct = Math.max(0, Number(upside_pct ?? 0));
+  log("deploy_audit", `[range-raw] ${JSON.stringify({
+    pool_address,
+    pool_name: pool_name ?? null,
+    strategy: activeStrategy,
+    amount_x: amount_x ?? null,
+    amount_y: amount_y ?? null,
+    amount_sol: amount_sol ?? null,
+    bins_below: bins_below ?? null,
+    bins_above: bins_above ?? null,
+    downside_pct: downside_pct ?? null,
+    upside_pct: upside_pct ?? null,
+    active_bin: activeBin.binId,
+    bin_step: actualBinStep,
+    base_fee: base_fee ?? null,
+    volatility: volatility ?? null,
+    fee_tvl_ratio: fee_tvl_ratio ?? null,
+    organic_score: organic_score ?? null,
+    initial_value_usd: initial_value_usd ?? null,
+  })}`);
 
-    if (!Number.isFinite(downsidePct) || !Number.isFinite(upsidePct)) {
-      throw new Error("downside_pct and upside_pct must be valid numbers.");
-    }
-    if (downsidePct >= 100) {
-      throw new Error("downside_pct must be less than 100.");
-    }
-
-    const lowerTargetPrice = activePrice * (1 - downsidePct / 100);
-    const upperTargetPrice = activePrice * (1 + upsidePct / 100);
-    const lowerBinId = getBinIdFromPrice(lowerTargetPrice, actualBinStep, true);
-    const upperBinId = getBinIdFromPrice(upperTargetPrice, actualBinStep, false);
-
-    activeBinsBelow = Math.max(0, activeBin.binId - lowerBinId);
-    activeBinsAbove = Math.max(0, upperBinId - activeBin.binId);
-  }
+  const normalizedRange = normalizeDeployRangeInputs({
+    activeBinId: activeBin.binId,
+    activePrice,
+    actualBinStep,
+    getBinIdFromPrice,
+    fallbackBinsBelow: config.strategy.binsBelow,
+    bins_below,
+    bins_above,
+    downside_pct,
+    upside_pct,
+  });
+  activeBinsBelow = normalizedRange.activeBinsBelow;
+  activeBinsAbove = normalizedRange.activeBinsAbove;
 
   // ── Bin count sanity guard ───────────────────────────────────────────
   // Prevent LLM hallucinations sending absurd bin counts (690, 6910, etc.)
@@ -479,25 +497,6 @@ export async function deployPosition({
   }
   // ────────────────────────────────────────────────────────────────────
 
-  if (process.env.DRY_RUN === "true") {
-    const totalBins = activeBinsBelow + activeBinsAbove;
-    return {
-      dry_run: true,
-      would_deploy: {
-        pool_address,
-        strategy: activeStrategy,
-        bins_below: activeBinsBelow,
-        bins_above: activeBinsAbove,
-        downside_pct: downside_pct ?? null,
-        upside_pct: upside_pct ?? null,
-        amount_x: amount_x || 0,
-        amount_y: amount_y || amount_sol || 0,
-        wide_range: totalBins > 69,
-      },
-      message: "DRY RUN — no transaction sent",
-    };
-  }
-
   const strategyMap = {
     spot: StrategyType.Spot,
     curve: StrategyType.Curve,
@@ -511,14 +510,15 @@ export async function deployPosition({
 
   // Calculate amounts
   // If no explicit SOL amount is provided, fall back to the configured dynamic deploy size.
+  const isDryRun = process.env.DRY_RUN === "true";
   const fallbackAmountY =
-    amount_y == null && amount_sol == null
+    amount_y == null && amount_sol == null && !isDryRun
       ? computeDeployAmount((await getWalletBalances()).sol)
       : 0;
   const finalAmountY = amount_y ?? amount_sol ?? fallbackAmountY;
   const finalAmountX = amount_x ?? 0;
   const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
-  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || Number(upside_pct ?? 0) > 0)) {
+  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || normalizedRange.percent_inputs.upside_pct_used)) {
     throw new Error(
       "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
     );
@@ -540,13 +540,68 @@ export async function deployPosition({
     );
   }
 
-  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
-
   const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
   const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
   const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
   const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
   const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
+  const rangeCoverage = {
+    downside_pct: downsideCoveragePct,
+    upside_pct: upsideCoveragePct,
+    width_pct: totalWidthPct,
+    active_price: activePrice,
+  };
+
+  log("deploy_audit", `[range-normalized] ${JSON.stringify({
+    pool_address,
+    strategy: activeStrategy,
+    active_bin: activeBin.binId,
+    min_bin: minBinId,
+    max_bin: maxBinId,
+    width_bins: maxBinId - minBinId,
+    bins_below: activeBinsBelow,
+    bins_above: activeBinsAbove,
+    percent_inputs: normalizedRange.percent_inputs,
+    range_coverage: rangeCoverage,
+  })}`);
+
+  const narrowRangeGuard = validateSingleSidedSolBidAskRange({
+    activeStrategy,
+    isSingleSidedSol,
+    activeBinId: activeBin.binId,
+    minBinId,
+    maxBinId,
+    activeBinsBelow,
+    activeBinsAbove,
+    rangeCoverage,
+    guardConfig: config.strategy,
+  });
+  if (!narrowRangeGuard.ok) {
+    log("deploy_reject", `[narrow-range-guard] ${narrowRangeGuard.reason} ${JSON.stringify(narrowRangeGuard.details)}`);
+    throw new Error(narrowRangeGuard.reason);
+  }
+
+  if (isDryRun) {
+    return {
+      dry_run: true,
+      would_deploy: {
+        pool_address,
+        strategy: activeStrategy,
+        bins_below: activeBinsBelow,
+        bins_above: activeBinsAbove,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        wide_range: isWideRange,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+      },
+      message: "DRY RUN — no transaction sent",
+    };
+  }
+
+  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
 
   // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
   const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
