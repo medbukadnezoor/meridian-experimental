@@ -1285,7 +1285,8 @@ function formatConfigSnapshot() {
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `Screening: ${config.screening.source} | ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
+    `GMGN: ${config.gmgn?.apiKey ? "configured" : "no key"} | interval ${config.gmgn?.interval ?? "n/a"} | enrich ${config.gmgn?.enrichLimit ?? "n/a"}`,
     `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
     `Darwin: ${config.darwin.enabled ? "enabled" : "disabled"} | floor ${config.darwin.weightFloor} | ceiling ${config.darwin.weightCeiling} | per-signal min ${config.darwin.perSignalMinSamples}`,
     `Autoresearch: ${config.autoresearch.enabled ? config.autoresearch.mode : "disabled"} | trials ${config.autoresearch.maxActiveTrials} | min evaluable ${config.autoresearch.minEvaluableCloses}`,
@@ -1313,6 +1314,7 @@ function settingValue(key) {
     trailingTakeProfit: config.management.trailingTakeProfit,
     useDiscordSignals: config.screening.useDiscordSignals,
     blockPvpSymbols: config.screening.blockPvpSymbols,
+    screeningSource: config.screening.source,
     strategy: config.strategy.strategy,
     deployAmountSol: config.management.deployAmountSol,
     gasReserve: config.management.gasReserve,
@@ -1407,6 +1409,10 @@ function renderSettingsMenu(page = "main") {
     ];
   } else if (page === "screen") {
     rows = [
+      [
+        settingButton("Source: Meteora", "cfg:set:screeningSource:meteora"),
+        settingButton("Source: GMGN", "cfg:set:screeningSource:gmgn"),
+      ],
       [toggleButton("useDiscordSignals", "Discord signals"), toggleButton("blockPvpSymbols", "PVP hard block")],
       [
         settingButton(`Strategy: spot`, "cfg:set:strategy:spot"),
@@ -1532,7 +1538,7 @@ async function applySettingsMenuCallback(msg) {
   }
   page = key.startsWith("indicator") || key === "chartIndicatorsEnabled" || key === "rsiLength" || key === "requireAllIntervals"
     ? "indicators"
-    : ["useDiscordSignals", "blockPvpSymbols", "strategy", "managementIntervalMin", "screeningIntervalMin"].includes(key)
+    : ["useDiscordSignals", "blockPvpSymbols", "screeningSource", "strategy", "managementIntervalMin", "screeningIntervalMin"].includes(key)
       ? "screen"
       : "risk";
   await answerCallbackQuery(msg.callbackQueryId, `Updated ${key}`);
