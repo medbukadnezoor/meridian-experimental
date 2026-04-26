@@ -64,7 +64,9 @@ Use this as the primary tool for finding new LP opportunities.`,
 All filtering, scoring, and rule-checking is done in code — no analysis needed.
 Returns the top N eligible pools ranked by score (fee/TVL, organic, stability, volume).
 Each pool includes a score (0-100) and has already passed all hard disqualifiers.
-Use this instead of discover_pools for screening cycles.`,
+Use this instead of discover_pools for screening cycles. The active screening source is controlled by screeningSource:
+- meteora: legacy Meteora pool-discovery flow
+- gmgn: GMGN token scan first, then Meteora DLMM pool match.`,
       parameters: {
         type: "object",
         properties: {

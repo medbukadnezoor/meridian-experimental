@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import {
+  loadJsonConfig,
   loadUserConfig,
   resolveConfigFromPath,
 } from "./config-builder.js";
@@ -10,6 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export { normalizeOptionalString, firstNonEmptyString, INTERNAL_FALLBACK_MODEL, resolveFallbackModel } from "./config-builder.js";
 
 export const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
+export const GMGN_CONFIG_PATH = path.join(__dirname, "gmgn-config.json");
 
 const runtimeConfigResolution = resolveConfigFromPath(USER_CONFIG_PATH, {
   env: process.env,
@@ -52,6 +54,7 @@ export function reloadScreeningThresholds() {
   try {
     const fresh = loadUserConfig(USER_CONFIG_PATH);
     const s = config.screening;
+    if (fresh.screeningSource != null) s.source = fresh.screeningSource;
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
@@ -77,5 +80,16 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+  } catch { /* ignore */ }
+  try {
+    const freshGmgn = loadJsonConfig(GMGN_CONFIG_PATH);
+    const g = config.gmgn;
+    for (const [key, value] of Object.entries(freshGmgn)) {
+      if (key === "apiKey") {
+        if (value) g.apiKey = value;
+      } else if (key in g) {
+        g[key] = value;
+      }
+    }
   } catch { /* ignore */ }
 }

@@ -4,6 +4,7 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
+import { discoverGmgnPools } from "./gmgn.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
 import {
   appendDecisionContext,
@@ -31,6 +32,9 @@ function normalizeSymbol(symbol) {
 }
 
 function scoreCandidate(pool) {
+  if (Number.isFinite(Number(pool.gmgn_score))) {
+    return Number(pool.gmgn_score) + Number(pool.fee_active_tvl_ratio || 0) * 500;
+  }
   const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
   const organic = Number(pool.organic_score || 0);
   const volume = Number(pool.volume_window || 0);
@@ -475,8 +479,33 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const { pools } = await discoverPools({ page_size: 50 });
-  const filteredOut = [];
+  const source = String(config.screening.source || "meteora").toLowerCase();
+  if (!["meteora", "gmgn"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  }
+  const discovery = source === "gmgn"
+    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 5) })
+    : await discoverPools({ page_size: 50 });
+  let { pools } = discovery;
+  const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
 
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
@@ -545,7 +574,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
-  if (eligible.length > 0) {
+  if (source !== "gmgn" && eligible.length > 0) {
     const { getAdvancedInfo, getPriceInfo, getClusterList, getRiskFlags } = await import("./okx.js");
     const okxResults = await Promise.allSettled(
       eligible.map(async (p) => {
@@ -602,36 +631,6 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
     }
 
-    await enrichJupiterTokenSnapshots(eligible);
-
-    // Deterministic nanocap safety gates. These run before the LLM sees candidates.
-    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-      const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
-      if (vetoReason) {
-        log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
-        appendDecisionContext({
-          stage: "deterministic_veto",
-          actor: "SCREENER",
-          pool: p.pool,
-          poolName: p.name,
-          baseMint: p.base?.mint ?? null,
-          quoteMint: p.quote?.mint ?? null,
-          reason: vetoReason,
-          metrics: {
-            ...buildCandidateDecisionContext(p),
-            veto_audit: getDeterministicVetoAuditSnapshot(p),
-          },
-          source: "screening.deterministic_veto",
-        });
-        pushFilteredReason(filteredOut, p, vetoReason, {
-          priority: true,
-          audit: getDeterministicVetoAuditSnapshot(p),
-        });
-        return false;
-      }
-      return true;
-    }));
-
     // Wash trading hard filter — fake volume = misleading fee yield
     eligible.splice(0, eligible.length, ...eligible.filter((p) => {
       if (p.is_wash) {
@@ -671,6 +670,38 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     });
     eligible.splice(0, eligible.length, ...filtered);
     if (eligible.length < before) log("dev_blocklist", `Filtered ${before - eligible.length} pool(s) via OKX creator check`);
+  }
+
+  if (eligible.length > 0) {
+    await enrichJupiterTokenSnapshots(eligible);
+
+    // Deterministic nanocap safety gates. These run before the LLM sees candidates.
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
+      if (vetoReason) {
+        log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
+        appendDecisionContext({
+          stage: "deterministic_veto",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: vetoReason,
+          metrics: {
+            ...buildCandidateDecisionContext(p),
+            veto_audit: getDeterministicVetoAuditSnapshot(p),
+          },
+          source: "screening.deterministic_veto",
+        });
+        pushFilteredReason(filteredOut, p, vetoReason, {
+          priority: true,
+          audit: getDeterministicVetoAuditSnapshot(p),
+        });
+        return false;
+      }
+      return true;
+    }));
   }
 
   // Chart indicator entry confirmation — filters candidates that don't meet the entry preset
@@ -733,8 +764,11 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   return {
     candidates: ranked,
     total_eligible: ranked.length,
-    total_screened: pools.length,
+    total_screened: discovery.total ?? pools.length,
+    source,
     filtered_examples: filteredOut.slice(0, 3),
+    stage_counts: discovery.stage_counts ? { ranked: discovery.total, ...discovery.stage_counts } : null,
+    all_filtered: filteredOut,
   };
 }
 

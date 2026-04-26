@@ -1,4 +1,5 @@
 import fs from "fs";
+import path from "path";
 
 export const DEFAULT_HIVEMIND_URL = "https://api.agentmeridian.xyz";
 export const DEFAULT_AGENT_MERIDIAN_API_URL = "https://api.agentmeridian.xyz/api";
@@ -40,8 +41,15 @@ export function loadUserConfig(userConfigPath) {
     : {};
 }
 
-export function applyUserConfigToEnv(userConfig, env = process.env) {
+export function loadJsonConfig(configPath) {
+  return fs.existsSync(configPath)
+    ? JSON.parse(fs.readFileSync(configPath, "utf8"))
+    : {};
+}
+
+export function applyUserConfigToEnv(userConfig, env = process.env, gmgnConfig = {}) {
   const u = userConfig ?? {};
+  const g = gmgnConfig ?? {};
   if (u.rpcUrl) env.RPC_URL ||= u.rpcUrl;
   if (u.walletKey) env.WALLET_PRIVATE_KEY ||= u.walletKey;
   if (u.llmModel) env.LLM_MODEL ||= u.llmModel;
@@ -50,10 +58,22 @@ export function applyUserConfigToEnv(userConfig, env = process.env) {
   if (u.dryRun !== undefined) env.DRY_RUN ||= String(u.dryRun);
   if (u.publicApiKey) env.PUBLIC_API_KEY ||= u.publicApiKey;
   if (u.agentMeridianApiUrl) env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
+  if (g.apiKey || u.gmgnApiKey) env.GMGN_API_KEY ||= g.apiKey || u.gmgnApiKey;
 }
 
-export function buildConfig(userConfig = {}, env = process.env) {
+function configValue(configObject, key, legacyObject, legacyKey, fallback) {
+  return configObject?.[key] ?? legacyObject?.[legacyKey] ?? fallback;
+}
+
+function configArray(configObject, key, legacyObject, legacyKey, fallback) {
+  if (Array.isArray(configObject?.[key])) return configObject[key];
+  if (Array.isArray(legacyObject?.[legacyKey])) return legacyObject[legacyKey];
+  return fallback;
+}
+
+export function buildConfig(userConfig = {}, env = process.env, gmgnConfig = {}) {
   const u = userConfig ?? {};
+  const g = gmgnConfig ?? {};
   const indicatorUserConfig = u.chartIndicators ?? {};
   const performanceUserConfig = u.performance ?? {};
   const fallbackModel = normalizeOptionalString(u.fallbackModel);
@@ -66,6 +86,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
     },
 
     screening: {
+      source: u.screeningSource ?? "meteora",
       excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
       minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
       minTvl: u.minTvl ?? 10_000,
@@ -103,6 +124,55 @@ export function buildConfig(userConfig = {}, env = process.env) {
       suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
       suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
       suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
+    },
+
+    gmgn: {
+      apiKey: firstNonEmptyString(g.apiKey, u.gmgnApiKey, env.GMGN_API_KEY) ?? null,
+      baseUrl: firstNonEmptyString(g.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai") ?? "https://openapi.gmgn.ai",
+      interval: configValue(g, "interval", u, "gmgnInterval", "5m"),
+      orderBy: configValue(g, "orderBy", u, "gmgnOrderBy", "default"),
+      direction: configValue(g, "direction", u, "gmgnDirection", "desc"),
+      limit: configValue(g, "limit", u, "gmgnLimit", 100),
+      enrichLimit: configValue(g, "enrichLimit", u, "gmgnEnrichLimit", 20),
+      requestDelayMs: configValue(g, "requestDelayMs", u, "gmgnRequestDelayMs", 2500),
+      maxRetries: configValue(g, "maxRetries", u, "gmgnMaxRetries", 0),
+      holdersLimit: configValue(g, "holdersLimit", u, "gmgnHoldersLimit", 100),
+      filters: configArray(g, "filters", u, "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
+      platforms: configArray(g, "platforms", u, "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
+      minMcap: configValue(g, "minMcap", u, "gmgnMinMcap", u.minMcap ?? 150_000),
+      maxMcap: configValue(g, "maxMcap", u, "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
+      minTvl: configValue(g, "minTvl", u, "gmgnMinTvl", u.minTvl ?? 10_000),
+      minVolume: configValue(g, "minVolume", u, "gmgnMinVolume", 1000),
+      minHolders: configValue(g, "minHolders", u, "gmgnMinHolders", u.minHolders ?? 500),
+      minTokenAgeHours: configValue(g, "minTokenAgeHours", u, "gmgnMinTokenAgeHours", 2),
+      maxTokenAgeHours: configValue(g, "maxTokenAgeHours", u, "gmgnMaxTokenAgeHours", 24 * 7),
+      minSmartDegenCount: configValue(g, "minSmartDegenCount", u, "gmgnMinSmartDegenCount", 1),
+      requireKol: configValue(g, "requireKol", u, "gmgnRequireKol", false),
+      minKolCount: configValue(g, "minKolCount", u, "gmgnMinKolCount", 1),
+      minTotalFeeSol: configValue(g, "minTotalFeeSol", u, "gmgnMinTotalFeeSol", 30),
+      athFilterPct: configValue(g, "athFilterPct", u, "gmgnAthFilterPct", null),
+      maxTop10HolderRate: configValue(g, "maxTop10HolderRate", u, "gmgnMaxTop10HolderRate", 0.5),
+      maxBundlerRate: configValue(g, "maxBundlerRate", u, "gmgnMaxBundlerRate", 0.5),
+      maxRatTraderRate: configValue(g, "maxRatTraderRate", u, "gmgnMaxRatTraderRate", 0.2),
+      maxFreshWalletRate: configValue(g, "maxFreshWalletRate", u, "gmgnMaxFreshWalletRate", 0.2),
+      maxDevTeamHoldRate: configValue(g, "maxDevTeamHoldRate", u, "gmgnMaxDevTeamHoldRate", 0.02),
+      maxBotDegenRate: configValue(g, "maxBotDegenRate", u, "gmgnMaxBotDegenRate", 0.4),
+      maxSniperCount: configValue(g, "maxSniperCount", u, "gmgnMaxSniperCount", 20),
+      maxSniperHoldRate: configValue(g, "maxSniperHoldRate", u, "gmgnMaxSniperHoldRate", 0.3),
+      preferredKolNames: configArray(g, "preferredKolNames", u, "gmgnPreferredKolNames", []),
+      preferredKolMinHoldPct: configValue(g, "preferredKolMinHoldPct", u, "gmgnPreferredKolMinHoldPct", 1),
+      dumpKolNames: configArray(g, "dumpKolNames", u, "gmgnDumpKolNames", []),
+      dumpKolMinHoldPct: configValue(g, "dumpKolMinHoldPct", u, "gmgnDumpKolMinHoldPct", 0.5),
+      indicatorFilter: configValue(g, "indicatorFilter", u, "gmgnIndicatorFilter", true),
+      indicatorInterval: configValue(g, "indicatorInterval", u, "gmgnIndicatorInterval", "15_MINUTE"),
+      indicatorRules: {
+        requireBullishSupertrend: g.indicatorRules?.requireBullishSupertrend ?? true,
+        rejectAlreadyAtBottom: g.indicatorRules?.rejectAlreadyAtBottom ?? true,
+        requireAboveSupertrend: g.indicatorRules?.requireAboveSupertrend ?? false,
+        minRsi: g.indicatorRules?.minRsi ?? null,
+        maxRsi: g.indicatorRules?.maxRsi ?? null,
+        requireBbPosition: g.indicatorRules?.requireBbPosition ?? null,
+      },
     },
 
     management: {
@@ -269,13 +339,19 @@ export function buildConfig(userConfig = {}, env = process.env) {
 export function resolveConfigFromPath(userConfigPath, { env = process.env, applyEnv = false } = {}) {
   const userConfigExists = fs.existsSync(userConfigPath);
   const userConfig = userConfigExists ? JSON.parse(fs.readFileSync(userConfigPath, "utf8")) : {};
+  const gmgnConfigPath = path.join(path.dirname(userConfigPath), "gmgn-config.json");
+  const gmgnConfigExists = fs.existsSync(gmgnConfigPath);
+  const gmgnConfig = gmgnConfigExists ? loadJsonConfig(gmgnConfigPath) : {};
   if (applyEnv) {
-    applyUserConfigToEnv(userConfig, env);
+    applyUserConfigToEnv(userConfig, env, gmgnConfig);
   }
   return {
     userConfigPath,
     userConfigExists,
     userConfig,
-    config: buildConfig(userConfig, env),
+    gmgnConfigPath,
+    gmgnConfigExists,
+    gmgnConfig,
+    config: buildConfig(userConfig, env, gmgnConfig),
   };
 }

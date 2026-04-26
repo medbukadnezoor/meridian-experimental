@@ -28,10 +28,18 @@
  */
 
 import { randomUUID } from "crypto";
+import { setDefaultResultOrder } from "dns";
+import { config } from "../config.js";
 import { log } from "../logger.js";
+import { fetchChartIndicatorsForMint } from "./chart-indicators.js";
 
-const GMGN_BASE = "https://openapi.gmgn.ai/v1";
-const GMGN_API_KEY = process.env.GMGN_API_KEY || "";
+setDefaultResultOrder("ipv4first");
+
+const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
+const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const GMGN_V1_BASE = "https://openapi.gmgn.ai/v1";
+const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "6h", "24h"]);
+let lastGmgnRequestAt = 0;
 
 // Tags indicating smart-money tool activity (positive context)
 const SMART_TOOL_TAGS = new Set(["photon", "padre", "gmgn", "axiom", "bullx", "trojan", "gmgnkol"]);
@@ -44,7 +52,8 @@ const SMART_TOOL_TAGS = new Set(["photon", "padre", "gmgn", "axiom", "bullx", "t
  * @returns {Promise<GmgnRisk|null>}
  */
 export async function fetchGmgnTokenRisk(mintAddress, limit = 20) {
-  if (!GMGN_API_KEY || !mintAddress) return null;
+  const apiKey = config.gmgn?.apiKey || process.env.GMGN_API_KEY || "";
+  if (!apiKey || !mintAddress) return null;
 
   try {
     const params = new URLSearchParams({
@@ -55,8 +64,8 @@ export async function fetchGmgnTokenRisk(mintAddress, limit = 20) {
       client_id: randomUUID(),
     });
 
-    const res = await fetch(`${GMGN_BASE}/market/token_top_traders?${params}`, {
-      headers: { "X-APIKEY": GMGN_API_KEY },
+    const res = await fetch(`${GMGN_V1_BASE}/market/token_top_traders?${params}`, {
+      headers: { "X-APIKEY": apiKey },
       signal:  AbortSignal.timeout(8000),
     });
 
@@ -133,4 +142,612 @@ function _computeRiskSignals(traders) {
     bluechip_present: bluechip_count > 0,   // positive: quality wallets holding
     bundler_present:  bundler_count  > 0,   // negative: bundler bots in supply
   };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function paceGmgnRequest() {
+  const delayMs = Math.max(0, Number(config.gmgn?.requestDelayMs ?? 1200));
+  if (!delayMs) return;
+  const elapsed = Date.now() - lastGmgnRequestAt;
+  if (elapsed < delayMs) await sleep(delayMs - elapsed);
+  lastGmgnRequestAt = Date.now();
+}
+
+function normalizeInterval(value, fallback = "5m") {
+  const normalized = String(value || fallback).trim();
+  return SUPPORTED_INTERVALS.has(normalized) ? normalized : fallback;
+}
+
+function appendParams(url, params = {}) {
+  for (const [key, value] of Object.entries(params)) {
+    if (value == null) continue;
+    if (Array.isArray(value)) {
+      for (const entry of value.filter((item) => item != null && item !== "")) {
+        url.searchParams.append(key, String(entry));
+      }
+    } else {
+      url.searchParams.set(key, String(value));
+    }
+  }
+}
+
+function getRequiredGmgnApiKey() {
+  const key = config.gmgn?.apiKey || process.env.GMGN_API_KEY;
+  if (!key) throw new Error("GMGN_API_KEY is required for GMGN discovery.");
+  return key;
+}
+
+async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } = {}) {
+  const baseUrl = String(config.gmgn?.baseUrl || "https://openapi.gmgn.ai").replace(/\/+$/, "");
+  const url = new URL(`${baseUrl}${pathname}`);
+  appendParams(url, {
+    ...params,
+    timestamp: Math.floor(Date.now() / 1000),
+    client_id: randomUUID(),
+  });
+
+  const maxRetries = Math.max(0, Number(config.gmgn?.maxRetries ?? 0));
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await paceGmgnRequest();
+    const res = await fetch(url, {
+      method,
+      headers: {
+        "X-APIKEY": getRequiredGmgnApiKey(),
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : null,
+      signal: AbortSignal.timeout(20_000),
+    });
+    const text = await res.text().catch(() => "");
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { raw: text };
+    }
+    const message = payload?.message || payload?.error || payload?.raw || `GMGN ${pathname} ${res.status}`;
+    const codeFailure = payload?.code != null && Number(payload.code) !== 0;
+    const rateLimited = res.status === 429 || /rate limit|temporarily banned/i.test(String(message));
+    if (res.ok && !codeFailure) return payload;
+    if (rateLimited && attempt < maxRetries) {
+      const retryAfter = Number(res.headers.get("retry-after"));
+      const backoffMs = Number.isFinite(retryAfter)
+        ? retryAfter * 1000
+        : /temporarily banned/i.test(String(message))
+          ? 60_000
+          : Math.min(30_000, 3000 * Math.pow(2, attempt));
+      await sleep(backoffMs);
+      continue;
+    }
+    const error = new Error(message);
+    error.status = res.status;
+    error.code = payload?.code ?? null;
+    error.accountWarning = /temporarily banned|account|1010|forbidden|whitelist/i.test(String(message));
+    throw error;
+  }
+  throw new Error(`GMGN ${pathname} failed`);
+}
+
+function unwrapList(payload, keys = ["list", "rank", "data"]) {
+  if (Array.isArray(payload)) return payload;
+  for (const key of keys) {
+    if (Array.isArray(payload?.[key])) return payload[key];
+    if (Array.isArray(payload?.data?.[key])) return payload.data[key];
+    if (Array.isArray(payload?.data?.data?.[key])) return payload.data.data[key];
+  }
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.data?.data)) return payload.data.data;
+  return [];
+}
+
+function num(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function optionalNum(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function ratioPct(value) {
+  const n = optionalNum(value);
+  if (n == null) return null;
+  return Number((n * 100).toFixed(2));
+}
+
+function tokenAddress(token = {}) {
+  return token.address || token.token_address || token.mint || token.mint_address || token.base_address || null;
+}
+
+function tokenAgeHours(token = {}) {
+  const raw = num(token.creation_timestamp || token.open_timestamp || token.created_at);
+  if (!raw) return null;
+  const seconds = raw > 10_000_000_000 ? raw / 1000 : raw;
+  return (Date.now() / 1000 - seconds) / 3600;
+}
+
+function hasTag(entry, tag) {
+  const tags = []
+    .concat(entry?.tags || [])
+    .concat(entry?.maker_token_tags || [])
+    .map((value) => String(value || "").toLowerCase());
+  return tags.includes(tag);
+}
+
+function entryName(entry) {
+  return String(entry?.name || entry?.twitter_username || entry?.username || entry?.label || entry?.address || entry || "").trim();
+}
+
+function entryAmountPct(entry) {
+  const raw = entry?.amount_percentage ?? entry?.balance_percentage ?? entry?.amount_cur_percentage;
+  const n = optionalNum(raw);
+  if (n == null) return 0;
+  return n > 1 ? n : n * 100;
+}
+
+function namedMatch(entry, names = []) {
+  const normalized = entryName(entry).toLowerCase();
+  return names
+    .map((name) => String(name || "").trim().toLowerCase())
+    .filter(Boolean)
+    .some((name) => normalized.includes(name));
+}
+
+function passBasicRankFilter(token) {
+  const g = config.gmgn;
+  const reasons = [];
+  const mcap = num(token.market_cap);
+  const ageHours = tokenAgeHours(token);
+  if (mcap < g.minMcap) reasons.push(`mcap ${mcap} < ${g.minMcap}`);
+  if (g.maxMcap != null && mcap > g.maxMcap) reasons.push(`mcap ${mcap} > ${g.maxMcap}`);
+  if (num(token.bundler_rate) > g.maxBundlerRate) reasons.push(`bundler ${(num(token.bundler_rate) * 100).toFixed(1)}% > ${(g.maxBundlerRate * 100).toFixed(1)}%`);
+  if (g.minTokenAgeHours != null && ageHours != null && ageHours < g.minTokenAgeHours) {
+    reasons.push(`age ${ageHours.toFixed(2)}h < ${g.minTokenAgeHours}h`);
+  }
+  if (g.maxTokenAgeHours != null && ageHours != null && ageHours > g.maxTokenAgeHours) {
+    reasons.push(`age ${ageHours.toFixed(2)}h > ${g.maxTokenAgeHours}h`);
+  }
+  if (num(token.volume) < g.minVolume) reasons.push(`volume ${num(token.volume)} < ${g.minVolume}`);
+  return { pass: reasons.length === 0, reasons };
+}
+
+function analyzeTokenInfo(info = {}) {
+  const g = config.gmgn;
+  const stat = info.stat || {};
+  const tags = info.wallet_tags_stat || {};
+  const reasons = [];
+  const price = num(info.price);
+  const athPrice = num(info.ath_price);
+  const priceVsAthPct = athPrice > 0 && price > 0 ? (price / athPrice) * 100 : null;
+  if (g.athFilterPct != null && priceVsAthPct != null) {
+    const threshold = 100 + Number(g.athFilterPct);
+    if (priceVsAthPct > threshold) reasons.push(`price ${priceVsAthPct.toFixed(1)}% of ATH > ${threshold}%`);
+  }
+  const totalFeeSol = num(info.total_fee);
+  if (num(info.holder_count) < g.minHolders) reasons.push(`holders ${num(info.holder_count)} < ${g.minHolders}`);
+  if (totalFeeSol < g.minTotalFeeSol) reasons.push(`total fee ${totalFeeSol} SOL < ${g.minTotalFeeSol} SOL`);
+  if (num(stat.top_10_holder_rate) > g.maxTop10HolderRate) reasons.push(`top10 ${ratioPct(stat.top_10_holder_rate)}%`);
+  if (g.maxDevTeamHoldRate != null && num(stat.dev_team_hold_rate) > g.maxDevTeamHoldRate) reasons.push(`dev team ${ratioPct(stat.dev_team_hold_rate)}%`);
+  if (num(stat.bot_degen_rate) > g.maxBotDegenRate) reasons.push(`bot degen ${ratioPct(stat.bot_degen_rate)}%`);
+  if (g.maxFreshWalletRate != null && num(stat.fresh_wallet_rate) > g.maxFreshWalletRate) reasons.push(`fresh wallets ${ratioPct(stat.fresh_wallet_rate)}%`);
+  if (num(stat.top_bundler_trader_percentage) > g.maxBundlerRate) reasons.push(`bundler ${ratioPct(stat.top_bundler_trader_percentage)}%`);
+  if (num(stat.top_rat_trader_percentage) > g.maxRatTraderRate) reasons.push(`insider ${ratioPct(stat.top_rat_trader_percentage)}%`);
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    smartWallets: num(tags.smart_wallets),
+    kolWallets: num(tags.renowned_wallets),
+    totalFeeSol,
+    tradeFeeSol: num(info.trade_fee),
+    priceVsAthPct,
+    top10HolderPct: ratioPct(stat.top_10_holder_rate),
+    devTeamHoldPct: ratioPct(stat.dev_team_hold_rate),
+    botDegenPct: ratioPct(stat.bot_degen_rate),
+    freshWalletPct: ratioPct(stat.fresh_wallet_rate),
+    bundlerPct: ratioPct(stat.top_bundler_trader_percentage),
+    insiderPct: ratioPct(stat.top_rat_trader_percentage),
+    sniperWallets: num(tags.sniper_wallets),
+    bundlerWallets: num(tags.bundler_wallets),
+    whaleWallets: num(tags.whale_wallets),
+    freshWallets: num(tags.fresh_wallets),
+  };
+}
+
+function analyzeHoldersAndTraders(holders = [], traders = []) {
+  const g = config.gmgn;
+  const combined = [...holders, ...traders];
+  const kolHolders = holders.filter((entry) => hasTag(entry, "kol") && !entry.end_holding_at);
+  const smartHolders = holders.filter((entry) => hasTag(entry, "smart_degen") && !entry.end_holding_at);
+  const kolTraders = traders.filter((entry) => hasTag(entry, "kol"));
+  const smartTraders = traders.filter((entry) => hasTag(entry, "smart_degen"));
+  const preferredKolHolders = kolHolders.filter((entry) =>
+    namedMatch(entry, g.preferredKolNames) && entryAmountPct(entry) >= g.preferredKolMinHoldPct
+  );
+  const dumpKolHoldersAll = [...kolHolders, ...kolTraders.filter((entry) => !entry.end_holding_at)]
+    .filter((entry) => namedMatch(entry, g.dumpKolNames));
+  const dumpKolSignificant = dumpKolHoldersAll.filter((entry) => entryAmountPct(entry) >= (g.dumpKolMinHoldPct ?? 0.5));
+  const sniperTopHolders = holders.filter((entry) => hasTag(entry, "sniper"));
+  const sniperHoldRate = holders.length > 0 ? sniperTopHolders.length / holders.length : 0;
+  const reasons = [];
+  if (sniperHoldRate > g.maxSniperHoldRate) reasons.push(`sniper top-holder rate ${(sniperHoldRate * 100).toFixed(1)}%`);
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    kolHolding: kolHolders.length,
+    smartHolding: smartHolders.length,
+    smartAccumulating: smartTraders.filter((entry) => num(entry.buy_volume_cur) > num(entry.sell_volume_cur)).length,
+    smartExiting: smartTraders.filter((entry) => num(entry.sell_volume_cur) > num(entry.buy_volume_cur)).length,
+    mostlyExited: combined.filter((entry) =>
+      (hasTag(entry, "kol") || hasTag(entry, "smart_degen")) &&
+      num(entry.sell_amount_percentage) >= 0.8
+    ).length,
+    kolHolderNames: kolHolders.map(entryName).filter(Boolean).slice(0, 12),
+    kolProfitNames: kolTraders.sort((a, b) => num(b.profit) - num(a.profit)).map(entryName).filter(Boolean).slice(0, 12),
+    preferredKolHolding: preferredKolHolders.length,
+    preferredKolHolders: preferredKolHolders.map((entry) => ({
+      name: entryName(entry),
+      amountPct: Number(entryAmountPct(entry).toFixed(2)),
+    })),
+    dumpKolSignificantCount: dumpKolSignificant.length,
+    dumpKolMinorCount: Math.max(0, dumpKolHoldersAll.length - dumpKolSignificant.length),
+    dumpKolHolders: dumpKolSignificant.map((entry) => ({
+      name: entryName(entry),
+      amountPct: Number(entryAmountPct(entry).toFixed(2)),
+    })),
+    bundlerTopHolderCount: holders.filter((entry) => hasTag(entry, "bundler")).length,
+    sniperTopHolderCount: sniperTopHolders.length,
+    sniperHoldRate,
+  };
+}
+
+async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
+  const filterBy = minTvl > 0 ? `&filter_by=${encodeURIComponent(`tvl>${minTvl}`)}` : "";
+  const url = `${METEORA_DLMM_API}/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}${filterBy}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) throw new Error(`Meteora pool search ${res.status}`);
+  const data = await res.json();
+  const pools = Array.isArray(data?.data) ? data.data : [];
+  return pools
+    .filter((pool) => {
+      const baseMatches = pool?.token_x?.address === mint || pool?.token_x_mint === mint;
+      const quoteIsSol =
+        pool?.token_y?.address === config.tokens.SOL ||
+        pool?.token_y_mint === config.tokens.SOL ||
+        pool?.token_y?.symbol === "SOL";
+      return baseMatches && quoteIsSol;
+    })
+    .slice(0, limit);
+}
+
+async function fetchPoolDetailDirect(poolAddress) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=5m`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data?.data || [])[0] ?? null;
+}
+
+async function pickBestPool(pools) {
+  const details = await Promise.all(
+    pools.map((pool) => fetchPoolDetailDirect(pool.address || pool.pool_address).catch(() => null)),
+  );
+  if (pools.length <= 1) return { pool: pools[0] ?? null, detail: details[0] ?? null };
+  const scored = pools.map((pool, index) => {
+    const detail = details[index];
+    const activeTvl = num(detail?.active_tvl ?? pool.active_tvl ?? pool.tvl ?? pool.liquidity);
+    const feeActiveTvlRatio = Number(detail?.fee_active_tvl_ratio) > 0
+      ? Number(detail.fee_active_tvl_ratio)
+      : (activeTvl > 0 ? (num(detail?.fee) / activeTvl) * 100 : 0);
+    return { pool, detail, feeActiveTvlRatio, activeTvl };
+  });
+  scored.sort((a, b) => b.feeActiveTvlRatio - a.feeActiveTvlRatio || b.activeTvl - a.activeTvl);
+  return { pool: scored[0].pool, detail: scored[0].detail };
+}
+
+async function checkBounceSetup(mint) {
+  const interval = String(config.gmgn.indicatorInterval || "15_MINUTE").trim().toUpperCase();
+  const payload = await fetchChartIndicatorsForMint(mint, { interval });
+  const latest = payload?.latest || {};
+  const st = latest?.supertrend || {};
+  const stValue = Number(st.value) || 0;
+  const stDirection = String(st.direction || "").toLowerCase();
+  const stBreakUp = !!latest?.states?.supertrendBreakUp;
+  const close = Number(latest?.candle?.close) || 0;
+  const rsiValue = Number(latest?.rsi?.value);
+  const bb = latest?.bollinger || {};
+  const upperBand = Number(bb.upper) || 0;
+  const lowerBand = Number(bb.lower) || 0;
+  const oversold = Number(config.indicators?.rsiOversold ?? 35);
+
+  const isBullish = stDirection === "bullish" || stBreakUp;
+  const alreadyAtBottom = Number.isFinite(rsiValue) && rsiValue < oversold && close > 0 && lowerBand > 0 && close < lowerBand;
+  const priceAboveSupertrend = close > 0 && stValue > 0 && close >= stValue;
+  let bbPosition = "inside";
+  if (close > 0 && upperBand > 0 && close > upperBand) bbPosition = "above";
+  else if (close > 0 && lowerBand > 0 && close < lowerBand) bbPosition = "below";
+
+  const rules = config.gmgn.indicatorRules || {};
+  const reasons = [];
+  if (rules.requireBullishSupertrend !== false && !isBullish) reasons.push(`no bounce support: ${stDirection} supertrend`);
+  if (rules.rejectAlreadyAtBottom !== false && alreadyAtBottom) reasons.push(`already at bottom: RSI ${rsiValue.toFixed(1)}, price below lower BB`);
+  if (rules.requireAboveSupertrend && !priceAboveSupertrend) reasons.push(`price below supertrend (${stValue})`);
+  if (rules.minRsi != null && Number.isFinite(rsiValue) && rsiValue < rules.minRsi) reasons.push(`RSI ${rsiValue.toFixed(1)} < min ${rules.minRsi}`);
+  if (rules.maxRsi != null && Number.isFinite(rsiValue) && rsiValue > rules.maxRsi) reasons.push(`RSI ${rsiValue.toFixed(1)} > max ${rules.maxRsi}`);
+  if (rules.requireBbPosition != null && bbPosition !== rules.requireBbPosition) reasons.push(`BB position ${bbPosition} != required ${rules.requireBbPosition}`);
+
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    signal: {
+      interval,
+      rsi: Number.isFinite(rsiValue) ? Number(rsiValue.toFixed(1)) : null,
+      bbPosition,
+      supertrendDirection: stDirection || null,
+      supertrendBreakUp: stBreakUp,
+      aboveSupertrend: close > 0 && stValue > 0 ? close >= stValue : null,
+    },
+  };
+}
+
+function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, holdersAnalysis, indicatorSignal }) {
+  const poolAddress = pool.address || pool.pool_address;
+  const activeTvl = num(poolDetail?.active_tvl ?? pool.tvl ?? pool.liquidity);
+  const feeActiveTvlRatio = Number(poolDetail?.fee_active_tvl_ratio) > 0
+    ? Number(Number(poolDetail.fee_active_tvl_ratio).toFixed(4))
+    : 0;
+  const kolCount = holdersAnalysis.kolHolding || num(token.renowned_count) || num(info?.wallet_tags_stat?.renowned_wallets);
+  const smartCount = holdersAnalysis.smartHolding + holdersAnalysis.smartAccumulating || num(token.smart_degen_count) || num(info?.wallet_tags_stat?.smart_wallets);
+  const gmgnScore =
+    num(token.volume) / 100 +
+    num(token.smart_degen_count) * 50 +
+    kolCount * 35 +
+    num(holdersAnalysis?.preferredKolHolding) * 75 -
+    num(holdersAnalysis?.dumpKolSignificantCount) * 100 -
+    num(holdersAnalysis?.dumpKolMinorCount) * 20 +
+    feeActiveTvlRatio * 1000;
+  const mint = tokenAddress(token) || info.address || pool.token_x?.address;
+
+  return {
+    pool: poolAddress,
+    name: pool.name || `${token.symbol || info.symbol || "?"}-SOL`,
+    base: {
+      symbol: token.symbol || info.symbol || pool.token_x?.symbol,
+      mint,
+      organic: null,
+      warnings: 0,
+    },
+    quote: {
+      symbol: pool.token_y?.symbol || "SOL",
+      mint: pool.token_y?.address || config.tokens.SOL,
+    },
+    pool_type: "dlmm",
+    bin_step: pool.pool_config?.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? null,
+    fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
+    active_tvl: round(activeTvl),
+    fee_active_tvl_ratio: feeActiveTvlRatio,
+    volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
+    holders: num(token.holder_count || info.holder_count),
+    mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
+    token_age_hours: tokenAgeHours(token) != null ? Math.floor(tokenAgeHours(token)) : null,
+    dev: info.dev?.creator_address || null,
+    price: num(info.price || token.price),
+    price_change_pct: num(token.price_change_percent5m ?? token.price_change_percent),
+    volume: num(token.volume ?? 0),
+    volume_window: num(token.volume ?? 0),
+    swap_count: token.swaps ?? null,
+    gmgn: true,
+    gmgn_score: Number(gmgnScore.toFixed(2)),
+    gmgn_total_fee_sol: num(infoAnalysis?.totalFeeSol ?? info.total_fee),
+    gmgn_trade_fee_sol: num(infoAnalysis?.tradeFeeSol ?? info.trade_fee),
+    gmgn_smart_wallets: smartCount,
+    gmgn_kol_wallets: kolCount,
+    gmgn_kol_names: holdersAnalysis?.kolHolderNames || [],
+    gmgn_kol_profit_names: holdersAnalysis?.kolProfitNames || [],
+    gmgn_preferred_kol_matches: num(holdersAnalysis?.preferredKolHolding),
+    gmgn_preferred_kol_holders: holdersAnalysis?.preferredKolHolders || [],
+    gmgn_dump_kol_significant: num(holdersAnalysis?.dumpKolSignificantCount),
+    gmgn_dump_kol_minor: num(holdersAnalysis?.dumpKolMinorCount),
+    gmgn_dump_kol_holders: holdersAnalysis?.dumpKolHolders || [],
+    gmgn_token_info_top10_pct: infoAnalysis?.top10HolderPct ?? null,
+    gmgn_dev_team_hold_pct: infoAnalysis?.devTeamHoldPct ?? null,
+    gmgn_fresh_wallet_pct: infoAnalysis?.freshWalletPct ?? null,
+    gmgn_bot_degen_pct: infoAnalysis?.botDegenPct ?? null,
+    gmgn_token_info_bundler_pct: infoAnalysis?.bundlerPct ?? null,
+    gmgn_token_info_insider_pct: infoAnalysis?.insiderPct ?? null,
+    gmgn_sniper_wallets: infoAnalysis?.sniperWallets ?? null,
+    gmgn_bundler_wallets: infoAnalysis?.bundlerWallets ?? null,
+    gmgn_whale_wallets: infoAnalysis?.whaleWallets ?? null,
+    gmgn_fresh_wallets: infoAnalysis?.freshWallets ?? null,
+    gmgn_kol_holding: holdersAnalysis.kolHolding,
+    gmgn_smart_holding: holdersAnalysis.smartHolding,
+    gmgn_smart_accumulating: holdersAnalysis.smartAccumulating,
+    gmgn_smart_exiting: holdersAnalysis.smartExiting,
+    gmgn_mostly_exited: holdersAnalysis.mostlyExited,
+    price_vs_ath_pct: infoAnalysis?.priceVsAthPct != null ? Number(infoAnalysis.priceVsAthPct.toFixed(2)) : null,
+    ath: info.ath_price || null,
+    launchpad: token.launchpad_platform || info.launchpad_platform || info.launchpad || null,
+    indicators: indicatorSignal ?? null,
+  };
+}
+
+export async function discoverGmgnPools({ limit = 10 } = {}) {
+  const g = config.gmgn;
+  const filtered = [];
+  const stageCounts = {};
+
+  const rankPayload = await gmgnFetch("/v1/market/rank", {
+    params: {
+      chain: "sol",
+      interval: normalizeInterval(g.interval),
+      order_by: g.orderBy || "default",
+      direction: g.direction || "desc",
+      limit: Math.min(100, Math.max(1, Number(g.limit || 25))),
+      filters: g.filters || [],
+      platforms: g.platforms || [],
+    },
+  });
+  const ranked = unwrapList(rankPayload, ["rank", "list", "data"]);
+  const s1 = ranked.filter((token) => {
+    const check = passBasicRankFilter(token);
+    if (!check.pass) {
+      filtered.push({ stage: 1, name: token.symbol || tokenAddress(token), reason: check.reasons.join(", ") });
+      return false;
+    }
+    return true;
+  }).sort((a, b) => num(b.volume) - num(a.volume))
+    .slice(0, Math.max(limit, Number(g.enrichLimit || 5)));
+  stageCounts.s1 = s1.length;
+  log("gmgn", `Stage1 rank: ${ranked.length} -> ${s1.length} pass`);
+
+  const s2 = [];
+  for (const token of s1) {
+    const mint = tokenAddress(token);
+    if (!mint) {
+      filtered.push({ stage: 2, name: token.symbol || "unknown", reason: "missing token address" });
+      continue;
+    }
+    try {
+      const infoPayload = await gmgnFetch("/v1/token/info", { params: { chain: "sol", address: mint } });
+      const info = infoPayload?.data?.data || infoPayload?.data || infoPayload;
+      const infoCheck = analyzeTokenInfo(info);
+      if (!infoCheck.passed) {
+        filtered.push({ stage: 2, name: token.symbol || mint, reason: infoCheck.reasons.join(", ") });
+        continue;
+      }
+      s2.push({ token, info, infoCheck, mint });
+    } catch (error) {
+      filtered.push({ stage: 2, name: token.symbol || mint, reason: error.message });
+    }
+  }
+  stageCounts.s2 = s2.length;
+  log("gmgn", `Stage2 info: ${s1.length} -> ${s2.length} pass`);
+
+  const s3 = [];
+  const minTvl = num(g.minTvl ?? config.screening.minTvl ?? 0);
+  for (const { token, info, infoCheck, mint } of s2) {
+    try {
+      const [holdersPayload, tradersPayload] = await Promise.all([
+        gmgnFetch("/v1/market/token_top_holders", {
+          params: { chain: "sol", address: mint, limit: g.holdersLimit || 20, order_by: "amount_percentage", direction: "desc" },
+        }),
+        gmgnFetch("/v1/market/token_top_traders", {
+          params: { chain: "sol", address: mint, limit: g.holdersLimit || 20, order_by: "profit", direction: "desc" },
+        }),
+      ]);
+      const holders = unwrapList(holdersPayload, ["list", "holders", "data"]);
+      const traders = unwrapList(tradersPayload, ["list", "traders", "data"]);
+      const holdersCheck = analyzeHoldersAndTraders(holders, traders);
+      if (!holdersCheck.passed) {
+        filtered.push({ stage: 3, name: token.symbol || mint, reason: holdersCheck.reasons.join(", ") });
+        continue;
+      }
+      if (g.requireKol && holdersCheck.kolHolding < g.minKolCount) {
+        filtered.push({ stage: 3, name: token.symbol || mint, reason: `KOL holders ${holdersCheck.kolHolding} < ${g.minKolCount}` });
+        continue;
+      }
+      if (holdersCheck.smartHolding + holdersCheck.smartAccumulating < g.minSmartDegenCount) {
+        filtered.push({ stage: 3, name: token.symbol || mint, reason: `smart wallets ${holdersCheck.smartHolding + holdersCheck.smartAccumulating} < ${g.minSmartDegenCount}` });
+        continue;
+      }
+      const topPools = await fetchTopMeteoraDlmmPoolsForMint(mint, minTvl, 2);
+      if (topPools.length === 0) {
+        filtered.push({ stage: 3, name: token.symbol || mint, reason: `no SOL DLMM pool above tvl>${minTvl}` });
+        continue;
+      }
+      s3.push({ token, info, infoCheck, holdersCheck, topPools, mint });
+    } catch (error) {
+      filtered.push({ stage: 3, name: token.symbol || mint, reason: error.message });
+    }
+  }
+  stageCounts.s3 = s3.length;
+  log("gmgn", `Stage3 pool: ${s2.length} -> ${s3.length} pass`);
+
+  const s4 = [];
+  if (g.indicatorFilter !== false) {
+    for (const entry of s3) {
+      let indicatorCheck;
+      try {
+        indicatorCheck = await checkBounceSetup(entry.mint);
+      } catch (error) {
+        log("gmgn", `Stage4 indicator unavailable for ${entry.token.symbol || entry.mint}: ${error.message} - skip filter`);
+        indicatorCheck = { passed: true, reasons: [] };
+      }
+      if (!indicatorCheck.passed) {
+        filtered.push({ stage: 4, name: entry.token.symbol || entry.mint, reason: indicatorCheck.reasons.join(", ") });
+        continue;
+      }
+      s4.push({ ...entry, indicatorSignal: indicatorCheck.signal });
+    }
+  } else {
+    s4.push(...s3);
+  }
+  stageCounts.s4 = s4.length;
+  log("gmgn", `Stage4 indicators: ${s3.length} -> ${s4.length} pass`);
+
+  const pools = [];
+  for (const { token, info, infoCheck, holdersCheck, topPools, indicatorSignal, mint } of s4) {
+    if (pools.length >= limit) break;
+    try {
+      const { pool, detail: poolDetail } = await pickBestPool(topPools);
+      if (!pool) {
+        filtered.push({ stage: 5, name: token.symbol || mint, reason: "pool selection failed" });
+        continue;
+      }
+      const candidate = condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis: infoCheck, holdersAnalysis: holdersCheck, indicatorSignal });
+      if (!candidate.pool || !candidate.base?.mint) {
+        filtered.push({ stage: 5, name: token.symbol || mint, reason: "incomplete pool mapping" });
+        continue;
+      }
+      pools.push(candidate);
+    } catch (error) {
+      filtered.push({ stage: 5, name: token.symbol || mint, reason: error.message });
+    }
+  }
+  stageCounts.s5 = pools.length;
+  log("gmgn", `Stage5 final: ${s4.length} -> ${pools.length} candidates`);
+
+  return {
+    total: ranked.length,
+    stage_counts: stageCounts,
+    pools,
+    filtered_examples: filtered,
+  };
+}
+
+export function formatGmgnCandidateForPrompt(p) {
+  const sym = p.name || p.base?.symbol || "?";
+  const launchpad = p.launchpad || "unknown";
+  const age = p.token_age_hours != null ? `age=${p.token_age_hours}h` : "";
+  const mcap = p.mcap != null ? `mcap=$${(p.mcap / 1000).toFixed(0)}k` : "";
+  const binStep = p.bin_step != null ? `bin_step=${p.bin_step}` : "";
+  const tvl = p.active_tvl != null ? `tvl=$${(p.active_tvl / 1000).toFixed(1)}k` : "";
+  const feeTvl = p.fee_active_tvl_ratio != null ? `fee/tvl=${p.fee_active_tvl_ratio}%` : "";
+  const vol = p.volume_window != null ? `vol=$${(p.volume_window / 1000).toFixed(1)}k` : "";
+  const risk = [
+    p.gmgn_token_info_top10_pct != null ? `top10=${p.gmgn_token_info_top10_pct}%` : "",
+    p.gmgn_dev_team_hold_pct != null ? `dev=${p.gmgn_dev_team_hold_pct}%` : "",
+    p.gmgn_bot_degen_pct != null ? `bot=${p.gmgn_bot_degen_pct}%` : "",
+    p.gmgn_fresh_wallet_pct != null ? `fresh=${p.gmgn_fresh_wallet_pct}%` : "",
+    p.gmgn_token_info_bundler_pct != null ? `bundler=${p.gmgn_token_info_bundler_pct}%` : "",
+  ].filter(Boolean).join(" | ");
+  const traction = [
+    p.holders != null ? `holders=${p.holders.toLocaleString()}` : "",
+    p.gmgn_total_fee_sol != null ? `fees=${p.gmgn_total_fee_sol.toFixed(0)}SOL` : "",
+    p.gmgn_smart_wallets != null ? `smart=${p.gmgn_smart_wallets}` : "",
+    p.gmgn_kol_wallets != null ? `KOL=${p.gmgn_kol_wallets}` : "",
+  ].filter(Boolean).join(" | ");
+  return [
+    `[${[sym, launchpad, age, mcap, binStep].filter(Boolean).join(" | ")}]`,
+    [tvl, feeTvl, vol].filter(Boolean).length ? `  Pool: ${[tvl, feeTvl, vol].filter(Boolean).join(" | ")}` : null,
+    risk ? `  Risk: ${risk}` : null,
+    traction ? `  Traction: ${traction}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+function round(n) {
+  return n != null ? Math.round(n) : null;
 }

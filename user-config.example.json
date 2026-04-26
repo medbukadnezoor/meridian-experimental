@@ -7,6 +7,7 @@
   "llmApiKey": "YOUR_OPENROUTER_API_KEY",
   "llmModel": "qwen3.6-plus",
   "dryRun": false,
+  "screeningSource": "meteora",
 
   "deployAmountSol": 1.5,
   "maxPositions": 3,

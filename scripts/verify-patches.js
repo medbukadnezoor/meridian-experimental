@@ -36,6 +36,7 @@ const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
+const GMGN_SHADOW_PORT_VERIFIER_PATH = join(__dirname, "verify-gmgn-shadow-port.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -274,6 +275,22 @@ function runNanocapBollingerCanaryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runGmgnShadowPortProof() {
+  const result = spawnSync(process.execPath, [GMGN_SHADOW_PORT_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-gmgn-shadow-port failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -294,8 +311,19 @@ function buildChecks() {
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
+  const gmgnShadowPortProof = runGmgnShadowPortProof();
 
   return [
+    {
+      file: "scripts/verify-gmgn-shadow-port.js",
+      label: "[Runtime] GMGN discovery shadow port is source-toggled and non-deploying",
+      test: () =>
+        gmgnShadowPortProof?.success === true &&
+        gmgnShadowPortProof?.screeningSource === "gmgn" &&
+        gmgnShadowPortProof?.sourceSafety?.discoveryExport === true &&
+        gmgnShadowPortProof?.sourceSafety?.shadowScriptNoDeployImport === true &&
+        gmgnShadowPortProof?.sourceSafety?.liveEntriesDisabled === true,
+    },
     {
       file: "decision-context-log.js",
       label: "[Birdeye context] live bot emits offline-first decision-context JSONL without Birdeye in the trading loop",
