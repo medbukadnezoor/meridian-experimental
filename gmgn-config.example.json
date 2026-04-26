@@ -6,7 +6,7 @@
   "direction": "desc",
   "limit": 25,
   "enrichLimit": 5,
-  "requestDelayMs": 1200,
+  "requestDelayMs": 3000,
   "maxRetries": 0,
   "holdersLimit": 20,
   "filters": ["renounced", "frozen", "not_wash_trading"],
