@@ -55,7 +55,7 @@ assert.strictEqual(resolved.indicators.requireAllIntervals, false, "canary accep
 assert.strictEqual(resolved.indicators.rsiLength, 2, "live canary keeps RSI2 payloads for shadow gate");
 
 assert.strictEqual(example.deployAmountSol, 1.5, "sizing unchanged: deployAmountSol");
-assert.strictEqual(example.maxPositions, 3, "sizing unchanged: maxPositions");
+assert.strictEqual(example.maxPositions, 2, "capital throttle: maxPositions");
 assert.strictEqual(example.maxDeployAmount, 1.55, "sizing unchanged: maxDeployAmount");
 assert.strictEqual(example.stopLossPct, -8, "stop loss unchanged");
 assert.strictEqual(example.hardStopLossPct, -15, "hard stop unchanged");
