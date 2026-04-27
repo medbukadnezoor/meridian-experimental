@@ -26,6 +26,7 @@ const ROOT = join(__dirname, '..');
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const STOP_LOSS_TRIAL_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-cooldown.js");
+const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -107,11 +108,28 @@ function runRepeatLowYieldCooldownProof() {
   return JSON.parse(result.stdout);
 }
 
+function runFallingKnifeVetoProof() {
+  const result = spawnSync(process.execPath, [FALLING_KNIFE_VETO_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-falling-knife-veto failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
 const stopLossTrialProof = runStopLossTrialProof();
 const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
+const fallingKnifeProof = runFallingKnifeVetoProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
@@ -225,6 +243,59 @@ const checks = [
       repeatLowYieldProof?.enabled?.deployCount === 3 &&
       repeatLowYieldProof?.tempStateFileCreated === true &&
       repeatLowYieldProof?.tempDirRemoved === true,
+  },
+
+  {
+    file: 'config.js',
+    label: '[Falling-knife veto] runtime config maps veto keys and keeps main default disabled',
+    test: src =>
+      src.includes('fallingKnifeVetoEnabled: u.fallingKnifeVetoEnabled ?? false') &&
+      src.includes('fallingKnifeMaxPriceChange1hPct') &&
+      src.includes('fallingKnifeSeverePriceChangePct') &&
+      src.includes('fallingKnifeMinSellBuyRatio') &&
+      src.includes('fallingKnifeRequireOversoldRsi') &&
+      src.includes('suspiciousVolumeVetoEnabled: u.suspiciousVolumeVetoEnabled ?? false') &&
+      src.includes('suspiciousVolumeMaxMcapToGlobalFeesRatio') &&
+      src.includes('suspiciousVolumeMinGlobalFeesSol') &&
+      src.includes('suspiciousVolumeMaxTokenAgeHours') &&
+      src.includes('suspiciousVolumeMinPriceDropPct'),
+  },
+
+  {
+    file: 'tools/screening.js',
+    label: '[Falling-knife veto] screening drops deterministic falling-knife and suspicious-volume candidates before LLM when enabled',
+    test: src =>
+      src.includes('function getCandidatePriceChange1hPct') &&
+      src.includes('export function getFallingKnifeVetoReason') &&
+      src.includes('export function getSuspiciousVolumeVetoReason') &&
+      src.includes('export function getDeterministicCandidateVetoReason') &&
+      src.includes('formatDeterministicVetoAuditLine') &&
+      src.includes('fallingKnifeVetoEnabled || config.screening.suspiciousVolumeVetoEnabled') &&
+      src.includes('await enrichJupiterTokenSnapshots(eligible)') &&
+      src.includes('falling knife veto:') &&
+      src.includes('suspicious volume/fees veto:'),
+  },
+
+  {
+    file: 'scripts/verify-falling-knife-veto.js',
+    label: '[Falling-knife veto] synthetic proof vetoes dump setups and preserves disabled/benign candidates',
+    test: () =>
+      fallingKnifeProof?.success === true &&
+      fallingKnifeProof?.disabledDefault?.vetoed === false &&
+      fallingKnifeProof?.larpLike?.vetoed === true &&
+      String(fallingKnifeProof?.larpLike?.reason || '').startsWith('falling knife veto:') &&
+      String(fallingKnifeProof?.larpLike?.reason || '').includes('price_change=-48.8%') &&
+      String(fallingKnifeProof?.larpLike?.reason || '').includes('sell/buy=1.66') &&
+      Number(fallingKnifeProof?.larpLike?.audit?.price_change_pct?.toFixed(1)) === -48.8 &&
+      Number(fallingKnifeProof?.larpLike?.audit?.sell_buy_ratio?.toFixed(2)) === 1.66 &&
+      Math.round(Number(fallingKnifeProof?.larpLike?.audit?.mcap_global_fees_ratio)) === 21090 &&
+      Number(fallingKnifeProof?.larpLike?.audit?.token_age_hours) === 66 &&
+      String(fallingKnifeProof?.larpLike?.auditLine || '').includes('Deterministic veto: dropped LARP-SOL') &&
+      String(fallingKnifeProof?.larpLike?.auditLine || '').includes('mcap/global_fees=21090') &&
+      fallingKnifeProof?.benignOversold?.vetoed === false &&
+      fallingKnifeProof?.benign5mFrequency?.vetoed === false &&
+      fallingKnifeProof?.ratioFallingKnife?.vetoed === true &&
+      fallingKnifeProof?.suspiciousVolume?.vetoed === true,
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)

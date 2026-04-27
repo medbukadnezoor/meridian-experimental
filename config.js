@@ -92,6 +92,16 @@ export const config = {
     minTokenAgeHours:   u.minTokenAgeHours   ?? null, // null = no minimum
     maxTokenAgeHours:   u.maxTokenAgeHours   ?? null, // null = no maximum
     athFilterPct:       u.athFilterPct       ?? null, // e.g. -20 = only deploy if price is >= 20% below ATH
+    fallingKnifeVetoEnabled: u.fallingKnifeVetoEnabled ?? false,
+    fallingKnifeMaxPriceChange1hPct: u.fallingKnifeMaxPriceChange1hPct ?? -35,
+    fallingKnifeSeverePriceChangePct: u.fallingKnifeSeverePriceChangePct ?? -45,
+    fallingKnifeMinSellBuyRatio: u.fallingKnifeMinSellBuyRatio ?? 1.25,
+    fallingKnifeRequireOversoldRsi: u.fallingKnifeRequireOversoldRsi ?? false,
+    suspiciousVolumeVetoEnabled: u.suspiciousVolumeVetoEnabled ?? false,
+    suspiciousVolumeMaxMcapToGlobalFeesRatio: u.suspiciousVolumeMaxMcapToGlobalFeesRatio ?? 12000,
+    suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
+    suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
+    suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
   },
 
   // ─── Position Management ────────────────
