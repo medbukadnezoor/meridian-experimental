@@ -91,6 +91,34 @@ function setBaseMintCooldown(db, baseMint, hours, reason) {
   return cooldownUntil;
 }
 
+function normalizeCooldownScope(value, fallback = "token") {
+  const scope = String(value || fallback).toLowerCase();
+  return ["pool", "token", "both"].includes(scope) ? scope : fallback;
+}
+
+function setScopedCooldown(db, entry, hours, reason, scope) {
+  if (scope === "pool" || scope === "both" || !entry.base_mint) {
+    const poolCooldownUntil = setPoolCooldown(entry, hours, reason);
+    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+  }
+  if ((scope === "token" || scope === "both") && entry.base_mint) {
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, hours, reason);
+    if (mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+    }
+  }
+}
+
+function countRecentLowYieldCloses(entry, lookbackHours) {
+  const lookbackMs = Math.max(0, Number(lookbackHours)) * 60 * 60 * 1000;
+  const cutoffMs = Date.now() - lookbackMs;
+  return entry.deploys.filter((d) => {
+    if (!isLowYieldCloseReason(d.close_reason)) return false;
+    const closedAtMs = Date.parse(d.closed_at || "");
+    return Number.isFinite(closedAtMs) && (lookbackMs === 0 || closedAtMs >= cutoffMs);
+  }).length;
+}
+
 // ─── Write ─────────────────────────────────────────────────────
 
 /**
@@ -174,12 +202,25 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
+  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon.
   // Match any reason containing "low yield" (reasons look like "Trailing TP: Low yield: fee/TVL 3.00% < min 7%")
   if (isLowYieldCloseReason(deploy.close_reason)) {
-    const cooldownHours = 4;
-    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
-    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
+    if (config.management?.repeatLowYieldCooldownEnabled) {
+      const triggerCount = Math.max(1, Number(config.management.repeatLowYieldCooldownTriggerCount ?? 3));
+      const lookbackHours = Math.max(0, Number(config.management.repeatLowYieldCooldownLookbackHours ?? 48));
+      const cooldownHours = Math.max(0, Number(config.management.repeatLowYieldCooldownHours ?? 12));
+      const scope = normalizeCooldownScope(config.management.repeatLowYieldCooldownScope, "token");
+      const recentLowYieldCloses = countRecentLowYieldCloses(entry, lookbackHours);
+
+      if (cooldownHours > 0 && recentLowYieldCloses >= triggerCount) {
+        const reason = `repeat low-yield closes (${triggerCount}x/${lookbackHours}h)`;
+        setScopedCooldown(db, entry, cooldownHours, reason, scope);
+      }
+    } else {
+      const cooldownHours = 4;
+      const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
+      log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
+    }
   }
 
   // Set cooldown for stop-loss-family closes — token dumped on us, don't redeploy soon.
@@ -225,8 +266,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
   if (config.management.repeatDeployCooldownEnabled) {
     const triggerCount = Math.max(1, Number(config.management.repeatDeployCooldownTriggerCount ?? 3));
     const cooldownHours = Math.max(0, Number(config.management.repeatDeployCooldownHours ?? 12));
-    const rawScope = String(config.management.repeatDeployCooldownScope || "token").toLowerCase();
-    const scope = ["pool", "token", "both"].includes(rawScope) ? rawScope : "token";
+    const scope = normalizeCooldownScope(config.management.repeatDeployCooldownScope, "token");
     const recentRepeatDeploys = entry.deploys.slice(-triggerCount);
     const repeatedFeeGeneratingDeploys =
       cooldownHours > 0 &&
@@ -235,16 +275,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
 
     if (repeatedFeeGeneratingDeploys) {
       const reason = `repeat fee-generating deploys (${triggerCount}x)`;
-      if (scope === "pool" || scope === "both" || !entry.base_mint) {
-        const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
-        log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
-      }
-      if ((scope === "token" || scope === "both") && entry.base_mint) {
-        const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
-        if (mintCooldownUntil) {
-          log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
-        }
-      }
+      setScopedCooldown(db, entry, cooldownHours, reason, scope);
     }
   }
 

@@ -25,6 +25,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const STOP_LOSS_TRIAL_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
+const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-cooldown.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -90,10 +91,27 @@ function runStopLossTrialProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRepeatLowYieldCooldownProof() {
+  const result = spawnSync(process.execPath, [REPEAT_LOW_YIELD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-repeat-low-yield-cooldown failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
 const stopLossTrialProof = runStopLossTrialProof();
+const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
@@ -191,6 +209,22 @@ const checks = [
       stopLossTrialProof?.rejectedRecheck?.rejected === true &&
       stopLossTrialProof?.tempStateFileCreated === true &&
       stopLossTrialProof?.tempDirRemoved === true,
+  },
+
+  {
+    file: 'scripts/verify-repeat-low-yield-cooldown.js',
+    label: '[Runtime] Repeat low-yield cooldown waits for 3 closes and scopes to token',
+    test: () =>
+      repeatLowYieldProof?.success === true &&
+      repeatLowYieldProof?.disabled?.immediatePoolCooldown === true &&
+      repeatLowYieldProof?.disabled?.tokenCooldownReason === null &&
+      repeatLowYieldProof?.enabled?.firstCloseCooldown === null &&
+      repeatLowYieldProof?.enabled?.secondCloseCooldown === null &&
+      repeatLowYieldProof?.enabled?.thirdClosePoolCooldownReason === null &&
+      repeatLowYieldProof?.enabled?.thirdCloseTokenCooldownReason === 'repeat low-yield closes (3x/48h)' &&
+      repeatLowYieldProof?.enabled?.deployCount === 3 &&
+      repeatLowYieldProof?.tempStateFileCreated === true &&
+      repeatLowYieldProof?.tempDirRemoved === true,
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)

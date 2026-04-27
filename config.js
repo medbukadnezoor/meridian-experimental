@@ -108,6 +108,11 @@ export const config = {
     repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
     repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token", // pool | token | both
     repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
+    repeatLowYieldCooldownEnabled: u.repeatLowYieldCooldownEnabled ?? false,
+    repeatLowYieldCooldownTriggerCount: u.repeatLowYieldCooldownTriggerCount ?? 3,
+    repeatLowYieldCooldownLookbackHours: u.repeatLowYieldCooldownLookbackHours ?? 48,
+    repeatLowYieldCooldownHours: u.repeatLowYieldCooldownHours ?? 12,
+    repeatLowYieldCooldownScope: u.repeatLowYieldCooldownScope ?? "token", // pool | token | both
     minVolumeToRebalance:  u.minVolumeToRebalance  ?? 1000,
     stopLossPct:           u.stopLossPct           ?? u.emergencyPriceDropPct ?? -50,
     stopLossConfirmDelayMs: Math.max(0, Number(u.stopLossConfirmDelayMs ?? 0)),
