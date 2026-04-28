@@ -29,7 +29,7 @@ Do not commit `.env`, `user-config.json`, key material, live state, PM2 logs, or
 - **Range guard**: rejects tiny or malformed single-sided ranges and audits raw/normalized deploy ranges.
 - **Relay hardening**: Agent Meridian relay first, LPAgent direct fallback, Meteora fallback, ownership guard, and retry-aware abort handling.
 - **Telegram operations**: reports, `/setcfg`, `/screen`, `/positions`, settings menus, free-form operator requests, and live tool progress.
-- **CLIProxy routing**: SCREENER, GENERAL, and MANAGEMENT can use VPS-local OpenAI-compatible routing. GENERAL/MANAGEMENT are dense non-reasoning routes.
+- **CLIProxyAPI routing**: SCREENER, GENERAL, and MANAGEMENT can use a VPS-local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) OpenAI-compatible router. GENERAL/MANAGEMENT are dense non-reasoning routes.
 
 ---
 
@@ -221,7 +221,7 @@ Requirements:
 - Solana wallet with SOL
 - RPC endpoint
 - Telegram bot token and allowed user IDs
-- Optional OpenAI-compatible local or remote router
+- Optional OpenAI-compatible local or remote router, such as [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 
 Install:
 
