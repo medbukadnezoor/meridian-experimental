@@ -2,12 +2,12 @@
 
 Autonomous Meteora DLMM liquidity management for Solana. Meridian screens pools, opens positions, monitors live PnL/range/yield, exits risk events, learns from closed trades, and reports through Telegram.
 
-This repository contains the live Meridian code used for two VPS instances:
+This repository supports two common operating lanes:
 
-| Instance | VPS path | Branch | Purpose |
-|---|---|---|---|
-| Main Meridian | `~/meridian` | `experimental` | Larger SOL deployment, more risk-averse screening |
-| Meridian Nanocap | `~/meridian-nanocap` | `nanocap-v1` | Nanocap mean-reversion forward test with faster rug/dump exits |
+| Lane | Typical Branch | Purpose |
+|---|---|---|
+| Main Meridian | `experimental` | Larger deployment lane with more conservative screening |
+| Meridian Nanocap | `nanocap-v1` | Lower-market-cap forward-test lane with faster rug/dump exits |
 
 Do not commit `.env`, `user-config.json`, key material, live state, PM2 logs, or config backups. `user-config.example.json` documents intended settings; `user-config.json` is runtime-only.
 
@@ -62,81 +62,81 @@ Core files:
 
 ---
 
-## Live Nanocap Settings
+## Nanocap Configuration Shape
 
-Nanocap is the aggressive forward-test lane for low market cap mean reversion. Current live intent:
+Nanocap is the aggressive forward-test lane for low market cap mean reversion. Keep exact live values in private runtime config, not in public docs. A typical config shape looks like this:
 
 ```json
 {
   "preset": "nanocap_mean_reversion",
-  "deployAmountSol": 1.5,
-  "maxPositions": 3,
-  "maxDeployAmount": 1.55,
+  "deployAmountSol": "<per-position size>",
+  "maxPositions": "<concurrent-position cap>",
+  "maxDeployAmount": "<single-deploy safety cap>",
 
-  "minMcap": 30000,
-  "maxMcap": 600000,
-  "minTvl": 10000,
-  "maxTvl": 300000,
-  "minVolume": 1000,
-  "minHolders": 100,
-  "minBinStep": 50,
-  "maxBinStep": 250,
-  "minFeeActiveTvlRatio": 0.19,
-  "discoveryPageSize": 100,
+  "minMcap": "<lower market-cap bound>",
+  "maxMcap": "<upper market-cap bound>",
+  "minTvl": "<minimum TVL>",
+  "maxTvl": "<maximum TVL>",
+  "minVolume": "<minimum recent volume>",
+  "minHolders": "<minimum holders>",
+  "minBinStep": "<minimum bin step>",
+  "maxBinStep": "<maximum bin step>",
+  "minFeeActiveTvlRatio": "<minimum fee/active-TVL ratio>",
+  "discoveryPageSize": "<candidate page size>",
   "discoveryExtraCategories": ["new"],
-  "excludeHighSingleOwnership": false,
+  "excludeHighSingleOwnership": "<true-or-false>",
 
   "entryPreset": "rsi_reversal",
-  "indicatorIntervals": ["5_MINUTE"],
-  "rsiLength": 2,
-  "rsiOversold": 30,
-  "requireAllIntervals": false,
+  "indicatorIntervals": ["<entry interval>"],
+  "rsiLength": "<RSI length>",
+  "rsiOversold": "<oversold threshold>",
+  "requireAllIntervals": "<true-or-false>",
 
-  "stopLossPct": -8,
-  "stopLossConfirmDelayMs": 15000,
-  "hardStopLossPct": -15,
-  "stopLossFastClosePct": -10,
-  "stopLossVelocityWindowMs": 90000,
-  "stopLossVelocityClosePct": -3,
-  "earlyDumpPct": -8,
-  "earlyDumpMaxAgeMin": 20,
+  "stopLossPct": "<confirmed soft-stop pct>",
+  "stopLossConfirmDelayMs": "<confirmation delay>",
+  "hardStopLossPct": "<immediate hard-stop pct>",
+  "stopLossFastClosePct": "<immediate fast-stop pct>",
+  "stopLossVelocityWindowMs": "<velocity window>",
+  "stopLossVelocityClosePct": "<velocity drop pct>",
+  "earlyDumpPct": "<new-position dump pct>",
+  "earlyDumpMaxAgeMin": "<early-dump age window>",
 
-  "takeProfitPct": 25,
+  "takeProfitPct": "<take-profit pct>",
   "trailingTakeProfit": true,
-  "trailingTriggerPct": 8,
-  "trailingDropPct": 3,
+  "trailingTriggerPct": "<trail activation pct>",
+  "trailingDropPct": "<trail giveback pct>",
 
-  "screeningModel": "gpt-5.5",
-  "screeningBaseUrl": "http://127.0.0.1:8317/v1",
-  "screeningReasoningEffort": "medium",
+  "screeningModel": "<screener model>",
+  "screeningBaseUrl": "<OpenAI-compatible base URL>",
+  "screeningReasoningEffort": "<optional screener reasoning effort>",
 
-  "generalModel": "gpt-5.5",
-  "generalBaseUrl": "http://127.0.0.1:8317/v1",
+  "generalModel": "<general chat model>",
+  "generalBaseUrl": "<OpenAI-compatible base URL>",
 
-  "managementModel": "gpt-5.5",
-  "managementBaseUrl": "http://127.0.0.1:8317/v1"
+  "managementModel": "<management model>",
+  "managementBaseUrl": "<OpenAI-compatible base URL>"
 }
 ```
 
 Do not add `generalReasoningEffort` or `managementReasoningEffort`. GENERAL and MANAGEMENT are dense non-reasoning routes. Only SCREENER uses `screeningReasoningEffort`.
 
-## Live Main Settings
+## Main Configuration Shape
 
-Main Meridian is the larger-size, more risk-averse lane. Current live intent:
+Main Meridian is the larger-size, more risk-averse lane. Keep its deploy sizing and screening thresholds private. A typical config shape looks like this:
 
 ```json
 {
   "preset": "sol_dca_accumulator",
-  "deployAmountSol": 4.0,
-  "maxPositions": 2,
-  "maxDeployAmount": 4.5,
+  "deployAmountSol": "<larger per-position size>",
+  "maxPositions": "<conservative concurrent-position cap>",
+  "maxDeployAmount": "<single-deploy safety cap>",
 
-  "minTvl": 20000,
-  "minFeeActiveTvlRatio": 0.09,
+  "minTvl": "<minimum TVL>",
+  "minFeeActiveTvlRatio": "<minimum fee/active-TVL ratio>",
 
   "entryPreset": "rsi_reversal",
-  "indicatorIntervals": ["5_MINUTE"],
-  "rsiOversold": 35,
+  "indicatorIntervals": ["<entry interval>"],
+  "rsiOversold": "<oversold threshold>",
   "exitPreset": null,
 
   "solMode": true,
@@ -154,11 +154,11 @@ Nanocap exits are layered from fastest to slowest:
 
 | Trigger | Behavior |
 |---|---|
-| `hardStopLossPct=-15` | Close immediately |
-| `stopLossFastClosePct=-10` | Close immediately |
-| `stopLossVelocityClosePct=-3` over `stopLossVelocityWindowMs=90000` while through soft stop | Close immediately |
-| `earlyDumpPct=-8` within `earlyDumpMaxAgeMin=20` | Close immediately |
-| `stopLossPct=-8` ordinary soft stop | Recheck after `stopLossConfirmDelayMs=15000`, then close if still below |
+| `hardStopLossPct` | Immediate close at the hard loss threshold |
+| `stopLossFastClosePct` | Immediate close at the fast-stop threshold |
+| `stopLossVelocityClosePct` over `stopLossVelocityWindowMs` | Immediate close when losses accelerate quickly |
+| `earlyDumpPct` within `earlyDumpMaxAgeMin` | Immediate close for fresh-position dumps |
+| `stopLossPct` | Confirm after `stopLossConfirmDelayMs`, then close if still below threshold |
 
 Urgent stop-loss paths in the PnL poller call `close_position` directly with `urgent: true`. They do not wait for MANAGER reasoning.
 
@@ -176,19 +176,19 @@ node scripts/analyze-pnl-snapshots.js --json
 
 All LLM providers use OpenAI-compatible chat completions.
 
-| Role | Current Nanocap Route | Reasoning |
+| Role | Example Route | Reasoning |
 |---|---|---|
-| SCREENER | `gpt-5.5` through VPS CLIProxy | `screeningReasoningEffort: "medium"` |
-| GENERAL | `gpt-5.5` through VPS CLIProxy | none |
-| MANAGEMENT | `gpt-5.5` through VPS CLIProxy | none |
-| SCREENER fallback | `qwen3.6-plus` through DashScope | none |
+| SCREENER | Stronger model through an OpenAI-compatible router | Optional via `screeningReasoningEffort` |
+| GENERAL | Dense chat/tool model through an OpenAI-compatible router | none |
+| MANAGEMENT | Dense action model through an OpenAI-compatible router | none |
+| SCREENER fallback | Separate compatible fallback provider | none |
 
 Endpoint smoke test:
 
 ```bash
 node scripts/verify-llm-endpoint.js \
-  --base-url http://127.0.0.1:8317/v1 \
-  --model gpt-5.5 \
+  --base-url <openai-compatible-base-url> \
+  --model <model-name> \
   --api-key NO_API_KEY \
   --chat-smoke \
   --tool-call-smoke
@@ -204,9 +204,9 @@ tail -n 40 logs/api-activity-$(date -u +%F).jsonl
 Expected log shape:
 
 ```json
-{"agent_role":"GENERAL","model":"gpt-5.5","base_url_host":"127.0.0.1:8317","reasoning_effort":null,"status":"success"}
-{"agent_role":"MANAGER","model":"gpt-5.5","base_url_host":"127.0.0.1:8317","reasoning_effort":null,"status":"success"}
-{"agent_role":"SCREENER","model":"gpt-5.5","base_url_host":"127.0.0.1:8317","reasoning_effort":"medium","status":"success"}
+{"agent_role":"GENERAL","model":"<model-name>","base_url_host":"<host>","reasoning_effort":null,"status":"success"}
+{"agent_role":"MANAGER","model":"<model-name>","base_url_host":"<host>","reasoning_effort":null,"status":"success"}
+{"agent_role":"SCREENER","model":"<model-name>","base_url_host":"<host>","reasoning_effort":"<optional>","status":"success"}
 ```
 
 The startup line `Model: ...` is legacy/global display text. Trust `verify-runtime-config.js` and `api-activity` for per-role routing.
@@ -221,7 +221,7 @@ Requirements:
 - Solana wallet with SOL
 - RPC endpoint
 - Telegram bot token and allowed user IDs
-- Optional CLIProxy running on `127.0.0.1:8317`
+- Optional OpenAI-compatible local or remote router
 
 Install:
 
@@ -264,13 +264,13 @@ Live production bots run on VPS under PM2. Do not run `node index.js` locally wh
 Main bot:
 
 ```bash
-ssh ohox 'export PATH=/home/ubuntu/.nvm/versions/node/v20.20.2/bin:$PATH; cd ~/meridian && git rev-parse --short HEAD && pm2 status meridian'
+ssh <host> 'cd <main-bot-path> && git rev-parse --short HEAD && pm2 status <main-process-name>'
 ```
 
 Nanocap bot:
 
 ```bash
-ssh ohox 'export PATH=/home/ubuntu/.nvm/versions/node/v20.20.2/bin:$PATH; cd ~/meridian-nanocap && git rev-parse --short HEAD && pm2 status meridian-nanocap'
+ssh <host> 'cd <nanocap-bot-path> && git rev-parse --short HEAD && pm2 status <nanocap-process-name>'
 ```
 
 Before analysis:
@@ -282,13 +282,13 @@ Before analysis:
 Before restart:
 
 ```bash
-ssh ohox 'export PATH=/home/ubuntu/.nvm/versions/node/v20.20.2/bin:$PATH; pm2 logs meridian-nanocap --lines 120 --nostream'
+ssh <host> 'pm2 logs <process-name> --lines 120 --nostream'
 ```
 
-Restart nanocap only:
+Restart a process:
 
 ```bash
-ssh ohox 'export PATH=/home/ubuntu/.nvm/versions/node/v20.20.2/bin:$PATH; pm2 restart meridian-nanocap --update-env'
+ssh <host> 'pm2 restart <process-name> --update-env'
 ```
 
 Patch verifier:
@@ -315,7 +315,7 @@ Examples:
 status?
 what are your recommendations?
 screen now and see if we can deploy any pools
-find LUCA-SOL and screen
+find <PAIR> and screen
 why was this pool skipped?
 show wallet balances and open positions
 ```
@@ -323,12 +323,12 @@ show wallet balances and open positions
 Operator config changes should use explicit slash commands:
 
 ```text
-/setcfg maxPositions 3
-/setcfg maxMcap 600000
-/setcfg stopLossFastClosePct -9
+/setcfg maxPositions <number>
+/setcfg maxMcap <usd-cap>
+/setcfg stopLossFastClosePct <negative-percent>
 ```
 
-Free-form messages like `change maxPositions to 3` may be answered conversationally by GENERAL and should not be trusted as persisted config unless the logs show `update_config`.
+Free-form messages like `change maxPositions to <number>` may be answered conversationally by GENERAL and should not be trusted as persisted config unless the logs show `update_config`.
 
 Settings menu and `/setcfg` use the operator-only `update_config` path. LLM free-form config mutation is blocked.
 
@@ -340,7 +340,7 @@ Settings menu and `/setcfg` use the operator-only `update_config` path. LLM free
 2. Optional extra categories are merged and deduped.
 3. Blacklists, cooldowns, ownership flags, warning filters, and launchpad filters apply.
 4. Falling-knife and suspicious-volume vetoes remove obvious bad setups.
-5. Chart indicators confirm entry, for example RSI2 <= 30 on 5m.
+5. Chart indicators confirm entry, for example an RSI, Bollinger, or Supertrend preset on the configured interval.
 6. GMGN/OKX/security enrichment adds holder and behavior signals.
 7. Darwin ranks the shortlist.
 8. SCREENER decides deploy or no-deploy.
@@ -408,11 +408,11 @@ experimental  -> main VPS bot
 nanocap-v1    -> nanocap VPS bot
 ```
 
-Current local worktree intent:
+Suggested local worktree intent:
 
 ```text
-meridian-experimental                   experimental
-.worktrees/meridian-nanocap-config-600  nanocap-v1
+<main-worktree>     experimental
+<nanocap-worktree>  nanocap-v1
 ```
 
 Old worktrees should be archived or removed instead of left around as active-looking branches.
