@@ -25,6 +25,7 @@ import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnable
 import { appendDecision } from "./decision-log.js";
 import { appendDecisionContext } from "./decision-context-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
+import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 
@@ -435,6 +436,16 @@ export async function runManagementCycle({ silent = false } = {}) {
         }
         exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        continue;
+      }
+      const supertrendExit = await evaluateSupertrendLossExit(p, config.management);
+      if (supertrendExit?.pending) {
+        log("state", supertrendExit.reason);
+        continue;
+      }
+      if (supertrendExit) {
+        exitMap.set(p.position, supertrendExit);
+        log("state", `Exit alert for ${p.pair}: ${supertrendExit.reason}`);
       }
     }
 
@@ -462,7 +473,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         } else {
           log(
             "indicators",
-            `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${exit.reason}`,
+            `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${exit.reason}`,
           );
         }
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exit.reason });
@@ -518,7 +529,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         } else {
           log(
             "indicators",
-            `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${closeRule.reason}`,
+            `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${closeRule.reason}`,
           );
         }
         actionMap.set(p.position, closeRule);
@@ -1061,10 +1072,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             break;
           }
-          const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
-          if (!indicatorConfirmation.confirmed) {
-            log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
-            continue;
+          if ((exit.indicatorPolicy ?? "confirm") !== "bypass") {
+            const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
+            if (!indicatorConfirmation.confirmed) {
+              log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
+              continue;
+            }
+          } else {
+            log("state", `[PnL poll] Exit indicator bypass: ${p.pair} — ${exit.reason}`);
           }
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
             if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
@@ -1112,6 +1127,21 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
+        const supertrendExit = await evaluateSupertrendLossExit(p, config.management);
+        if (supertrendExit?.pending) {
+          log("state", `[PnL poll] ${supertrendExit.reason}`);
+        } else if (supertrendExit) {
+          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+          const sinceLastTrigger = Date.now() - _pollTriggeredAt;
+          if (sinceLastTrigger >= cooldownMs) {
+            _pollTriggeredAt = Date.now();
+            log("state", `[PnL poll] Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — triggering management`);
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
+          } else {
+            log("state", `[PnL poll] Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
+          }
+          break;
+        }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
@@ -1144,10 +1174,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
             break;
           }
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
-          const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
-          if (!indicatorConfirmation.confirmed) {
-            log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
-            continue;
+          if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
+            const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
+            if (!indicatorConfirmation.confirmed) {
+              log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
+              continue;
+            }
+          } else {
+            log("state", `[PnL poll] Deterministic close indicator bypass: ${p.pair} — ${closeRule.reason}`);
           }
           const bypassPollCooldown = !!closeRule.urgent;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;

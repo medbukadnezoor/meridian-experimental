@@ -98,6 +98,22 @@ function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, nowMs = Date.now
   return { changed: true, velocity, initialized };
 }
 
+function clearSupertrendLossExitFields(pos) {
+  if (!pos) return false;
+  let changed = false;
+  for (const key of [
+    "supertrend_loss_exit_checks",
+    "supertrend_loss_exit_last_at",
+    "supertrend_loss_exit_last_direction",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(pos, key)) {
+      delete pos[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function isGhostLikeLivePosition(position) {
   const value = Math.abs(toFiniteNumber(position?.total_value_usd, 0));
   const fees = Math.abs(toFiniteNumber(position?.unclaimed_fees_usd, 0));
@@ -238,6 +254,42 @@ export function clearLowYieldStrike(position_address) {
   save(state);
 }
 
+export function recordSupertrendLossExitCheck(position_address, { bearish, confirmChecks = 2 } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) {
+    return { count: 0, confirmChecks: Math.max(1, Number(confirmChecks) || 1), confirmed: false };
+  }
+
+  const required = Math.max(1, Math.trunc(Number(confirmChecks) || 1));
+  if (!bearish) {
+    const changed = clearSupertrendLossExitFields(pos);
+    if (changed) save(state);
+    return { count: 0, confirmChecks: required, confirmed: false };
+  }
+
+  const previous = Math.max(0, Math.trunc(Number(pos.supertrend_loss_exit_checks) || 0));
+  const count = Math.min(previous + 1, required);
+  pos.supertrend_loss_exit_checks = count;
+  pos.supertrend_loss_exit_last_at = new Date().toISOString();
+  pos.supertrend_loss_exit_last_direction = "bearish";
+  save(state);
+  return {
+    count,
+    confirmChecks: required,
+    confirmed: count >= required,
+  };
+}
+
+export function clearSupertrendLossExitCheck(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  const changed = clearSupertrendLossExitFields(pos);
+  if (changed) save(state);
+  return changed;
+}
+
 /**
  * How many minutes has a position been out of range?
  * Returns 0 if currently in range.
@@ -316,6 +368,7 @@ export function recordClose(position_address, reason) {
   if (!pos) return;
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  clearSupertrendLossExitFields(pos);
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -331,6 +384,7 @@ export function recordRebalance(old_position, new_position) {
   if (old) {
     old.closed = true;
     old.closed_at = new Date().toISOString();
+    clearSupertrendLossExitFields(old);
     old.notes.push(`Rebalanced into ${new_position} at ${old.closed_at}`);
   }
   const newPos = state.positions[new_position];
@@ -729,6 +783,7 @@ export function syncOpenPositions(active_addresses) {
 
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
+    clearSupertrendLossExitFields(pos);
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     changed = true;
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
@@ -800,6 +855,7 @@ export function reconcileGhostPositions(livePositions = []) {
       if (tracked && !tracked.closed) {
         tracked.closed = true;
         tracked.closed_at = nowIso;
+        clearSupertrendLossExitFields(tracked);
         tracked.notes = Array.isArray(tracked.notes) ? tracked.notes : [];
         tracked.notes.push(`Auto-closed during ghost reconciliation: ${candidate.reason}`);
         pushEvent(state, {

@@ -28,7 +28,7 @@ function safeNum(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function buildSignalSummary(payload) {
+export function buildSignalSummary(payload) {
   const latest = payload?.latest || {};
   const candle = latest?.candle || {};
   const rsi = safeNum(latest?.rsi?.value);

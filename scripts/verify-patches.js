@@ -18,11 +18,10 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const SYNCED_NANOCAP_USER_CONFIG_PATH = join(ROOT, "..", "archive", "vps-backups", "nanocap", "user-config.json");
-const REPO_LOCAL_USER_CONFIG_PATH = join(ROOT, "user-config.json");
+const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
 const NANOCAP_USER_CONFIG_PATH = existsSync(SYNCED_NANOCAP_USER_CONFIG_PATH)
   ? SYNCED_NANOCAP_USER_CONFIG_PATH
-  : REPO_LOCAL_USER_CONFIG_PATH;
-const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
+  : NANOCAP_EXAMPLE_CONFIG_PATH;
 const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js");
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
@@ -36,6 +35,7 @@ const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
+const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -295,6 +295,22 @@ function runNanocapBollingerCanaryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runSupertrendLossExitProof() {
+  const result = spawnSync(process.execPath, [SUPERTREND_LOSS_EXIT_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-supertrend-loss-exit failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -315,6 +331,7 @@ function buildChecks() {
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
+  const supertrendLossExitProof = runSupertrendLossExitProof();
 
   return [
     {
@@ -1001,8 +1018,43 @@ function buildChecks() {
         exampleProof?.management?.profitGivebackEmergencyEnabled === true &&
         Number(exampleProof?.management?.profitGivebackTriggerPct) === 6 &&
         Number(exampleProof?.management?.profitGivebackFloorPct) === 2 &&
+        exampleProof?.management?.supertrendLossExitEnabled === true &&
+        Number(exampleProof?.management?.supertrendLossExitPnlPct) === -4 &&
+        exampleProof?.management?.supertrendLossExitInterval === "15_MINUTE" &&
+        Number(exampleProof?.management?.supertrendLossExitConfirmChecks) === 2 &&
         exampleProof?.management?.pnlSnapshotLoggingEnabled === true &&
         exampleProof?.management?.pnlSnapshotBotName === "nanocap",
+    },
+    {
+      file: "scripts/verify-runtime-config.js",
+      label: "[Runtime] Supertrend loss exit defaults stay disabled outside nanocap presets",
+      test: () =>
+        defaultProof.userConfigExists === false &&
+        defaultProof?.management?.supertrendLossExitEnabled === false &&
+        defaultProof?.management?.supertrendLossExitPnlPct === null &&
+        defaultProof?.management?.supertrendLossExitInterval === "15_MINUTE" &&
+        Number(defaultProof?.management?.supertrendLossExitConfirmChecks) === 2,
+    },
+    {
+      file: "scripts/verify-supertrend-loss-exit.js",
+      label: "[Runtime] synthetic Supertrend loss exit proof covers two-check close, resets, suspicious PnL, disabled config, and no live API",
+      test: () =>
+        supertrendLossExitProof?.success === true &&
+        supertrendLossExitProof?.cases?.firstBearishPending?.pending === true &&
+        Number(supertrendLossExitProof?.cases?.firstBearishPending?.count) === 1 &&
+        Number(supertrendLossExitProof?.cases?.firstBearishPending?.confirmChecks) === 2 &&
+        supertrendLossExitProof?.cases?.secondBearishClose?.action === "CLOSE" &&
+        supertrendLossExitProof?.cases?.secondBearishClose?.indicatorPolicy === "bypass" &&
+        supertrendLossExitProof?.cases?.secondBearishClose?.urgent === false &&
+        supertrendLossExitProof?.cases?.bullishReset === true &&
+        supertrendLossExitProof?.cases?.unknownReset === true &&
+        supertrendLossExitProof?.cases?.unavailableReset === true &&
+        supertrendLossExitProof?.cases?.recoveredReset === true &&
+        supertrendLossExitProof?.cases?.suspiciousNoTrigger === true &&
+        supertrendLossExitProof?.cases?.disabledNoTrigger === true &&
+        Number(supertrendLossExitProof?.sourceSafety?.liveApiCalls) === 0 &&
+        supertrendLossExitProof?.sourceSafety?.importedIndexJs === false &&
+        supertrendLossExitProof?.sourceSafety?.importedChartIndicators === false,
     },
     {
       file: "user-config.example.json",
@@ -1229,7 +1281,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, GPT-5.5 screener trial telemetry, and offline Birdeye decision-context logging.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, Supertrend loss exit, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, GPT-5.5 screener trial telemetry, and offline Birdeye decision-context logging.\n");
 
   for (const check of checks) {
     let src = "";
