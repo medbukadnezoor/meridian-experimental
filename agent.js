@@ -185,6 +185,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       model: modelOverride || llmCfg.managementModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
       baseURL: llmCfg.managementBaseUrl || globalUrl,
       apiKey: llmCfg.managementApiKey || globalKey,
+      // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
       reasoningEffort: null,
     };
   }
@@ -195,6 +196,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
     model: modelOverride || llmCfg.generalModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
     baseURL: llmCfg.generalBaseUrl || globalUrl,
     apiKey: llmCfg.generalApiKey || globalKey,
+    // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
     reasoningEffort: null,
   };
 }

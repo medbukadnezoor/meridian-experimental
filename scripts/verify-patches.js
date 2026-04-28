@@ -57,6 +57,27 @@ function materialDefinitionsFieldPresent(src, key) {
   return new RegExp(`["']${key}["']`).test(src);
 }
 
+function roleReasoningConfigKeysAbsent() {
+  const forbiddenKeys = ["managementReasoningEffort", "generalReasoningEffort"];
+  const files = ["config-builder.js", "config.js", "user-config.example.json"];
+  return files.every((file) => {
+    const src = loadSource(file);
+    return forbiddenKeys.every((key) => !src.includes(key));
+  });
+}
+
+function managerAndGeneralReasoningEffortNull(src) {
+  const managerRoute = src.match(/if \(role === "MANAGER"\) \{[\s\S]*?return \{([\s\S]*?)\};\s*\}/);
+  const generalRoute = src.match(/return \{\s*role,\s*routeKind: "primary",[\s\S]*?model:\s*modelOverride \|\| llmCfg\.generalModel[\s\S]*?\};\s*\}/);
+  return Boolean(
+    managerRoute?.[1] &&
+    /reasoningEffort:\s*null/.test(managerRoute[1]) &&
+    generalRoute?.[0] &&
+    /reasoningEffort:\s*null/.test(generalRoute[0]) &&
+    src.includes("MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort")
+  );
+}
+
 function parseNanocapUserConfig() {
   if (!existsSync(NANOCAP_USER_CONFIG_PATH)) return {};
   return JSON.parse(readFileSync(NANOCAP_USER_CONFIG_PATH, "utf8"));
@@ -387,6 +408,13 @@ function buildChecks() {
         src.includes("reasoningEffort: llmCfg.screeningReasoningEffort || null") &&
         src.includes("callParams.reasoning_effort = activeRoute.reasoningEffort") &&
         src.includes("reasoning_effort: activeRoute.reasoningEffort || null"),
+    },
+    {
+      file: "agent.js",
+      label: "[CLIProxy] MANAGER and GENERAL stay dense non-reasoning routes",
+      test: (src) =>
+        managerAndGeneralReasoningEffortNull(src) &&
+        roleReasoningConfigKeysAbsent(),
     },
     {
       file: "agent.js",
