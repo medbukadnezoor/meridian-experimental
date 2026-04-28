@@ -252,6 +252,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          // Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.
           if (agentType === "SCREENER" && config.llm.screeningReasoningEffort) {
             callParams.reasoning_effort = config.llm.screeningReasoningEffort;
           }

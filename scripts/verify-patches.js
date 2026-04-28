@@ -131,6 +131,29 @@ const stopLossTrialProof = runStopLossTrialProof();
 const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 const fallingKnifeProof = runFallingKnifeVetoProof();
 
+function loadSource(file) {
+  return readFileSync(join(ROOT, file), 'utf8');
+}
+
+function roleReasoningConfigKeysAbsent() {
+  const forbiddenKeys = ['managementReasoningEffort', 'generalReasoningEffort'];
+  const files = ['config.js', 'setup.js', 'tools/executor.js', 'user-config.example.json'];
+  return files.every((file) => {
+    const src = loadSource(file);
+    return forbiddenKeys.every((key) => !src.includes(key));
+  });
+}
+
+function managerAndGeneralReasoningEffortNull(src) {
+  return (
+    src.includes('Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.') &&
+    src.includes('if (agentType === "SCREENER" && config.llm.screeningReasoningEffort)') &&
+    src.includes('callParams.reasoning_effort = config.llm.screeningReasoningEffort') &&
+    src.includes('reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null') &&
+    roleReasoningConfigKeysAbsent()
+  );
+}
+
 const checks = [
   // ── SECURITY PATCHES (must always be present) ────────────────────────────
 
@@ -296,6 +319,12 @@ const checks = [
       fallingKnifeProof?.benign5mFrequency?.vetoed === false &&
       fallingKnifeProof?.ratioFallingKnife?.vetoed === true &&
       fallingKnifeProof?.suspiciousVolume?.vetoed === true,
+  },
+
+  {
+    file: 'agent.js',
+    label: '[CLIProxy] MANAGER and GENERAL stay dense non-reasoning routes',
+    test: src => managerAndGeneralReasoningEffortNull(src),
   },
 
   // Patch 7 — OPERATOR COMMAND Telegram wrapping (index.js)
