@@ -120,6 +120,32 @@ Nanocap is the aggressive forward-test lane for low market cap mean reversion. C
 
 Do not add `generalReasoningEffort` or `managementReasoningEffort`. GENERAL and MANAGEMENT are dense non-reasoning routes. Only SCREENER uses `screeningReasoningEffort`.
 
+## Live Main Settings
+
+Main Meridian is the larger-size, more risk-averse lane. Current live intent:
+
+```json
+{
+  "preset": "sol_dca_accumulator",
+  "deployAmountSol": 4.0,
+  "maxPositions": 2,
+  "maxDeployAmount": 4.5,
+
+  "minTvl": 20000,
+  "minFeeActiveTvlRatio": 0.09,
+
+  "entryPreset": "rsi_reversal",
+  "indicatorIntervals": ["5_MINUTE"],
+  "rsiOversold": 35,
+  "exitPreset": null,
+
+  "solMode": true,
+  "trailingTakeProfit": true
+}
+```
+
+Main should stay more conservative than nanocap because each deploy uses more capital. Keep wider nanocap recall experiments separate from main unless a forward-test result justifies promotion.
+
 ---
 
 ## Flash-Dump Protection
@@ -423,4 +449,3 @@ git push private experimental
 - Use `/setcfg` or CLI config set for live config changes.
 - Use `verify-runtime-config.js --json` after config changes.
 - Use `verify-patches.js` before pushing code.
-
