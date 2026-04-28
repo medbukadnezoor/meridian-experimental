@@ -984,6 +984,16 @@ function buildChecks() {
     },
     {
       file: "user-config.example.json",
+      label: "[Runtime] nanocap example resolves expanded Meteora discovery recall",
+      test: () =>
+        exampleProof.userConfigExists === true &&
+        Number(exampleProof?.screening?.discoveryPageSize) === 100 &&
+        Array.isArray(exampleProof?.screening?.discoveryExtraCategories) &&
+        exampleProof.screening.discoveryExtraCategories.includes("new") &&
+        exampleProof?.screening?.excludeHighSingleOwnership === false,
+    },
+    {
+      file: "user-config.example.json",
       label: "[Runtime] nanocap example resolves RSI2 5m entry gate",
       test: () =>
         exampleProof.userConfigExists === true &&

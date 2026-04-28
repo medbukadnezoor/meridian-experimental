@@ -85,6 +85,9 @@ function buildProof(imported, requestedUserConfigPath) {
       minAgeBeforeYieldCheck: imported.config.management.minAgeBeforeYieldCheck,
     },
     screening: {
+      excludeHighSingleOwnership: imported.config.screening.excludeHighSingleOwnership,
+      discoveryPageSize: imported.config.screening.discoveryPageSize,
+      discoveryExtraCategories: imported.config.screening.discoveryExtraCategories,
       fallingKnifeVetoEnabled: imported.config.screening.fallingKnifeVetoEnabled,
       fallingKnifeMaxPriceChange1hPct: imported.config.screening.fallingKnifeMaxPriceChange1hPct,
       fallingKnifeSeverePriceChangePct: imported.config.screening.fallingKnifeSeverePriceChangePct,

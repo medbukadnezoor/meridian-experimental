@@ -22,7 +22,10 @@
 
   "timeframe": "4h",
   "category": "trending",
+  "discoveryPageSize": 100,
+  "discoveryExtraCategories": ["new"],
   "excludeHighSupplyConcentration": false,
+  "excludeHighSingleOwnership": false,
 
   "minTvl": 10000,
   "maxTvl": 300000,

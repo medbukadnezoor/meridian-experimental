@@ -317,13 +317,15 @@ async function enrichPvpRisk(pools) {
  */
 export async function discoverPools({
   page_size = 50,
+  category = null,
 } = {}) {
   const s = config.screening;
+  const discoveryCategory = category || s.category;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
     s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
-    "base_token_has_high_single_ownership=false",
+    s.excludeHighSingleOwnership ? "base_token_has_high_single_ownership=false" : null,
     "pool_type=dlmm",
     `base_token_market_cap>=${s.minMcap}`,
     `base_token_market_cap<=${s.maxMcap}`,
@@ -349,12 +351,12 @@ export async function discoverPools({
       `page_size=${page_size}` +
       `&filter_by=${encodeURIComponent(filters)}` +
       `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`
+      `&category=${discoveryCategory}`
     : `${POOL_DISCOVERY_BASE}/pools?` +
       `page_size=${page_size}` +
       `&filter_by=${encodeURIComponent(filters)}` +
       `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`;
+      `&category=${discoveryCategory}`;
 
   const res = await fetch(url, {
     headers: useServerDiscovery && config.api.publicApiKey
@@ -475,7 +477,27 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const { pools } = await discoverPools({ page_size: 50 });
+  const primaryCategory = config.screening.category || "trending";
+  const categories = [primaryCategory, ...(config.screening.discoveryExtraCategories || [])]
+    .map((category) => String(category || "").trim())
+    .filter(Boolean)
+    .filter((category, index, list) => list.indexOf(category) === index);
+  const pageSize = config.screening.discoveryPageSize || 50;
+  const discoveries = await Promise.all(categories.map((category) =>
+    discoverPools({ page_size: pageSize, category })
+      .catch((error) => {
+        log("screening", `Discovery category ${category} failed: ${error.message}`);
+        return { total: 0, pools: [] };
+      })
+  ));
+  const poolsByAddress = new Map();
+  for (const discovery of discoveries) {
+    for (const pool of discovery.pools || []) {
+      if (!poolsByAddress.has(pool.pool)) poolsByAddress.set(pool.pool, pool);
+    }
+  }
+  const pools = [...poolsByAddress.values()];
+  const totalScreened = discoveries.reduce((sum, discovery) => sum + (discovery.total ?? discovery.pools?.length ?? 0), 0);
   const filteredOut = [];
 
   // Exclude pools where the wallet already has an open position
@@ -733,7 +755,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   return {
     candidates: ranked,
     total_eligible: ranked.length,
-    total_screened: pools.length,
+    total_screened: totalScreened || pools.length,
     filtered_examples: filteredOut.slice(0, 3),
   };
 }
