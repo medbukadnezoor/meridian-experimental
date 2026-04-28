@@ -105,6 +105,9 @@ Nanocap is the aggressive forward-test lane for low market cap mean reversion. K
   "trailingTakeProfit": true,
   "trailingTriggerPct": "<trail activation pct>",
   "trailingDropPct": "<trail giveback pct>",
+  "profitGivebackEmergencyEnabled": "<true-or-false>",
+  "profitGivebackTriggerPct": "<minimum confirmed peak pct>",
+  "profitGivebackFloorPct": "<emergency current-PnL floor pct>",
 
   "screeningModel": "<screener model>",
   "screeningBaseUrl": "<OpenAI-compatible base URL>",
@@ -157,6 +160,7 @@ Nanocap exits are layered from fastest to slowest:
 | `hardStopLossPct` | Immediate close at the hard loss threshold |
 | `stopLossFastClosePct` | Immediate close at the fast-stop threshold |
 | `stopLossVelocityClosePct` over `stopLossVelocityWindowMs` | Immediate close when losses accelerate quickly |
+| `profitGivebackEmergencyEnabled` | Immediate close when a green position gives back below the configured floor |
 | `earlyDumpPct` within `earlyDumpMaxAgeMin` | Immediate close for fresh-position dumps |
 | `stopLossPct` | Confirm after `stopLossConfirmDelayMs`, then close if still below threshold |
 

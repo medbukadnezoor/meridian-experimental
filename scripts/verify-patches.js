@@ -577,6 +577,9 @@ function buildChecks() {
         src.includes("stopLossFastClosePct") &&
         src.includes("stopLossVelocityWindowMs") &&
         src.includes("stopLossVelocityClosePct") &&
+        src.includes("profitGivebackEmergencyEnabled") &&
+        src.includes("profitGivebackTriggerPct") &&
+        src.includes("profitGivebackFloorPct") &&
         src.includes("isNanocapPreset ? -10 : null") &&
         src.includes("isNanocapPreset ? 90_000 : null") &&
         src.includes("isNanocapPreset ? -3 : null"),
@@ -773,6 +776,9 @@ function buildChecks() {
         emergencyStopProof?.velocityStop?.action === "STOP_LOSS" &&
         emergencyStopProof?.velocityStop?.urgent === true &&
         String(emergencyStopProof?.velocityStop?.reason || "").startsWith("Velocity stop loss:") &&
+        emergencyStopProof?.givebackExit?.action === "PROFIT_GIVEBACK" &&
+        emergencyStopProof?.givebackExit?.urgent === true &&
+        String(emergencyStopProof?.givebackExit?.reason || "").startsWith("Profit giveback emergency:") &&
         emergencyStopProof?.ordinarySoft?.action === "STOP_LOSS_CANDIDATE" &&
         emergencyStopProof?.ordinarySoft?.needsConfirmation === true &&
         Number(emergencyStopProof?.ordinarySoft?.confirmDelayMs) === 15000 &&
@@ -991,6 +997,10 @@ function buildChecks() {
         Number(exampleProof?.management?.stopLossVelocityClosePct) === -3 &&
         Number(exampleProof?.management?.earlyDumpPct) === -8 &&
         Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
+        Number(exampleProof?.management?.trailingTriggerPct) === 6 &&
+        exampleProof?.management?.profitGivebackEmergencyEnabled === true &&
+        Number(exampleProof?.management?.profitGivebackTriggerPct) === 6 &&
+        Number(exampleProof?.management?.profitGivebackFloorPct) === 2 &&
         exampleProof?.management?.pnlSnapshotLoggingEnabled === true &&
         exampleProof?.management?.pnlSnapshotBotName === "nanocap",
     },

@@ -310,6 +310,30 @@ function scheduleStopLossConfirmation(position, exit) {
   return true;
 }
 
+function isEmergencyDirectExit(exit) {
+  return !!exit?.urgent && (
+    exit.action === "STOP_LOSS" ||
+    exit.action === "PROFIT_GIVEBACK"
+  );
+}
+
+async function closeEmergencyDirect(position, exit, source = "management") {
+  const pair = position?.pair || position?.pool_name || position?.position || "position";
+  const reason = exit?.reason || "Emergency exit";
+  log("state", `[${source}] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
+  const result = await executeTool("close_position", {
+    position_address: position.position,
+    reason,
+    urgent: true,
+  });
+  if (result?.success) {
+    log("state", `[${source}] Emergency direct close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+  } else {
+    log("cron_error", `[${source}] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
+  }
+  return result;
+}
+
 
 async function runBriefing() {
   log("cron", "Starting morning briefing");
@@ -383,6 +407,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // JS trailing TP check
     const exitMap = new Map();
+    const directEmergencyMap = new Map();
     for (const p of positionData) {
       if (!p.pnl_pct_suspicious && queuePeakConfirmation(p.position, p.pnl_pct)) {
         schedulePeakConfirmation(p.position);
@@ -399,6 +424,15 @@ export async function runManagementCycle({ silent = false } = {}) {
           scheduleStopLossConfirmation(p, exit);
           continue;
         }
+        if (isEmergencyDirectExit(exit)) {
+          const result = await closeEmergencyDirect(p, exit, "Management cycle");
+          directEmergencyMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: exit.reason,
+            result,
+          });
+          continue;
+        }
         exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
@@ -408,6 +442,10 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
+      if (directEmergencyMap.has(p.position)) {
+        actionMap.set(p.position, directEmergencyMap.get(p.position));
+        continue;
+      }
       // Hard exit — highest priority (with optional indicator gate)
       if (exitMap.has(p.position)) {
         const exit = exitMap.get(p.position);
@@ -440,6 +478,15 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (closeRule) {
         if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
           scheduleStopLossConfirmation(p, closeRule);
+          continue;
+        }
+        if (isEmergencyDirectExit(closeRule)) {
+          const result = await closeEmergencyDirect(p, closeRule, "Management cycle");
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
           continue;
         }
         if (closeRule.reason === "low yield") {
@@ -499,6 +546,8 @@ export async function runManagementCycle({ silent = false } = {}) {
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
+      if (act.action === "CLOSED_DIRECT") line += `\n⚡ Closed directly: ${act.reason}`;
+      if (act.action === "DIRECT_CLOSE_FAILED") line += `\n⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
       if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
@@ -507,7 +556,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       return line;
     });
 
-    const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    const needsAction = [...actionMap.values()].filter(a => !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action));
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
@@ -519,7 +568,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
       const a = actionMap.get(p.position);
-      return a.action !== "STAY";
+      return !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action);
     });
 
     if (actionPositions.length > 0) {
@@ -1003,6 +1052,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
             scheduleStopLossConfirmation(p, exit);
             continue;
           }
+          if (isEmergencyDirectExit(exit)) {
+            _pollTriggeredAt = Date.now();
+            try {
+              await closeEmergencyDirect(p, exit, "PnL poll");
+            } catch (e) {
+              log("cron_error", `Direct emergency close error: ${e.message}`);
+            }
+            break;
+          }
           const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
           if (!indicatorConfirmation.confirmed) {
             log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
@@ -1281,6 +1339,7 @@ function formatConfigSnapshot() {
     `Stop loss: ${config.management.stopLossPct}%${config.management.stopLossConfirmDelayMs ? ` confirmed after ${Math.round(config.management.stopLossConfirmDelayMs / 1000)}s` : ""} | hard ${config.management.hardStopLossPct ?? "off"}% | take profit: ${config.management.takeProfitPct}%`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `Profit giveback emergency: ${config.management.profitGivebackEmergencyEnabled ? `on | peak >= ${config.management.profitGivebackTriggerPct}% and current <= ${config.management.profitGivebackFloorPct}%` : "off"}`,
     `PnL snapshots: ${config.management.pnlSnapshotLoggingEnabled ? "on" : "off"}`,
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
@@ -1322,6 +1381,9 @@ function settingValue(key) {
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
+    profitGivebackEmergencyEnabled: config.management.profitGivebackEmergencyEnabled,
+    profitGivebackTriggerPct: config.management.profitGivebackTriggerPct,
+    profitGivebackFloorPct: config.management.profitGivebackFloorPct,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
@@ -1400,6 +1462,9 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
       stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      [toggleButton("profitGivebackEmergencyEnabled", "Profit giveback")],
+      stepButtons("profitGivebackTriggerPct", "Giveback peak", 0.5, { digits: 1 }),
+      stepButtons("profitGivebackFloorPct", "Giveback floor", 0.5, { digits: 1 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
       stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),

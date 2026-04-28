@@ -456,6 +456,29 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   return { confirmed: false, rejected: true };
 }
 
+function buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlPct, mgmtConfig = {}) {
+  if (!mgmtConfig.profitGivebackEmergencyEnabled) return null;
+  if (currentPnlPct == null) return null;
+
+  const triggerPct = Number(mgmtConfig.profitGivebackTriggerPct);
+  const floorPct = Number(mgmtConfig.profitGivebackFloorPct);
+  if (!Number.isFinite(triggerPct) || !Number.isFinite(floorPct)) return null;
+
+  const peakPnlPct = Number(pos?.peak_pnl_pct ?? 0);
+  if (!Number.isFinite(peakPnlPct)) return null;
+  if (peakPnlPct < triggerPct || currentPnlPct > floorPct) return null;
+
+  const dropFromPeak = peakPnlPct - currentPnlPct;
+  return {
+    action: "PROFIT_GIVEBACK",
+    reason: `Profit giveback emergency: peak ${peakPnlPct.toFixed(2)}% -> current ${currentPnlPct.toFixed(2)}% (floor ${floorPct}%, trigger ${triggerPct}%)`,
+    urgent: true,
+    peak_pnl_pct: peakPnlPct,
+    current_pnl_pct: currentPnlPct,
+    drop_from_peak_pct: dropFromPeak,
+  };
+}
+
 /**
  * Get all tracked positions (optionally filter open-only).
  */
@@ -574,6 +597,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     });
     if (immediateStopLossDecision) {
       return immediateStopLossDecision;
+    }
+
+    const profitGivebackEmergency = buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlPct, mgmtConfig);
+    if (profitGivebackEmergency) {
+      return profitGivebackEmergency;
     }
   }
 

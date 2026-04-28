@@ -32,8 +32,11 @@ function baseConfig(overrides = {}) {
     stopLossVelocityWindowMs: 90000,
     stopLossVelocityClosePct: -3,
     trailingTakeProfit: true,
-    trailingTriggerPct: 8,
+    trailingTriggerPct: 6,
     trailingDropPct: 3,
+    profitGivebackEmergencyEnabled: true,
+    profitGivebackTriggerPct: 6,
+    profitGivebackFloorPct: 2,
     outOfRangeWaitMinutes: 60,
     outOfRangeHardCloseMinutes: 120,
     minFeePerTvl24h: 4,
@@ -62,6 +65,14 @@ function backdateLatestHistoryPoint(tempDir, position, ageMs) {
   const history = state.positions?.[position]?.pnl_history;
   assert(Array.isArray(history) && history.length > 0, `missing pnl_history for ${position}`);
   history[history.length - 1].ts = new Date(Date.now() - ageMs).toISOString();
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+}
+
+function setPeakPnl(tempDir, position, peakPnlPct) {
+  const statePath = path.join(tempDir, "state.json");
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert(state.positions?.[position], `missing tracked position ${position}`);
+  state.positions[position].peak_pnl_pct = peakPnlPct;
   fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
 }
 
@@ -101,6 +112,13 @@ async function main() {
     assert(velocityStop?.urgent === true, "velocity stop-loss should be urgent");
     assert(String(velocityStop?.reason || "").startsWith("Velocity stop loss:"), "velocity stop-loss reason should be labeled");
     assert(String(velocityStop?.reason || "").includes("dropped -3.60pp over 60s"), "velocity reason should include pp drop and window");
+
+    track("giveback");
+    setPeakPnl(tempDir, "giveback", 7.2);
+    const givebackExit = updatePnlAndCheckExits("giveback", makePosition("giveback", { pnl_pct: 1.8 }), baseConfig());
+    assert(givebackExit?.action === "PROFIT_GIVEBACK", "profit giveback should close after a green trade gives back below floor");
+    assert(givebackExit?.urgent === true, "profit giveback should be urgent");
+    assert(String(givebackExit?.reason || "").startsWith("Profit giveback emergency:"), "profit giveback reason should be labeled");
 
     track("ordinary");
     const ordinaryInitial = updatePnlAndCheckExits("ordinary", makePosition("ordinary", { pnl_pct: -6.2 }), baseConfig());
@@ -149,6 +167,7 @@ async function main() {
       success: true,
       fastStop: { action: fastStop.action, urgent: fastStop.urgent, reason: fastStop.reason },
       velocityStop: { action: velocityStop.action, urgent: velocityStop.urgent, reason: velocityStop.reason },
+      givebackExit: { action: givebackExit.action, urgent: givebackExit.urgent, reason: givebackExit.reason },
       ordinarySoft: {
         action: ordinarySoft.action,
         needsConfirmation: ordinarySoft.needs_confirmation,
