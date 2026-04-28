@@ -47,7 +47,7 @@
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],
   "minTokenAgeHours": 3,
-  "maxTokenAgeHours": 720,
+  "maxTokenAgeHours": 2160,
   "athFilterPct": -10,
   "fallingKnifeVetoEnabled": false,
   "fallingKnifeMaxPriceChange1hPct": -35,
