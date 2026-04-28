@@ -249,7 +249,9 @@ const FIELD_SECTIONS = [
     fields: [
       { key: "timeframe", label: "Discovery timeframe", type: "choice", choices: ["30m", "1h", "4h", "12h", "24h"].map((key) => ({ key, label: key })) },
       { key: "category", label: "Discovery category", type: "string" },
+      { key: "discoveryPageSize", label: "Discovery page size", type: "number", min: 1 },
       { key: "excludeHighSupplyConcentration", label: "Exclude high supply concentration? (true/false)", type: "boolean" },
+      { key: "excludeHighSingleOwnership", label: "Exclude high single ownership? (true/false)", type: "boolean" },
       { key: "minTvl", label: "Min TVL", type: "number", min: 0 },
       { key: "maxTvl", label: "Max TVL", type: "number", min: 0 },
       { key: "minVolume", label: "Min volume", type: "number", min: 0 },

@@ -306,14 +306,14 @@ async function enrichPvpRisk(pools) {
  * Returns condensed data optimized for LLM consumption (saves tokens).
  */
 export async function discoverPools({
-  page_size = 50,
+  page_size = config.screening.discoveryPageSize ?? 50,
 } = {}) {
   const s = config.screening;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
     s.excludeHighSupplyConcentration ? "base_token_has_high_supply_concentration=false" : null,
-    "base_token_has_high_single_ownership=false",
+    s.excludeHighSingleOwnership ? "base_token_has_high_single_ownership=false" : null,
     "pool_type=dlmm",
     `base_token_market_cap>=${s.minMcap}`,
     `base_token_market_cap<=${s.maxMcap}`,
@@ -465,7 +465,7 @@ export async function discoverPools({
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const { pools } = await discoverPools({ page_size: 50 });
+  const { pools } = await discoverPools({ page_size: config.screening.discoveryPageSize ?? 50 });
   const filteredOut = [];
 
   // Exclude pools where the wallet already has an open position

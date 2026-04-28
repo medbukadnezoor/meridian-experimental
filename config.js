@@ -65,7 +65,9 @@ export const config = {
 
   // ─── Pool Screening Thresholds ───────────
   screening: {
+    discoveryPageSize: u.discoveryPageSize ?? 50,
     excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
+    excludeHighSingleOwnership: u.excludeHighSingleOwnership ?? true,
     minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
     minTvl:            u.minTvl            ?? 10_000,
     maxTvl:            u.maxTvl !== undefined ? u.maxTvl : 150_000,
@@ -296,7 +298,9 @@ export function reloadScreeningThresholds() {
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
+    if (fresh.discoveryPageSize != null) s.discoveryPageSize = fresh.discoveryPageSize;
     if (fresh.excludeHighSupplyConcentration !== undefined) s.excludeHighSupplyConcentration = fresh.excludeHighSupplyConcentration;
+    if (fresh.excludeHighSingleOwnership !== undefined) s.excludeHighSingleOwnership = fresh.excludeHighSingleOwnership;
     if (fresh.minOrganic     != null) s.minOrganic     = fresh.minOrganic;
     if (fresh.minQuoteOrganic != null) s.minQuoteOrganic = fresh.minQuoteOrganic;
     if (fresh.minHolders     != null) s.minHolders     = fresh.minHolders;

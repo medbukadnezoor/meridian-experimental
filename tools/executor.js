@@ -138,6 +138,8 @@ const toolMap = {
       // screening
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
+      discoveryPageSize: ["screening", "discoveryPageSize"],
+      excludeHighSingleOwnership: ["screening", "excludeHighSingleOwnership"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],
       minVolume: ["screening", "minVolume"],
