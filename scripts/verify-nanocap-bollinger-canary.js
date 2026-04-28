@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Focused synthetic proof for the nanocap Bollinger canary surface.
+ * Focused synthetic proof for the nanocap RSI-5m entry surface.
  *
  * Read-only: no network calls, no bot runtime, no deploys/closes, no config writes.
  */
@@ -48,11 +48,12 @@ const resolved = resolveConfigFromPath(EXAMPLE_CONFIG_PATH, {
 }).config;
 
 assert.strictEqual(resolved.indicators.enabled, true, "chart indicators enabled");
-assert.strictEqual(resolved.indicators.entryPreset, "bollinger_reversion", "entry preset is Bollinger reversion");
+assert.strictEqual(resolved.indicators.entryPreset, "rsi_reversal", "entry preset is RSI reversal");
 assert.strictEqual(resolved.indicators.exitPreset, null, "exit preset remains disabled");
-assert.deepStrictEqual(resolved.indicators.intervals, ["5_MINUTE", "15_MINUTE"], "canary checks 5m and 15m");
-assert.strictEqual(resolved.indicators.requireAllIntervals, false, "canary accepts 5m OR 15m");
-assert.strictEqual(resolved.indicators.rsiLength, 2, "live canary keeps RSI2 payloads for shadow gate");
+assert.deepStrictEqual(resolved.indicators.intervals, ["5_MINUTE"], "entry gate checks 5m only");
+assert.strictEqual(resolved.indicators.requireAllIntervals, false, "single-interval entry gate does not require all intervals");
+assert.strictEqual(resolved.indicators.rsiLength, 2, "live gate uses RSI2 payloads");
+assert.strictEqual(resolved.indicators.rsiOversold, 30, "live gate uses RSI2<=30");
 
 assert.strictEqual(example.deployAmountSol, 1.5, "sizing unchanged: deployAmountSol");
 assert.strictEqual(example.maxPositions, 2, "capital throttle: maxPositions");

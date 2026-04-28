@@ -984,25 +984,25 @@ function buildChecks() {
     },
     {
       file: "user-config.example.json",
-      label: "[Runtime] nanocap example resolves Bollinger 5m OR 15m entry canary",
+      label: "[Runtime] nanocap example resolves RSI2 5m entry gate",
       test: () =>
         exampleProof.userConfigExists === true &&
         exampleProof?.indicators?.enabled === true &&
-        exampleProof?.indicators?.entryPreset === "bollinger_reversion" &&
+        exampleProof?.indicators?.entryPreset === "rsi_reversal" &&
         exampleProof?.indicators?.exitPreset === null &&
         Number(exampleProof?.indicators?.rsiLength) === 2 &&
+        Number(exampleProof?.indicators?.rsiOversold) === 30 &&
         exampleProof?.indicators?.requireAllIntervals === false &&
         Array.isArray(exampleProof?.indicators?.intervals) &&
-        exampleProof.indicators.intervals.length === 2 &&
-        exampleProof.indicators.intervals[0] === "5_MINUTE" &&
-        exampleProof.indicators.intervals[1] === "15_MINUTE",
+        exampleProof.indicators.intervals.length === 1 &&
+        exampleProof.indicators.intervals[0] === "5_MINUTE",
     },
     {
       file: "scripts/verify-nanocap-bollinger-canary.js",
-      label: "[Runtime] nanocap Bollinger canary proof wires shadow quality gates",
+      label: "[Runtime] nanocap RSI-5m entry proof wires shadow quality gates",
       test: () =>
         nanocapBollingerCanaryProof?.success === true &&
-        nanocapBollingerCanaryProof?.exampleConfig?.entryPreset === "bollinger_reversion" &&
+        nanocapBollingerCanaryProof?.exampleConfig?.entryPreset === "rsi_reversal" &&
         nanocapBollingerCanaryProof?.exampleConfig?.requireAllIntervals === false &&
         nanocapBollingerCanaryProof?.shadowGate?.strictPass === true &&
         nanocapBollingerCanaryProof?.decisionContext?.shadowQualityGatesSummarized === true &&
