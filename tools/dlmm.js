@@ -4,6 +4,7 @@ import {
   PublicKey,
   Transaction,
   VersionedTransaction,
+  ComputeBudgetProgram,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
@@ -81,6 +82,7 @@ async function getDLMM() {
 // (e.g. during screening-only tests).
 let _connection = null;
 let _wallet = null;
+const URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS = 750_000;
 
 function getConnection() {
   if (!_connection) {
@@ -98,6 +100,51 @@ function getWallet() {
     log("init", `Wallet: ${_wallet.publicKey.toString()}`);
   }
   return _wallet;
+}
+
+function hasComputeBudgetInstruction(tx) {
+  return tx instanceof Transaction && tx.instructions.some((ix) => ix.programId.equals(ComputeBudgetProgram.programId));
+}
+
+async function prepareCloseTransactionForSend(tx, wallet, urgent) {
+  if (!(tx instanceof Transaction)) return tx;
+  if (urgent && !hasComputeBudgetInstruction(tx)) {
+    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS }));
+  }
+  tx.feePayer = wallet.publicKey;
+  const { blockhash, lastValidBlockHeight } = await getConnection().getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  return tx;
+}
+
+async function positionAccountLooksClosed(positionPubKey) {
+  const account = await getConnection().getAccountInfo(positionPubKey, "confirmed");
+  return !account || !account.owner.equals(getDlmmProgramId());
+}
+
+async function sendCloseTransactionWithRetry(tx, wallet, { urgent = false, positionPubKey, label = "close" } = {}) {
+  const attempts = urgent ? 2 : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const prepared = await prepareCloseTransactionForSend(tx, wallet, urgent);
+      return await sendAndConfirmTransaction(getConnection(), prepared, [wallet], {
+        commitment: "confirmed",
+        maxRetries: urgent ? 5 : 3,
+      });
+    } catch (error) {
+      lastError = error;
+      const message = error?.message || String(error);
+      log("close_warn", `${urgent ? "Urgent " : ""}${label} send failed (attempt ${attempt}/${attempts}): ${message}`);
+      if (positionPubKey && await positionAccountLooksClosed(positionPubKey).catch(() => false)) {
+        log("close", `${label} account already closed after send failure; treating as closed`);
+        return "already-closed-after-send";
+      }
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 750));
+    }
+  }
+  throw lastError;
 }
 
 function getMeridianApiBase() {
@@ -1754,7 +1801,10 @@ export async function closePosition({ position_address, reason, urgent }) {
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
-    if (shouldUseLpAgentRelay()) {
+    if (urgent && shouldUseLpAgentRelay()) {
+      log("close", "Urgent close: skipping relay zap-out and using local close-liquidity-first path");
+    }
+    if (!urgent && shouldUseLpAgentRelay()) {
       let relaySubmitted = false;
       try {
         const pool = await getPool(poolAddress);
@@ -2099,7 +2149,11 @@ export async function closePosition({ position_address, reason, urgent }) {
       });
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+        const txHash = await sendCloseTransactionWithRetry(tx, wallet, {
+          urgent: !!urgent,
+          positionPubKey,
+          label: "remove-liquidity close",
+        });
         closeTxHashes.push(txHash);
       }
     } else {
@@ -2108,7 +2162,11 @@ export async function closePosition({ position_address, reason, urgent }) {
         owner: wallet.publicKey,
         position: { publicKey: positionPubKey },
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), closeTx, [wallet]);
+      const txHash = await sendCloseTransactionWithRetry(closeTx, wallet, {
+        urgent: !!urgent,
+        positionPubKey,
+        label: "close-position",
+      });
       closeTxHashes.push(txHash);
     }
     const txHashes = [...claimTxHashes, ...closeTxHashes];
