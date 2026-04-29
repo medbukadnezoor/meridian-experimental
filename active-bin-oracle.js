@@ -6,6 +6,28 @@ import { getActiveBin } from "./tools/dlmm.js";
 
 const DEFAULT_DEBOUNCE_MS = 3_000;
 const DEFAULT_LOG_DIR = "./logs";
+const DEFAULT_HISTORY_RETENTION_MS = 60_000;
+const DEFAULT_MAX_HISTORY_POINTS = 120;
+
+export const VELOCITY_WINDOWS = [
+  { label: "10s", targetMs: 10_000, minMs: 7_000, maxMs: 20_000 },
+  { label: "30s", targetMs: 30_000, minMs: 20_000, maxMs: 45_000 },
+];
+
+export const SHADOW_VELOCITY_THRESHOLDS = {
+  // Conservative shadow labels only. These values are meant to surface
+  // unusually fast bin movement for review, not to authorize a close.
+  watch: {
+    minAbs10sDelta: 12,
+    minAbs30sDelta: 24,
+    minAbsBinsPerSec: 1.0,
+  },
+  rugLikeExtreme: {
+    minAbs10sDelta: 30,
+    minAbs30sDelta: 60,
+    minAbsBinsPerSec: 2.5,
+  },
+};
 
 function asNumber(value) {
   const number = Number(value);
@@ -21,7 +43,111 @@ function appendJsonl(filePath, row) {
   fs.appendFileSync(filePath, `${JSON.stringify(row)}\n`);
 }
 
-export function classifyActiveBin(position, activeBin, priorActiveBin, previousObservedAtMs, observedAtMs) {
+function roundNumber(value, digits = 6) {
+  return Number.isFinite(value) ? Number(value.toFixed(digits)) : null;
+}
+
+function trimHistory(history, observedAtMs, retentionMs, maxPoints) {
+  const minObservedAtMs = observedAtMs - retentionMs;
+  const trimmed = (Array.isArray(history) ? history : [])
+    .filter((point) => point?.observedAtMs >= minObservedAtMs && point?.activeBin != null)
+    .slice(-maxPoints);
+  return trimmed;
+}
+
+function findWindowBaseline(history, observedAtMs, window) {
+  let best = null;
+  let bestDistance = Infinity;
+  for (const point of Array.isArray(history) ? history : []) {
+    const elapsedMs = observedAtMs - point.observedAtMs;
+    if (elapsedMs < window.minMs || elapsedMs > window.maxMs) continue;
+    const distance = Math.abs(elapsedMs - window.targetMs);
+    if (distance < bestDistance) {
+      best = point;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+export function computeVelocityWindows(activeBin, observedAtMs, history = [], windows = VELOCITY_WINDOWS) {
+  const active = asNumber(activeBin);
+  const features = {};
+  for (const window of windows) {
+    const baseline = active != null ? findWindowBaseline(history, observedAtMs, window) : null;
+    const prefix = `velocity_${window.label}_`;
+    const elapsedSec = baseline ? (observedAtMs - baseline.observedAtMs) / 1000 : null;
+    const delta = active != null && baseline ? active - baseline.activeBin : null;
+    const binsPerSec = delta != null && elapsedSec > 0 ? delta / elapsedSec : null;
+    features[`${prefix}bin_delta`] = delta;
+    features[`${prefix}elapsed_sec`] = elapsedSec != null ? roundNumber(elapsedSec, 3) : null;
+    features[`${prefix}bins_per_sec`] = binsPerSec != null ? roundNumber(binsPerSec) : null;
+  }
+  return features;
+}
+
+export function classifyShadowVelocity(velocityFeatures = {}, thresholds = SHADOW_VELOCITY_THRESHOLDS) {
+  const v10Delta = asNumber(velocityFeatures.velocity_10s_bin_delta);
+  const v30Delta = asNumber(velocityFeatures.velocity_30s_bin_delta);
+  const v10Rate = asNumber(velocityFeatures.velocity_10s_bins_per_sec);
+  const v30Rate = asNumber(velocityFeatures.velocity_30s_bins_per_sec);
+  const abs10Delta = v10Delta != null ? Math.abs(v10Delta) : null;
+  const abs30Delta = v30Delta != null ? Math.abs(v30Delta) : null;
+  const absMaxRate = Math.max(
+    v10Rate != null ? Math.abs(v10Rate) : 0,
+    v30Rate != null ? Math.abs(v30Rate) : 0,
+  );
+
+  const reasons = [];
+  const extreme = (
+    (abs10Delta != null && abs10Delta >= thresholds.rugLikeExtreme.minAbs10sDelta) ||
+    (abs30Delta != null && abs30Delta >= thresholds.rugLikeExtreme.minAbs30sDelta) ||
+    absMaxRate >= thresholds.rugLikeExtreme.minAbsBinsPerSec
+  );
+  if (extreme) {
+    if (abs10Delta != null && abs10Delta >= thresholds.rugLikeExtreme.minAbs10sDelta) {
+      reasons.push(`abs_10s_delta=${abs10Delta}`);
+    }
+    if (abs30Delta != null && abs30Delta >= thresholds.rugLikeExtreme.minAbs30sDelta) {
+      reasons.push(`abs_30s_delta=${abs30Delta}`);
+    }
+    if (absMaxRate >= thresholds.rugLikeExtreme.minAbsBinsPerSec) {
+      reasons.push(`max_rate=${roundNumber(absMaxRate)}_bins_per_sec`);
+    }
+    return {
+      shadow_velocity_signal: "rug_like_extreme",
+      shadow_velocity_reason: `shadow_only_velocity_candidate ${reasons.join(" ")}`,
+    };
+  }
+
+  const watch = (
+    (abs10Delta != null && abs10Delta >= thresholds.watch.minAbs10sDelta) ||
+    (abs30Delta != null && abs30Delta >= thresholds.watch.minAbs30sDelta) ||
+    absMaxRate >= thresholds.watch.minAbsBinsPerSec
+  );
+  if (watch) {
+    if (abs10Delta != null && abs10Delta >= thresholds.watch.minAbs10sDelta) {
+      reasons.push(`abs_10s_delta=${abs10Delta}`);
+    }
+    if (abs30Delta != null && abs30Delta >= thresholds.watch.minAbs30sDelta) {
+      reasons.push(`abs_30s_delta=${abs30Delta}`);
+    }
+    if (absMaxRate >= thresholds.watch.minAbsBinsPerSec) {
+      reasons.push(`max_rate=${roundNumber(absMaxRate)}_bins_per_sec`);
+    }
+    return {
+      shadow_velocity_signal: "watch",
+      shadow_velocity_reason: `shadow_only_velocity_watch ${reasons.join(" ")}`,
+    };
+  }
+
+  return {
+    shadow_velocity_signal: null,
+    shadow_velocity_reason: null,
+  };
+}
+
+export function classifyActiveBin(position, activeBin, priorActiveBin, previousObservedAtMs, observedAtMs, velocityFeatures = {}) {
   const lowerBin = asNumber(position?.lower_bin);
   const upperBin = asNumber(position?.upper_bin);
   const active = asNumber(activeBin);
@@ -39,6 +165,7 @@ export function classifyActiveBin(position, activeBin, priorActiveBin, previousO
   const binVelocity = binDelta != null && elapsedSec > 0 ? binDelta / elapsedSec : null;
   const adverseOorGuess = inRange === false && (pnlPct == null || pnlPct <= 0);
   const rangeSide = belowRange ? "below_range" : aboveRange ? "above_range" : inRange === true ? "in_range" : "unknown";
+  const velocitySignal = classifyShadowVelocity(velocityFeatures);
   const wouldCloseReason = adverseOorGuess
     ? [
         `shadow_only_active_bin_${rangeSide}`,
@@ -54,9 +181,11 @@ export function classifyActiveBin(position, activeBin, priorActiveBin, previousO
     active_bin: active,
     prior_active_bin: prior,
     bin_delta: binDelta,
-    bin_velocity: binVelocity != null ? Number(binVelocity.toFixed(6)) : null,
+    bin_velocity: roundNumber(binVelocity),
     in_range: inRange,
     adverse_oor_guess: adverseOorGuess,
+    ...velocityFeatures,
+    ...velocitySignal,
     would_close_reason: wouldCloseReason,
   };
 }
@@ -67,6 +196,8 @@ export class ActiveBinOracleRecorder {
     rpcUrl = process.env.RPC_URL,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     logDir = DEFAULT_LOG_DIR,
+    historyRetentionMs = DEFAULT_HISTORY_RETENTION_MS,
+    maxHistoryPoints = DEFAULT_MAX_HISTORY_POINTS,
     getActiveBinFn = getActiveBin,
     logger = log,
     now = () => new Date(),
@@ -75,6 +206,8 @@ export class ActiveBinOracleRecorder {
     this.rpcUrl = rpcUrl;
     this.debounceMs = debounceMs;
     this.logDir = logDir;
+    this.historyRetentionMs = historyRetentionMs;
+    this.maxHistoryPoints = maxHistoryPoints;
     this.getActiveBinFn = getActiveBinFn;
     this.logger = logger;
     this.now = now;
@@ -112,10 +245,17 @@ export class ActiveBinOracleRecorder {
       if (activeBin != null) {
         const state = this.poolState.get(position.pool) || {};
         if (state.lastActiveBin == null) {
+          const nowMs = this.now().getTime();
           this.poolState.set(position.pool, {
             ...state,
             lastActiveBin: activeBin,
-            lastObservedAtMs: this.now().getTime(),
+            lastObservedAtMs: nowMs,
+            history: trimHistory(
+              [...(state.history || []), { activeBin, observedAtMs: nowMs }],
+              nowMs,
+              this.historyRetentionMs,
+              this.maxHistoryPoints,
+            ),
           });
         }
       }
@@ -194,6 +334,8 @@ export class ActiveBinOracleRecorder {
     const previous = this.poolState.get(pool) || {};
     const active = await this.getActiveBinFn({ pool_address: pool });
     const activeBin = asNumber(active?.binId);
+    const history = trimHistory(previous.history || [], observedAtMs, this.historyRetentionMs, this.maxHistoryPoints);
+    const velocityFeatures = computeVelocityWindows(activeBin, observedAtMs, history);
     const rows = positions.map((position) => {
       const classification = classifyActiveBin(
         position,
@@ -201,6 +343,7 @@ export class ActiveBinOracleRecorder {
         previous.lastActiveBin,
         previous.lastObservedAtMs,
         observedAtMs,
+        velocityFeatures,
       );
       return {
         timestamp: observedAt.toISOString(),
@@ -216,7 +359,16 @@ export class ActiveBinOracleRecorder {
     });
 
     for (const row of rows) appendJsonl(this.getLogFile(observedAt), row);
-    this.poolState.set(pool, { lastActiveBin: activeBin, lastObservedAtMs: observedAtMs });
+    this.poolState.set(pool, {
+      lastActiveBin: activeBin,
+      lastObservedAtMs: observedAtMs,
+      history: trimHistory(
+        [...history, { activeBin, observedAtMs }],
+        observedAtMs,
+        this.historyRetentionMs,
+        this.maxHistoryPoints,
+      ),
+    });
     return rows;
   }
 
