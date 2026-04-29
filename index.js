@@ -28,6 +28,7 @@ import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
+import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -373,6 +374,7 @@ function stopCronJobs() {
   if (_cronTasks._pnlPollInterval) clearInterval(_cronTasks._pnlPollInterval);
   for (const timer of _stopLossConfirmTimers.values()) clearTimeout(timer);
   _stopLossConfirmTimers.clear();
+  activeBinOracleRecorder.stop().catch((error) => log("active_bin_oracle_warn", `Stop failed: ${error.message}`));
   _cronTasks = [];
 }
 
@@ -392,6 +394,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
+    activeBinOracleRecorder.updatePositions(positions);
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
@@ -1051,6 +1054,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     _pnlPollBusy = true;
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      activeBinOracleRecorder.updatePositions(result?.positions || []);
       if (!result?.positions?.length) return;
       for (const p of result.positions) {
         if (!p.pnl_pct_suspicious && queuePeakConfirmation(p.position, p.pnl_pct)) {
