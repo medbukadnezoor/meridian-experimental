@@ -74,6 +74,7 @@ let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered manageme
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const _stopLossConfirmTimers = new Map();
+const _activeBinOracleEmergencyInFlight = new Set();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
@@ -177,6 +178,41 @@ function formatPct(value) {
   const num = finiteNumberOrNull(value);
   return num == null ? "?" : num.toFixed(2);
 }
+
+function formatActiveBinOracleExitReason(row) {
+  return [
+    `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
+    `active_bin=${row.active_bin ?? "?"}`,
+    `10s_delta=${row.velocity_10s_bin_delta ?? "n/a"}`,
+    `30s_delta=${row.velocity_30s_bin_delta ?? "n/a"}`,
+    `pnl=${formatPct(row.pnl_pct)}%`,
+  ].join("; ");
+}
+
+activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
+  const positionAddress = row?.position;
+  if (!positionAddress || _activeBinOracleEmergencyInFlight.has(positionAddress)) return;
+  _activeBinOracleEmergencyInFlight.add(positionAddress);
+  const pair = row.pair || row.pool || positionAddress.slice(0, 8);
+  const reason = formatActiveBinOracleExitReason(row);
+  log("state", `[Active-bin oracle] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
+  try {
+    const result = await executeTool("close_position", {
+      position_address: positionAddress,
+      reason,
+      urgent: true,
+    });
+    if (result?.success) {
+      log("state", `[Active-bin oracle] Emergency direct close succeeded: ${pair} PnL=${formatPct(result.pnl_pct)}%`);
+      return;
+    }
+    log("cron_error", `[Active-bin oracle] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
+    _activeBinOracleEmergencyInFlight.delete(positionAddress);
+  } catch (error) {
+    log("cron_error", `[Active-bin oracle] Emergency direct close error for ${pair}: ${error.message}`);
+    _activeBinOracleEmergencyInFlight.delete(positionAddress);
+  }
+}, { enabled: true, maxPnlPct: 2 });
 
 function scheduleStopLossConfirmation(position, exit) {
   const positionAddress = position?.position;

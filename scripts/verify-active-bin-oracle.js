@@ -45,6 +45,7 @@ try {
     classifyActiveBin,
     classifyShadowVelocity,
     computeVelocityWindows,
+    shouldTriggerActiveBinEmergencyExit,
   } = await import(join(ROOT, "active-bin-oracle.js"));
 
   const inRange = classifyActiveBin(
@@ -102,6 +103,9 @@ try {
   const extremeSignal = classifyShadowVelocity(velocity30s);
   assert.strictEqual(extremeSignal.shadow_velocity_signal, "rug_like_extreme");
   assert.ok(extremeSignal.shadow_velocity_reason.includes("shadow_only_velocity_candidate"));
+  assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...extremeSignal, pnl_pct: -1.1 }), true);
+  assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...watchSignal, pnl_pct: -20 }), false);
+  assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...extremeSignal, pnl_pct: 4.5 }), false);
 
   const fakeConnection = new FakeConnection();
   const recorder = new ActiveBinOracleRecorder({
@@ -180,6 +184,7 @@ try {
   const sampleBins = [115, 165];
   let nowIndex = 0;
   let binIndex = 0;
+  const emergencyRows = [];
   const velocityRecorder = new ActiveBinOracleRecorder({
     connection: velocityConnection,
     debounceMs: 10,
@@ -188,6 +193,9 @@ try {
     logger: () => {},
     now: () => sampleTimes[nowIndex],
   });
+  velocityRecorder.setEmergencyExitHandler(async (row) => {
+    emergencyRows.push(row);
+  }, { enabled: true, maxPnlPct: 2 });
 
   velocityRecorder.updatePositions([
     {
@@ -210,6 +218,8 @@ try {
   assert.strictEqual(velocityRows[0].shadow_velocity_signal, "watch");
   assert.strictEqual(velocityRows[1].velocity_30s_bin_delta, 65);
   assert.strictEqual(velocityRows[1].shadow_velocity_signal, "rug_like_extreme");
+  assert.strictEqual(emergencyRows.length, 1);
+  assert.strictEqual(emergencyRows[0].position, "Velocity111111111111111111111111111111");
   await velocityRecorder.stop();
   rmSync(velocityTempDir, { recursive: true, force: true });
 
@@ -230,6 +240,7 @@ try {
       velocityCalculation: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
+      liveEmergencyTriggersExtremeOnly: true,
       velocityWindowFieldsPreservedInRows: true,
       oneSubscriptionPerPool: true,
       jsonlRowsWritten: rows.length,

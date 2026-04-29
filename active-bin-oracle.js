@@ -8,6 +8,7 @@ const DEFAULT_DEBOUNCE_MS = 3_000;
 const DEFAULT_LOG_DIR = "./logs";
 const DEFAULT_HISTORY_RETENTION_MS = 60_000;
 const DEFAULT_MAX_HISTORY_POINTS = 120;
+const DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT = 2;
 
 export const VELOCITY_WINDOWS = [
   { label: "10s", targetMs: 10_000, minMs: 7_000, maxMs: 20_000 },
@@ -147,6 +148,18 @@ export function classifyShadowVelocity(velocityFeatures = {}, thresholds = SHADO
   };
 }
 
+export function shouldTriggerActiveBinEmergencyExit(row, {
+  enabled = true,
+  maxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
+  signal = "rug_like_extreme",
+} = {}) {
+  if (!enabled) return false;
+  if (!row || row.shadow_velocity_signal !== signal) return false;
+  const pnlPct = asNumber(row.pnl_pct);
+  if (pnlPct == null) return false;
+  return pnlPct <= maxPnlPct;
+}
+
 export function classifyActiveBin(position, activeBin, priorActiveBin, previousObservedAtMs, observedAtMs, velocityFeatures = {}) {
   const lowerBin = asNumber(position?.lower_bin);
   const upperBin = asNumber(position?.upper_bin);
@@ -201,6 +214,9 @@ export class ActiveBinOracleRecorder {
     getActiveBinFn = getActiveBin,
     logger = log,
     now = () => new Date(),
+    emergencyExitHandler = null,
+    liveEmergencyExitEnabled = false,
+    liveEmergencyExitMaxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
   } = {}) {
     this.connection = connection;
     this.rpcUrl = rpcUrl;
@@ -211,6 +227,9 @@ export class ActiveBinOracleRecorder {
     this.getActiveBinFn = getActiveBinFn;
     this.logger = logger;
     this.now = now;
+    this.emergencyExitHandler = emergencyExitHandler;
+    this.liveEmergencyExitEnabled = liveEmergencyExitEnabled;
+    this.liveEmergencyExitMaxPnlPct = liveEmergencyExitMaxPnlPct;
     this.positionsByPool = new Map();
     this.subscriptions = new Map();
     this.pendingSubscriptions = new Set();
@@ -221,6 +240,15 @@ export class ActiveBinOracleRecorder {
 
   getLogFile(now = this.now()) {
     return path.join(this.logDir, `active-bin-oracle-${todayIso(now)}.jsonl`);
+  }
+
+  setEmergencyExitHandler(handler, {
+    enabled = true,
+    maxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
+  } = {}) {
+    this.emergencyExitHandler = typeof handler === "function" ? handler : null;
+    this.liveEmergencyExitEnabled = Boolean(enabled && this.emergencyExitHandler);
+    this.liveEmergencyExitMaxPnlPct = maxPnlPct;
   }
 
   ensureConnection() {
@@ -359,6 +387,17 @@ export class ActiveBinOracleRecorder {
     });
 
     for (const row of rows) appendJsonl(this.getLogFile(observedAt), row);
+    if (this.emergencyExitHandler) {
+      for (const row of rows) {
+        if (!shouldTriggerActiveBinEmergencyExit(row, {
+          enabled: this.liveEmergencyExitEnabled,
+          maxPnlPct: this.liveEmergencyExitMaxPnlPct,
+        })) continue;
+        await this.emergencyExitHandler(row).catch((error) => {
+          this.logger("active_bin_oracle_warn", `Emergency exit handler failed for ${row.position?.slice(0, 8) || "position"}: ${error.message}`);
+        });
+      }
+    }
     this.poolState.set(pool, {
       lastActiveBin: activeBin,
       lastObservedAtMs: observedAtMs,
