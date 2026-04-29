@@ -78,6 +78,7 @@ let _pollTriggeredAt = 0; // epoch ms — cooldown for poller-triggered manageme
 const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const _stopLossConfirmTimers = new Map();
+const _activeBinOracleEmergencyInFlight = new Set();
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
@@ -335,6 +336,32 @@ async function closeEmergencyDirect(position, exit, source = "management") {
   }
   return result;
 }
+
+function formatActiveBinOracleExitReason(row) {
+  return [
+    `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
+    `active_bin=${row.active_bin ?? "?"}`,
+    `10s_delta=${row.velocity_10s_bin_delta ?? "n/a"}`,
+    `30s_delta=${row.velocity_30s_bin_delta ?? "n/a"}`,
+    `pnl=${formatPct(row.pnl_pct)}%`,
+  ].join("; ");
+}
+
+activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
+  const positionAddress = row?.position;
+  if (!positionAddress || _activeBinOracleEmergencyInFlight.has(positionAddress)) return;
+  _activeBinOracleEmergencyInFlight.add(positionAddress);
+  const pair = row.pair || row.pool || positionAddress.slice(0, 8);
+  const reason = formatActiveBinOracleExitReason(row);
+  const result = await closeEmergencyDirect(
+    { position: positionAddress, pair },
+    { action: "STOP_LOSS", reason, urgent: true },
+    "Active-bin oracle",
+  );
+  if (!result?.success) {
+    _activeBinOracleEmergencyInFlight.delete(positionAddress);
+  }
+}, { enabled: true, maxPnlPct: 2 });
 
 
 async function runBriefing() {
