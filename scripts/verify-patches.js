@@ -26,6 +26,7 @@ const RUNTIME_CONFIG_VERIFIER_PATH = join(__dirname, "verify-runtime-config.js")
 const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-cooldown.js");
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
+const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
@@ -146,6 +147,22 @@ function runEmergencyStopPolicyProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-emergency-stop-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runRollingDrawdownExitPolicyProof() {
+  const result = spawnSync(process.execPath, [ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-rolling-drawdown-exit-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -322,6 +339,7 @@ function buildChecks() {
   const earlyDumpProof = runEarlyDumpCooldownProof();
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const emergencyStopProof = runEmergencyStopPolicyProof();
+  const rollingDrawdownExitProof = runRollingDrawdownExitPolicyProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
   const materialProof = runMaterialWinMetricsProof();
@@ -603,6 +621,26 @@ function buildChecks() {
     },
     {
       file: "config-builder.js",
+      label: "[Rolling drawdown] deterministic exit config maps into runtime config with default-disabled gate",
+      test: (src) =>
+        src.includes("rollingDrawdownExitEnabled: u.rollingDrawdownExitEnabled ?? false") &&
+        src.includes("rollingDrawdownWindowMs: u.rollingDrawdownWindowMs ?? 5_400_000") &&
+        src.includes("rollingDrawdownMinPeakPct: u.rollingDrawdownMinPeakPct ?? 1") &&
+        src.includes("rollingDrawdownCurrentPnlPct: u.rollingDrawdownCurrentPnlPct ?? -2") &&
+        src.includes("rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 4"),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[Rolling drawdown] update_config maps operator-tunable rolling drawdown fields",
+      test: (src) =>
+        src.includes('rollingDrawdownExitEnabled: ["management", "rollingDrawdownExitEnabled"]') &&
+        src.includes('rollingDrawdownWindowMs: ["management", "rollingDrawdownWindowMs"]') &&
+        src.includes('rollingDrawdownMinPeakPct: ["management", "rollingDrawdownMinPeakPct"]') &&
+        src.includes('rollingDrawdownCurrentPnlPct: ["management", "rollingDrawdownCurrentPnlPct"]') &&
+        src.includes('rollingDrawdownMinDropPct: ["management", "rollingDrawdownMinDropPct"]'),
+    },
+    {
+      file: "config-builder.js",
       label: "[Falling-knife veto] deterministic nanocap veto config maps into runtime config",
       test: (src) =>
         src.includes("fallingKnifeVetoEnabled") &&
@@ -817,6 +855,33 @@ function buildChecks() {
         emergencyStopProof?.tempDirRemoved === true,
     },
     {
+      file: "scripts/verify-rolling-drawdown-exit-policy.js",
+      label: "[Rolling drawdown] synthetic proof covers fire/no-fire cases, urgent STOP_LOSS integration, and preserved emergency stops",
+      test: () =>
+        rollingDrawdownExitProof?.success === true &&
+        rollingDrawdownExitProof?.pureDecision?.action === "STOP_LOSS" &&
+        rollingDrawdownExitProof?.pureDecision?.urgent === true &&
+        String(rollingDrawdownExitProof?.pureDecision?.reason || "").startsWith("Rolling fast drawdown:") &&
+        rollingDrawdownExitProof?.fireExit?.action === "STOP_LOSS" &&
+        rollingDrawdownExitProof?.fireExit?.urgent === true &&
+        String(rollingDrawdownExitProof?.fireExit?.reason || "").startsWith("Rolling fast drawdown:") &&
+        rollingDrawdownExitProof?.noTriggerCases?.lowPeak === true &&
+        rollingDrawdownExitProof?.noTriggerCases?.currentHigh === true &&
+        rollingDrawdownExitProof?.noTriggerCases?.smallDrop === true &&
+        rollingDrawdownExitProof?.noTriggerCases?.stale === true &&
+        rollingDrawdownExitProof?.noTriggerCases?.disabled === true &&
+        rollingDrawdownExitProof?.noTriggerCases?.suspicious === true &&
+        rollingDrawdownExitProof?.preservedStops?.hard?.urgent === true &&
+        String(rollingDrawdownExitProof?.preservedStops?.hard?.reason || "").startsWith("Hard stop loss:") &&
+        rollingDrawdownExitProof?.preservedStops?.fast?.urgent === true &&
+        String(rollingDrawdownExitProof?.preservedStops?.fast?.reason || "").startsWith("Fast stop loss:") &&
+        rollingDrawdownExitProof?.preservedStops?.velocity?.urgent === true &&
+        String(rollingDrawdownExitProof?.preservedStops?.velocity?.reason || "").startsWith("Velocity stop loss:") &&
+        Number(rollingDrawdownExitProof?.fireHistoryPoints) >= 2 &&
+        rollingDrawdownExitProof?.tempStateFileCreated === true &&
+        rollingDrawdownExitProof?.tempDirRemoved === true,
+    },
+    {
       file: "scripts/verify-falling-knife-veto.js",
       label: "[Falling-knife veto] synthetic proof vetoes LARP-like setup, audits fields, and preserves benign 5m setup",
       test: () =>
@@ -988,6 +1053,11 @@ function buildChecks() {
         defaultProof.userConfigExists === false &&
         Number(defaultProof?.management?.stopLossConfirmDelayMs) === 0 &&
         defaultProof?.management?.hardStopLossPct === null &&
+        defaultProof?.management?.rollingDrawdownExitEnabled === false &&
+        Number(defaultProof?.management?.rollingDrawdownWindowMs) === 5400000 &&
+        Number(defaultProof?.management?.rollingDrawdownMinPeakPct) === 1 &&
+        Number(defaultProof?.management?.rollingDrawdownCurrentPnlPct) === -2 &&
+        Number(defaultProof?.management?.rollingDrawdownMinDropPct) === 4 &&
         defaultProof?.management?.pnlSnapshotLoggingEnabled === false,
     },
     {
@@ -1012,6 +1082,11 @@ function buildChecks() {
         Number(exampleProof?.management?.stopLossFastClosePct) === -10 &&
         Number(exampleProof?.management?.stopLossVelocityWindowMs) === 90000 &&
         Number(exampleProof?.management?.stopLossVelocityClosePct) === -3 &&
+        exampleProof?.management?.rollingDrawdownExitEnabled === true &&
+        Number(exampleProof?.management?.rollingDrawdownWindowMs) === 5400000 &&
+        Number(exampleProof?.management?.rollingDrawdownMinPeakPct) === 1 &&
+        Number(exampleProof?.management?.rollingDrawdownCurrentPnlPct) === -2 &&
+        Number(exampleProof?.management?.rollingDrawdownMinDropPct) === 4 &&
         Number(exampleProof?.management?.earlyDumpPct) === -8 &&
         Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
         Number(exampleProof?.management?.trailingTriggerPct) === 6 &&

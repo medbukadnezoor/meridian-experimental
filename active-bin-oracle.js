@@ -48,6 +48,14 @@ function roundNumber(value, digits = 6) {
   return Number.isFinite(value) ? Number(value.toFixed(digits)) : null;
 }
 
+function normalizeActiveBinResult(active) {
+  return {
+    activeBin: asNumber(active?.binId),
+    activePrice: asNumber(active?.price),
+    activePricePerLamport: asNumber(active?.pricePerLamport),
+  };
+}
+
 function trimHistory(history, observedAtMs, retentionMs, maxPoints) {
   const minObservedAtMs = observedAtMs - retentionMs;
   const trimmed = (Array.isArray(history) ? history : [])
@@ -83,6 +91,31 @@ export function computeVelocityWindows(activeBin, observedAtMs, history = [], wi
     features[`${prefix}bin_delta`] = delta;
     features[`${prefix}elapsed_sec`] = elapsedSec != null ? roundNumber(elapsedSec, 3) : null;
     features[`${prefix}bins_per_sec`] = binsPerSec != null ? roundNumber(binsPerSec) : null;
+  }
+  return features;
+}
+
+export function computePriceWindows(activePrice, observedAtMs, history = [], windows = VELOCITY_WINDOWS) {
+  const active = asNumber(activePrice);
+  const features = {};
+  for (const window of windows) {
+    const baseline = active != null
+      ? findWindowBaseline(
+          (Array.isArray(history) ? history : []).filter((point) => asNumber(point?.activePrice) != null),
+          observedAtMs,
+          window,
+        )
+      : null;
+    const suffix = window.label;
+    const elapsedSec = baseline ? (observedAtMs - baseline.observedAtMs) / 1000 : null;
+    const baselinePrice = asNumber(baseline?.activePrice);
+    const deltaPct = active != null && baselinePrice != null && baselinePrice !== 0
+      ? ((active - baselinePrice) / baselinePrice) * 100
+      : null;
+    const pctPerSec = deltaPct != null && elapsedSec > 0 ? deltaPct / elapsedSec : null;
+    features[`price_delta_pct_${suffix}`] = deltaPct != null ? roundNumber(deltaPct) : null;
+    features[`price_elapsed_sec_${suffix}`] = elapsedSec != null ? roundNumber(elapsedSec, 3) : null;
+    features[`price_rate_pct_per_sec_${suffix}`] = pctPerSec != null ? roundNumber(pctPerSec) : null;
   }
   return features;
 }
@@ -160,7 +193,7 @@ export function shouldTriggerActiveBinEmergencyExit(row, {
   return pnlPct <= maxPnlPct;
 }
 
-export function classifyActiveBin(position, activeBin, priorActiveBin, previousObservedAtMs, observedAtMs, velocityFeatures = {}) {
+export function classifyActiveBin(position, activeBin, priorActiveBin, previousObservedAtMs, observedAtMs, velocityFeatures = {}, priceFeatures = {}) {
   const lowerBin = asNumber(position?.lower_bin);
   const upperBin = asNumber(position?.upper_bin);
   const active = asNumber(activeBin);
@@ -198,6 +231,7 @@ export function classifyActiveBin(position, activeBin, priorActiveBin, previousO
     in_range: inRange,
     adverse_oor_guess: adverseOorGuess,
     ...velocityFeatures,
+    ...priceFeatures,
     ...velocitySignal,
     would_close_reason: wouldCloseReason,
   };
@@ -361,9 +395,14 @@ export class ActiveBinOracleRecorder {
     const observedAtMs = observedAt.getTime();
     const previous = this.poolState.get(pool) || {};
     const active = await this.getActiveBinFn({ pool_address: pool });
-    const activeBin = asNumber(active?.binId);
+    const {
+      activeBin,
+      activePrice,
+      activePricePerLamport,
+    } = normalizeActiveBinResult(active);
     const history = trimHistory(previous.history || [], observedAtMs, this.historyRetentionMs, this.maxHistoryPoints);
     const velocityFeatures = computeVelocityWindows(activeBin, observedAtMs, history);
+    const priceFeatures = computePriceWindows(activePrice, observedAtMs, history);
     const rows = positions.map((position) => {
       const classification = classifyActiveBin(
         position,
@@ -372,12 +411,15 @@ export class ActiveBinOracleRecorder {
         previous.lastObservedAtMs,
         observedAtMs,
         velocityFeatures,
+        priceFeatures,
       );
       return {
         timestamp: observedAt.toISOString(),
         pool,
         position: position.position,
         pair: position.pair || null,
+        active_price: activePrice,
+        active_price_per_lamport: activePricePerLamport,
         ...classification,
         pnl_pct: position.pnl_pct ?? null,
         pnl_usd: position.pnl_usd ?? null,
@@ -402,7 +444,7 @@ export class ActiveBinOracleRecorder {
       lastActiveBin: activeBin,
       lastObservedAtMs: observedAtMs,
       history: trimHistory(
-        [...history, { activeBin, observedAtMs }],
+        [...history, { activeBin, activePrice, activePricePerLamport, observedAtMs }],
         observedAtMs,
         this.historyRetentionMs,
         this.maxHistoryPoints,
