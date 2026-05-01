@@ -7,7 +7,17 @@ import {
 } from "./config-builder.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export { normalizeOptionalString, firstNonEmptyString, INTERNAL_FALLBACK_MODEL, resolveFallbackModel } from "./config-builder.js";
+export {
+  DEEPSEEK_OPENAI_BASE_URL,
+  normalizeOptionalString,
+  firstNonEmptyString,
+  isDeepSeekBaseUrl,
+  isDeepSeekModel,
+  resolveEnvReference,
+  resolveRoleApiKey,
+  INTERNAL_FALLBACK_MODEL,
+  resolveFallbackModel,
+} from "./config-builder.js";
 
 export const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
 

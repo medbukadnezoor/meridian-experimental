@@ -133,7 +133,7 @@ function getToolsForRole(agentType, goal = "") {
 import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
-import { config, resolveFallbackModel } from "./config.js";
+import { config, isDeepSeekBaseUrl, isDeepSeekModel, resolveFallbackModel } from "./config.js";
 import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
@@ -216,6 +216,10 @@ function isOpenRouterBaseUrl(baseUrl) {
 
 function providerIgnoreForBaseUrl(baseUrl) {
   return isOpenRouterBaseUrl(baseUrl) ? ["Parasail", "Nebius", "Together"] : [];
+}
+
+function isDeepSeekRoute(route) {
+  return isDeepSeekBaseUrl(route?.baseURL) || isDeepSeekModel(route?.model);
 }
 
 function isTransientProviderError(error) {
@@ -350,6 +354,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          // DeepSeek V4 defaults thinking mode on; live bot routes need low-latency dense tool calls.
+          if (isDeepSeekRoute(activeRoute)) callParams.thinking = { type: "disabled" };
           // Chat Completions uses reasoning_effort; Responses uses reasoning.effort.
           if (activeRoute.reasoningEffort) callParams.reasoning_effort = activeRoute.reasoningEffort;
           response = await getClientForRoute(activeRoute).chat.completions.create(callParams);

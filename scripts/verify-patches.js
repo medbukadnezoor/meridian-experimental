@@ -555,15 +555,19 @@ function buildChecks() {
       file: "scripts/verify-runtime-config.js",
       label: "[CLIProxy] runtime config proof masks role routes and provider-param policy",
       test: () =>
-        exampleProof?.llm?.screeningModel === "gpt-5.5" &&
-        exampleProof?.llm?.screeningBaseUrl === "http://127.0.0.1:8317" &&
-        exampleProof?.llm?.screeningApiKeySet === "set" &&
-        exampleProof?.llm?.screeningReasoningEffort === "medium" &&
-        exampleProof?.llm?.screeningFallbackModel === "qwen3.6-plus" &&
-        exampleProof?.llm?.screeningFallbackBaseUrl === "https://dashscope-intl.aliyuncs.com" &&
-        exampleProof?.llm?.screeningFallbackApiKeySet === "set" &&
-        exampleProof?.llm?.managementModel === "qwen3.6-plus" &&
-        exampleProof?.llm?.generalModel === "qwen3.6-plus" &&
+        exampleProof?.llm?.screeningModel === "deepseek-v4-flash" &&
+        exampleProof?.llm?.screeningBaseUrl === "https://api.deepseek.com" &&
+        exampleProof?.llm?.screeningApiKeySet === "not_set" &&
+        exampleProof?.llm?.screeningReasoningEffort === null &&
+        exampleProof?.llm?.screeningFallbackModel === null &&
+        exampleProof?.llm?.screeningFallbackBaseUrl === null &&
+        exampleProof?.llm?.screeningFallbackApiKeySet === "not_set" &&
+        exampleProof?.llm?.managementModel === "deepseek-v4-flash" &&
+        exampleProof?.llm?.managementBaseUrl === "https://api.deepseek.com" &&
+        exampleProof?.llm?.managementApiKeySet === "not_set" &&
+        exampleProof?.llm?.generalModel === "deepseek-v4-flash" &&
+        exampleProof?.llm?.generalBaseUrl === "https://api.deepseek.com" &&
+        exampleProof?.llm?.generalApiKeySet === "not_set" &&
         exampleProof?.llm?.providerParamPolicy?.cliProxyOmitsProviderIgnore === true &&
         exampleProof?.llm?.providerParamPolicy?.dashScopeOmitsProviderIgnore === true &&
         exampleProof?.llm?.providerParamPolicy?.openRouterIncludesProviderIgnore === true,
