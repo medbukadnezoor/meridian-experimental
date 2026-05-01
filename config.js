@@ -175,6 +175,11 @@ export const config = {
     stopLossFastClosePct:   u.stopLossFastClosePct   ?? null,
     stopLossVelocityWindowMs: Math.max(0, Number(u.stopLossVelocityWindowMs ?? 0)),
     stopLossVelocityClosePct: u.stopLossVelocityClosePct ?? null,
+    rollingDrawdownExitEnabled: u.rollingDrawdownExitEnabled ?? false,
+    rollingDrawdownWindowMs: u.rollingDrawdownWindowMs ?? 5_400_000,
+    rollingDrawdownMinPeakPct: u.rollingDrawdownMinPeakPct ?? 2,
+    rollingDrawdownCurrentPnlPct: u.rollingDrawdownCurrentPnlPct ?? -3,
+    rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 6,
     takeProfitPct:         u.takeProfitPct         ?? u.takeProfitFeePct ?? 5,
     minFeePerTvl24h:       u.minFeePerTvl24h       ?? 7,
     minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60, // minutes before low yield can trigger close
@@ -187,6 +192,9 @@ export const config = {
     trailingTriggerPct:    u.trailingTriggerPct    ?? 3,    // activate trailing at X% PnL
     trailingDropPct:       u.trailingDropPct       ?? 1.5,  // close when drops X% from peak
     pnlSanityMaxDiffPct:   u.pnlSanityMaxDiffPct   ?? 5,    // max allowed diff between reported and derived pnl % before ignoring a tick
+    pnlSnapshotLoggingEnabled: u.pnlSnapshotLoggingEnabled ?? false,
+    pnlSnapshotDebug: u.pnlSnapshotDebug ?? false,
+    pnlSnapshotBotName: u.pnlSnapshotBotName ?? "meridian",
     // Early dump detection — close young positions losing fast
     earlyDumpPct:          u.earlyDumpPct          ?? null,  // e.g. -2 — PnL threshold for young positions (null = disabled)
     earlyDumpMaxAgeMin:    u.earlyDumpMaxAgeMin    ?? 30,    // only trigger if position is younger than this (minutes)

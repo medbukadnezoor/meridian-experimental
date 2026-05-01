@@ -10,12 +10,18 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
-import { buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
+import {
+  buildRollingDrawdownExitDecision,
+  buildStopLossExitDecision,
+  calculatePnlVelocityDrop,
+  calculateRollingPeakDrawdown,
+} from "./stop-loss-policy.js";
 
 const STATE_FILE = "./state.json";
 
 const MAX_RECENT_EVENTS = 20;
 const MAX_PNL_HISTORY_POINTS = 30;
+const PNL_HISTORY_SAMPLE_INTERVAL_MS = 30_000;
 const MAX_INSTRUCTION_LENGTH = 280;
 const GHOST_POSITION_GRACE_MS = 10 * 60_000;
 const GHOST_VALUE_EPSILON = 0.0001;
@@ -70,22 +76,41 @@ function toFiniteNumberOrNull(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, nowMs = Date.now()) {
+function getPnlHistoryRetentionWindowMs(mgmtConfig = {}) {
+  const velocityWindowMs = Math.max(0, Number(mgmtConfig.stopLossVelocityWindowMs ?? 0));
+  const rollingWindowMs = mgmtConfig.rollingDrawdownExitEnabled
+    ? Math.max(0, Number(mgmtConfig.rollingDrawdownWindowMs ?? 0))
+    : 0;
+  return Math.max(velocityWindowMs * 3, rollingWindowMs, 10 * 60_000);
+}
+
+function getPnlHistoryPointLimit(historyWindowMs) {
+  const pointLimit = Math.ceil(Math.max(0, Number(historyWindowMs ?? 0)) / PNL_HISTORY_SAMPLE_INTERVAL_MS) + 5;
+  return Math.max(MAX_PNL_HISTORY_POINTS, Math.min(1000, pointLimit));
+}
+
+function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, rollingWindowMs, historyWindowMs, nowMs = Date.now()) {
   const current = toFiniteNumberOrNull(currentPnlPct);
   if (!pos || current == null) {
-    return { changed: false, velocity: { dropPct: null, elapsedMs: null, baselinePnlPct: null }, initialized: false };
+    return {
+      changed: false,
+      velocity: { dropPct: null, elapsedMs: null, baselinePnlPct: null },
+      rollingDrawdown: { peakPnlPct: null, dropPct: null, elapsedMs: null },
+      initialized: false,
+    };
   }
 
   const existing = Array.isArray(pos.pnl_history) ? pos.pnl_history : [];
   const velocity = calculatePnlVelocityDrop(existing, current, velocityWindowMs, nowMs);
-  const historyWindowMs = Math.max(Number(velocityWindowMs ?? 0) * 3, 10 * 60_000);
+  const rollingDrawdown = calculateRollingPeakDrawdown(existing, current, rollingWindowMs, nowMs);
   const cutoffMs = nowMs - historyWindowMs;
+  const historyPointLimit = getPnlHistoryPointLimit(historyWindowMs);
   const pruned = existing
     .filter((point) => {
       const tsMs = new Date(point?.ts).getTime();
       return Number.isFinite(tsMs) && tsMs >= cutoffMs && toFiniteNumberOrNull(point?.pnl_pct) != null;
     })
-    .slice(-(MAX_PNL_HISTORY_POINTS - 1));
+    .slice(-(historyPointLimit - 1));
 
   pruned.push({
     ts: new Date(nowMs).toISOString(),
@@ -95,7 +120,7 @@ function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, nowMs = Date.now
   const initialized = existing.length === 0;
   pos.pnl_history = pruned;
   if (initialized) pos.pnl_history_started_at = new Date(nowMs).toISOString();
-  return { changed: true, velocity, initialized };
+  return { changed: true, velocity, rollingDrawdown, initialized };
 }
 
 function isGhostLikeLivePosition(position) {
@@ -553,7 +578,12 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (changed) save(state);
 
   const velocityWindowMs = Math.max(0, Number(mgmtConfig.stopLossVelocityWindowMs ?? 0));
-  const pnlHistory = appendPnlHistory(pos, currentPnlPct, velocityWindowMs);
+  const rollingDrawdownWindowMs = mgmtConfig.rollingDrawdownExitEnabled
+    ? Math.max(0, Number(mgmtConfig.rollingDrawdownWindowMs ?? 0))
+    : 0;
+  const pnlHistoryWindowMs = getPnlHistoryRetentionWindowMs(mgmtConfig);
+  const historyPnlPct = pnl_pct_suspicious ? null : currentPnlPct;
+  const pnlHistory = appendPnlHistory(pos, historyPnlPct, velocityWindowMs, rollingDrawdownWindowMs, pnlHistoryWindowMs);
   if (pnlHistory.changed) {
     if (pnlHistory.initialized && velocityWindowMs > 0) {
       log("state", `Position ${position_address} PnL velocity history initialized; velocity stop needs one prior sample`);
@@ -574,6 +604,16 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     });
     if (immediateStopLossDecision) {
       return immediateStopLossDecision;
+    }
+
+    const rollingDrawdownExit = buildRollingDrawdownExitDecision({
+      currentPnlPct,
+      managementConfig: mgmtConfig,
+      rollingDrawdown: pnlHistory.rollingDrawdown,
+      immediateAction: "STOP_LOSS",
+    });
+    if (rollingDrawdownExit) {
+      return rollingDrawdownExit;
     }
   }
 

@@ -25,6 +25,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const STOP_LOSS_TRIAL_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
+const ROLLING_DRAWDOWN_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
 const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-cooldown.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 
@@ -92,6 +93,22 @@ function runStopLossTrialProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRollingDrawdownExitProof() {
+  const result = spawnSync(process.execPath, [ROLLING_DRAWDOWN_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-rolling-drawdown-exit-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runRepeatLowYieldCooldownProof() {
   const result = spawnSync(process.execPath, [REPEAT_LOW_YIELD_VERIFIER_PATH], {
     cwd: ROOT,
@@ -128,6 +145,7 @@ const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
 const stopLossTrialProof = runStopLossTrialProof();
+const rollingDrawdownExitProof = runRollingDrawdownExitProof();
 const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 const fallingKnifeProof = runFallingKnifeVetoProof();
 
@@ -250,6 +268,85 @@ const checks = [
       stopLossTrialProof?.rejectedRecheck?.rejected === true &&
       stopLossTrialProof?.tempStateFileCreated === true &&
       stopLossTrialProof?.tempDirRemoved === true,
+  },
+
+  {
+    file: 'scripts/verify-rolling-drawdown-exit-policy.js',
+    label: '[Runtime] Main rolling fast-drawdown exit is gated, urgent, and preserves stronger stop priority',
+    test: () =>
+      rollingDrawdownExitProof?.success === true &&
+      rollingDrawdownExitProof?.pureDecision?.action === 'STOP_LOSS' &&
+      rollingDrawdownExitProof?.pureDecision?.urgent === true &&
+      String(rollingDrawdownExitProof?.pureDecision?.reason || '').startsWith('Rolling fast drawdown:') &&
+      rollingDrawdownExitProof?.fireExit?.action === 'STOP_LOSS' &&
+      rollingDrawdownExitProof?.fireExit?.urgent === true &&
+      String(rollingDrawdownExitProof?.fireExit?.reason || '').startsWith('Rolling fast drawdown:') &&
+      rollingDrawdownExitProof?.noTriggerCases?.lowPeak === true &&
+      rollingDrawdownExitProof?.noTriggerCases?.currentHigh === true &&
+      rollingDrawdownExitProof?.noTriggerCases?.smallDrop === true &&
+      rollingDrawdownExitProof?.noTriggerCases?.stale === true &&
+      rollingDrawdownExitProof?.noTriggerCases?.disabled === true &&
+      rollingDrawdownExitProof?.noTriggerCases?.suspicious === true &&
+      rollingDrawdownExitProof?.preservedStops?.hard?.urgent === true &&
+      String(rollingDrawdownExitProof?.preservedStops?.hard?.reason || '').startsWith('Hard stop loss:') &&
+      rollingDrawdownExitProof?.preservedStops?.fast?.urgent === true &&
+      String(rollingDrawdownExitProof?.preservedStops?.fast?.reason || '').startsWith('Fast stop loss:') &&
+      rollingDrawdownExitProof?.preservedStops?.velocity?.urgent === true &&
+      String(rollingDrawdownExitProof?.preservedStops?.velocity?.reason || '').startsWith('Velocity stop loss:') &&
+      Number(rollingDrawdownExitProof?.fireHistoryPoints) >= 2 &&
+      rollingDrawdownExitProof?.tempStateFileCreated === true &&
+      rollingDrawdownExitProof?.tempDirRemoved === true,
+  },
+
+  {
+    file: 'config.js',
+    label: '[Runtime] Main rolling fast-drawdown config keys map with conservative defaults',
+    test: src =>
+      src.includes('rollingDrawdownExitEnabled: u.rollingDrawdownExitEnabled ?? false') &&
+      src.includes('rollingDrawdownWindowMs: u.rollingDrawdownWindowMs ?? 5_400_000') &&
+      src.includes('rollingDrawdownMinPeakPct: u.rollingDrawdownMinPeakPct ?? 2') &&
+      src.includes('rollingDrawdownCurrentPnlPct: u.rollingDrawdownCurrentPnlPct ?? -3') &&
+      src.includes('rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 6'),
+  },
+
+  {
+    file: 'tools/executor.js',
+    label: '[Runtime] Main update_config can modify rolling fast-drawdown keys',
+    test: src =>
+      src.includes('rollingDrawdownExitEnabled: ["management", "rollingDrawdownExitEnabled"]') &&
+      src.includes('rollingDrawdownWindowMs: ["management", "rollingDrawdownWindowMs"]') &&
+      src.includes('rollingDrawdownMinPeakPct: ["management", "rollingDrawdownMinPeakPct"]') &&
+      src.includes('rollingDrawdownCurrentPnlPct: ["management", "rollingDrawdownCurrentPnlPct"]') &&
+      src.includes('rollingDrawdownMinDropPct: ["management", "rollingDrawdownMinDropPct"]'),
+  },
+
+  {
+    file: 'index.js',
+    label: '[Runtime] Main PnL snapshot logging can feed rolling drawdown live monitor',
+    test: src =>
+      src.includes('function appendPnlSnapshot') &&
+      src.includes('pnl-snapshots-${dateStr}.jsonl') &&
+      src.includes('config.management.pnlSnapshotLoggingEnabled') &&
+      src.includes('appendPnlSnapshot(null, p, exit)'),
+  },
+
+  {
+    file: 'index.js',
+    label: '[Runtime] Management-cycle urgent stop-loss exits bypass MANAGER',
+    test: src => {
+      const urgentExitBranch = src.match(/if \(exit\.action === "STOP_LOSS" && exit\.urgent\) \{[\s\S]*?continue;\n\s*\}/);
+      const ruleOneBranch = src.match(/if \(closeRule\.rule === 1 && closeRule\.urgent\) \{[\s\S]*?continue;\n\s*\}/);
+      return (
+        src.includes('async function closeUrgentStopLossDirect') &&
+        src.includes('closing directly (no MANAGER)') &&
+        urgentExitBranch?.[0]?.includes('closeUrgentStopLossDirect') &&
+        urgentExitBranch?.[0]?.includes('action: "DIRECT_CLOSE"') &&
+        ruleOneBranch?.[0]?.includes('closeUrgentStopLossDirect') &&
+        ruleOneBranch?.[0]?.includes('action: "DIRECT_CLOSE"') &&
+        src.includes('return a.action !== "STAY" && a.action !== "DIRECT_CLOSE";') &&
+        src.includes('urgent direct close(s) already attempted — skipping LLM')
+      );
+    },
   },
 
   {

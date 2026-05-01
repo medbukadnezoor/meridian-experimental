@@ -1,4 +1,6 @@
 import "./envcrypt.js";
+import fs from "fs";
+import path from "path";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
@@ -79,6 +81,53 @@ const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
+const PNL_SNAPSHOT_LOG_DIR = "./logs";
+let _pnlSnapshotWarningLogged = false;
+
+function isSoftStopLossCandidate(position, managementConfig) {
+  const pnlPct = finiteNumberOrNull(position?.pnl_pct);
+  const stopLossPct = finiteNumberOrNull(managementConfig?.stopLossPct);
+  const hardStopLossPct = finiteNumberOrNull(managementConfig?.hardStopLossPct);
+  if (pnlPct == null || stopLossPct == null || position?.pnl_pct_suspicious) return false;
+  if (hardStopLossPct != null && pnlPct <= hardStopLossPct) return false;
+  return pnlPct <= stopLossPct;
+}
+
+function appendPnlSnapshot(wallet, position, exit = null) {
+  if (!config.management.pnlSnapshotLoggingEnabled) return;
+
+  try {
+    fs.mkdirSync(PNL_SNAPSHOT_LOG_DIR, { recursive: true });
+    const now = new Date();
+    const tracked = getTrackedPosition(position.position);
+    const entry = {
+      ts: now.toISOString(),
+      event: "pnl_snapshot",
+      bot: config.management.pnlSnapshotBotName ?? "meridian",
+      wallet: wallet ?? null,
+      pool: position.pool ?? position.pool_address ?? null,
+      poolName: position.pair ?? position.pool_name ?? null,
+      position: position.position ?? null,
+      baseMint: position.base_mint ?? null,
+      ageMin: finiteNumberOrNull(position.age_minutes),
+      pnlPct: finiteNumberOrNull(position.pnl_pct),
+      peakPnlPct: finiteNumberOrNull(tracked?.peak_pnl_pct),
+      trailingActive: Boolean(tracked?.trailing_active),
+      inRange: typeof position.in_range === "boolean" ? position.in_range : null,
+      stopCandidate: exit?.action === "STOP_LOSS_CANDIDATE" || isSoftStopLossCandidate(position, config.management),
+    };
+    const dateStr = now.toISOString().slice(0, 10);
+    fs.appendFileSync(path.join(PNL_SNAPSHOT_LOG_DIR, `pnl-snapshots-${dateStr}.jsonl`), JSON.stringify(entry) + "\n");
+    if (config.management.pnlSnapshotDebug) {
+      log("state", `[PnL snapshot] ${entry.poolName ?? entry.position?.slice(0, 8) ?? "position"} PnL=${entry.pnlPct ?? "?"}%`);
+    }
+  } catch (error) {
+    if (!_pnlSnapshotWarningLogged) {
+      _pnlSnapshotWarningLogged = true;
+      log("state_warn", `PnL snapshot logging failed: ${error.message}`);
+    }
+  }
+}
 
 /** Strip <think>...</think> reasoning blocks that some models leak into output */
 function stripThink(text) {
@@ -213,6 +262,31 @@ activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
     _activeBinOracleEmergencyInFlight.delete(positionAddress);
   }
 }, { enabled: true, maxPnlPct: 2 });
+
+async function closeUrgentStopLossDirect(position, reason, sourceLabel, liveMessage = null) {
+  const pair = position?.pair ?? position?.pool_name ?? position?.position?.slice(0, 8) ?? "position";
+  log("state", `[${sourceLabel}] URGENT stop-loss: ${pair} — ${reason} — closing directly (no MANAGER)`);
+  await liveMessage?.toolStart("close_position");
+  try {
+    const result = await executeTool("close_position", {
+      position_address: position.position,
+      reason,
+      urgent: true,
+    });
+    await liveMessage?.toolFinish("close_position", result, !!result?.success);
+    if (result?.success) {
+      log("state", `[${sourceLabel}] Direct urgent stop-loss close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+      return { attempted: true, success: true, result };
+    }
+    const error = result?.error ?? "unknown";
+    log("cron_error", `[${sourceLabel}] Direct urgent stop-loss close failed for ${pair}: ${error}`);
+    return { attempted: true, success: false, error };
+  } catch (error) {
+    await liveMessage?.toolFinish("close_position", { error: error.message }, false);
+    log("cron_error", `[${sourceLabel}] Direct urgent stop-loss close error for ${pair}: ${error.message}`);
+    return { attempted: true, success: false, error: error.message };
+  }
+}
 
 function scheduleStopLossConfirmation(position, exit) {
   const positionAddress = position?.position;
@@ -358,6 +432,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         schedulePeakConfirmation(p.position);
       }
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
+      appendPnlSnapshot(null, p, exit);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
           if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
@@ -396,6 +471,17 @@ export async function runManagementCycle({ silent = false } = {}) {
             "indicators",
             `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${exit.reason}`,
           );
+        }
+        if (exit.action === "STOP_LOSS" && exit.urgent) {
+          const direct = await closeUrgentStopLossDirect(p, exit.reason, "Management cycle", liveMessage);
+          actionMap.set(p.position, {
+            action: "DIRECT_CLOSE",
+            rule: "urgent_stop_loss",
+            reason: exit.reason,
+            directCloseSuccess: direct.success,
+            directCloseError: direct.error ?? null,
+          });
+          continue;
         }
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exit.reason });
         continue;
@@ -444,6 +530,17 @@ export async function runManagementCycle({ silent = false } = {}) {
             `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${closeRule.reason}`,
           );
         }
+        if (closeRule.rule === 1 && closeRule.urgent) {
+          const direct = await closeUrgentStopLossDirect(p, closeRule.reason, "Management cycle", liveMessage);
+          actionMap.set(p.position, {
+            action: "DIRECT_CLOSE",
+            rule: "urgent_stop_loss",
+            reason: closeRule.reason,
+            directCloseSuccess: direct.success,
+            directCloseError: direct.error ?? null,
+          });
+          continue;
+        }
         actionMap.set(p.position, closeRule);
         continue;
       }
@@ -471,6 +568,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "DIRECT_CLOSE") line += `\n⚡ Direct emergency close ${act.directCloseSuccess ? "sent" : "failed"}: ${act.reason}${act.directCloseError ? ` (${act.directCloseError})` : ""}`;
       if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       if (act.indicatorHold) line += `\n📊 Indicator hold: ${act.indicatorHold}`;
@@ -489,8 +587,10 @@ export async function runManagementCycle({ silent = false } = {}) {
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
       const a = actionMap.get(p.position);
-      return a.action !== "STAY";
+      return a.action !== "STAY" && a.action !== "DIRECT_CLOSE";
     });
+
+    const directCloseCount = [...actionMap.values()].filter((a) => a.action === "DIRECT_CLOSE").length;
 
     if (actionPositions.length > 0) {
       log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
@@ -527,8 +627,13 @@ After executing, write a brief one-line result per position.
 
       mgmtReport += `\n\n${content}`;
     } else {
-      log("cron", "Management: all positions STAY — skipping LLM");
-      await liveMessage?.note("No tool actions needed.");
+      if (directCloseCount > 0) {
+        log("cron", `Management: ${directCloseCount} urgent direct close(s) already attempted — skipping LLM`);
+        await liveMessage?.note(`${directCloseCount} urgent direct close(s) attempted; no LLM action needed.`);
+      } else {
+        log("cron", "Management: all positions STAY — skipping LLM");
+        await liveMessage?.note("No tool actions needed.");
+      }
     }
 
     // Trigger screening after management
@@ -967,6 +1072,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           schedulePeakConfirmation(p.position);
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        appendPnlSnapshot(null, p, exit);
         if (exit) {
           if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
             scheduleStopLossConfirmation(p, exit);
