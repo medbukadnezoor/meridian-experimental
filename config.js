@@ -29,6 +29,38 @@ export function firstNonEmptyString(...values) {
   return undefined;
 }
 
+export const DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com";
+
+export function isDeepSeekBaseUrl(value) {
+  const normalized = normalizeOptionalString(value);
+  if (!normalized) return false;
+  try {
+    const hostname = new URL(normalized).hostname.toLowerCase();
+    return hostname === "api.deepseek.com";
+  } catch {
+    return false;
+  }
+}
+
+export function isDeepSeekModel(value) {
+  return normalizeOptionalString(value)?.toLowerCase().startsWith("deepseek-") ?? false;
+}
+
+export function resolveEnvReference(value, env = process.env) {
+  const normalized = normalizeOptionalString(value);
+  const match = normalized?.match(/^env:([A-Z0-9_]+)$/i);
+  if (!match) return normalized;
+  return normalizeOptionalString(env[match[1]]);
+}
+
+export function resolveRoleApiKey(configuredApiKey, roleBaseUrl, roleModel, env = process.env, globalApiKey = undefined) {
+  return firstNonEmptyString(
+    resolveEnvReference(configuredApiKey, env),
+    isDeepSeekBaseUrl(roleBaseUrl) || isDeepSeekModel(roleModel) ? env.DEEPSEEK_API_KEY : undefined,
+    globalApiKey
+  );
+}
+
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 
 export function normalizeScreeningReasoningEffort(value) {
@@ -49,12 +81,23 @@ if (u.rpcUrl)    process.env.RPC_URL            ||= u.rpcUrl;
 if (u.walletKey) process.env.WALLET_PRIVATE_KEY ||= u.walletKey;
 if (u.llmModel)  process.env.LLM_MODEL          ||= u.llmModel;
 if (u.llmBaseUrl) process.env.LLM_BASE_URL      ||= u.llmBaseUrl;
-if (u.llmApiKey)  process.env.LLM_API_KEY       ||= u.llmApiKey;
+{
+  const llmApiKey = resolveEnvReference(u.llmApiKey);
+  if (llmApiKey) process.env.LLM_API_KEY ||= llmApiKey;
+}
 if (u.dryRun !== undefined) process.env.DRY_RUN ||= String(u.dryRun);
 if (u.publicApiKey) process.env.PUBLIC_API_KEY ||= u.publicApiKey;
 if (u.agentMeridianApiUrl) process.env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
 
 const fallbackModel = normalizeOptionalString(u.fallbackModel);
+const globalLlmBaseUrl = firstNonEmptyString(process.env.LLM_BASE_URL, "https://openrouter.ai/api/v1");
+const globalLlmApiKey = firstNonEmptyString(process.env.LLM_API_KEY, process.env.OPENROUTER_API_KEY);
+const screeningBaseUrl = u.screeningBaseUrl ?? null;
+const managementBaseUrl = u.managementBaseUrl ?? null;
+const generalBaseUrl = u.generalBaseUrl ?? null;
+const managementModel = u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha";
+const screeningModel = u.screeningModel ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha";
+const generalModel = u.generalModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha";
 
 export const config = {
   // ─── Risk Limits ─────────────────────────
@@ -171,18 +214,18 @@ export const config = {
     temperature: u.temperature ?? 0.373,
     maxTokens:   u.maxTokens   ?? 4096,
     maxSteps:    u.maxSteps    ?? 20,
-    managementModel: u.managementModel ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
-    screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL ?? "openrouter/hunter-alpha",
-    generalModel:    u.generalModel    ?? process.env.LLM_MODEL ?? "openrouter/healer-alpha",
+    managementModel,
+    screeningModel,
+    generalModel,
     fallbackModel,
     // Per-role endpoint overrides — null falls back to global llmBaseUrl / llmApiKey
-    screeningBaseUrl: u.screeningBaseUrl ?? null,
-    screeningApiKey:  u.screeningApiKey  ?? null,
+    screeningBaseUrl,
+    screeningApiKey:  resolveRoleApiKey(u.screeningApiKey, screeningBaseUrl ?? globalLlmBaseUrl, screeningModel, process.env, globalLlmApiKey) ?? null,
     screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
-    managementBaseUrl: u.managementBaseUrl ?? null,
-    managementApiKey:  u.managementApiKey  ?? null,
-    generalBaseUrl: u.generalBaseUrl ?? null,
-    generalApiKey:  u.generalApiKey  ?? null,
+    managementBaseUrl,
+    managementApiKey:  resolveRoleApiKey(u.managementApiKey, managementBaseUrl ?? globalLlmBaseUrl, managementModel, process.env, globalLlmApiKey) ?? null,
+    generalBaseUrl,
+    generalApiKey:  resolveRoleApiKey(u.generalApiKey, generalBaseUrl ?? globalLlmBaseUrl, generalModel, process.env, globalLlmApiKey) ?? null,
   },
 
   // ─── Darwinian Signal Weighting ───────

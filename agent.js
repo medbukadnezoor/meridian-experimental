@@ -101,7 +101,7 @@ function getToolsForRole(agentType, goal = "") {
 import { getWalletBalances } from "./tools/wallet.js";
 import { getMyPositions } from "./tools/dlmm.js";
 import { log } from "./logger.js";
-import { config, resolveFallbackModel } from "./config.js";
+import { config, isDeepSeekBaseUrl, isDeepSeekModel, resolveFallbackModel } from "./config.js";
 import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
@@ -110,6 +110,28 @@ import { getDecisionSummary } from "./decision-log.js";
 // Per-role endpoints can be set via screeningBaseUrl/screeningApiKey etc. in user-config.json.
 // Falls back to the global LLM_BASE_URL / LLM_API_KEY for any role without an override.
 const _clientCache = new Map();
+function isOpenRouterBaseUrl(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+  } catch {
+    return false;
+  }
+}
+
+function getBaseUrlForRole(agentType = "GENERAL") {
+  const role = (agentType || "GENERAL").toUpperCase();
+  const llmCfg = config.llm;
+  const globalUrl = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
+  if (role === "SCREENER") return llmCfg.screeningBaseUrl || globalUrl;
+  if (role === "MANAGER") return llmCfg.managementBaseUrl || globalUrl;
+  return llmCfg.generalBaseUrl || globalUrl;
+}
+
+function isDeepSeekRoute(agentType = "GENERAL", model = "") {
+  return isDeepSeekBaseUrl(getBaseUrlForRole(agentType)) || isDeepSeekModel(model);
+}
+
 function getClient(agentType = "GENERAL") {
   const role = (agentType || "GENERAL").toUpperCase();
   if (_clientCache.has(role)) return _clientCache.get(role);
@@ -237,7 +259,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
       const modelSupportsRequiredToolChoice = !/glm|qwen|deepseek.*think/i.test(activeModel);
       let toolChoice = (step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
-      let providerIgnore = ["Parasail", "Nebius", "Together"];
+      let providerIgnore = isOpenRouterBaseUrl(getBaseUrlForRole(agentType))
+        ? ["Parasail", "Nebius", "Together"]
+        : [];
 
       for (let attempt = 0; attempt < 3; attempt++) {
         let startTime = Date.now();
@@ -252,6 +276,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
+          // DeepSeek V4 defaults thinking mode on; live bot routes need low-latency dense tool calls.
+          if (isDeepSeekRoute(agentType, usedModel)) callParams.thinking = { type: "disabled" };
           // Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.
           if (agentType === "SCREENER" && config.llm.screeningReasoningEffort) {
             callParams.reasoning_effort = config.llm.screeningReasoningEffort;
