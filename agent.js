@@ -578,9 +578,10 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // Lock deploy_position after first real attempt. Deterministic argument rejections
+        // can be corrected by the model without consuming the one useful deploy attempt.
         // For close/swap: only lock on success so genuine failures can be retried
-        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        if (NO_RETRY_TOOLS.has(functionName) && result?.retryable_tool_args !== true) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {

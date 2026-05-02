@@ -29,6 +29,7 @@ const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-st
 const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
+const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap-single-side-bidask.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
@@ -200,6 +201,22 @@ function runNarrowRangeGuardProof() {
   return JSON.parse(result.stdout);
 }
 
+function runNanocapSingleSideBidAskProof() {
+  const result = spawnSync(process.execPath, [NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-nanocap-single-side-bidask failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runMaterialWinMetricsProof() {
   const result = spawnSync(process.execPath, [MATERIAL_WIN_METRICS_VERIFIER_PATH], {
     cwd: ROOT,
@@ -342,6 +359,7 @@ function buildChecks() {
   const rollingDrawdownExitProof = runRollingDrawdownExitPolicyProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
+  const nanocapSingleSideBidAskProof = runNanocapSingleSideBidAskProof();
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
@@ -793,6 +811,28 @@ function buildChecks() {
         src.includes("[range-raw]") &&
         src.includes("[range-normalized]") &&
         src.includes("[narrow-range-guard]"),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[Nanocap single-side bid_ask] executor repairs forced SOL-only deploy args before safety and preserves corrected retry path",
+      test: (src) =>
+        nanocapSingleSideBidAskProof?.success === true &&
+        nanocapSingleSideBidAskProof?.config?.preset_default_forceSingleSidedSolBidAsk === true &&
+        nanocapSingleSideBidAskProof?.config?.example_forceSingleSidedSolBidAsk === true &&
+        nanocapSingleSideBidAskProof?.active_strategy_example?.lp_strategy === "bid_ask" &&
+        nanocapSingleSideBidAskProof?.active_strategy_example?.single_side === "sol" &&
+        Number(nanocapSingleSideBidAskProof?.active_strategy_example?.bins_above) === 0 &&
+        Number(nanocapSingleSideBidAskProof?.active_strategy_example?.bins_below) === 85 &&
+        nanocapSingleSideBidAskProof?.repairs_and_rejections?.spotRepair?.args?.strategy === "bid_ask" &&
+        nanocapSingleSideBidAskProof?.repairs_and_rejections?.dualSidedReject?.ok === false &&
+        nanocapSingleSideBidAskProof?.repairs_and_rejections?.dualSidedReject?.retryableToolArgs === true &&
+        Number(nanocapSingleSideBidAskProof?.repairs_and_rejections?.binsAboveRepair?.args?.bins_above) === 0 &&
+        Number(nanocapSingleSideBidAskProof?.repairs_and_rejections?.halfAmountRepair?.args?.amount_y) === 0.8 &&
+        nanocapSingleSideBidAskProof?.repairs_and_rejections?.upsideReject?.ok === false &&
+        nanocapSingleSideBidAskProof?.bad_live_pattern?.would_hit_min_deploy_safety_block === false &&
+        nanocapSingleSideBidAskProof?.source_markers?.agent_retryable_arg_rejection === true &&
+        src.includes("normalizeForcedSingleSidedSolBidAskArgs") &&
+        src.includes("[forced-single-side-bidask]"),
     },
     {
       file: "scripts/analyze-pnl-snapshots.js",

@@ -20,7 +20,8 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds } from "../config.js";
+import { config, computeDeployAmount, reloadScreeningThresholds } from "../config.js";
+import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-guard.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -341,6 +342,45 @@ export async function executeTool(name, args) {
         blocked: true,
         reason: "update_config is operator-only. Use explicit operator paths such as /setcfg or CLI config set.",
       };
+    }
+  }
+
+  if (name === "deploy_position") {
+    const forcedDeployAmountSol = process.env.DRY_RUN === "true"
+      ? config.management.deployAmountSol
+      : computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol);
+    const forcedDeploy = normalizeForcedSingleSidedSolBidAskArgs(args, {
+      force: config.strategy.forceSingleSidedSolBidAsk,
+      deployAmountSol: Number.isFinite(forcedDeployAmountSol) ? forcedDeployAmountSol : config.management.deployAmountSol,
+      binsBelow: config.strategy.binsBelow,
+    });
+    if (!forcedDeploy.ok) {
+      log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
+        reason: forcedDeploy.reason,
+        deploy: {
+          forced_single_side_bidask: true,
+          args,
+          details: forcedDeploy.details ?? null,
+        },
+        source: "executor.forced_single_side_bidask",
+      });
+      return {
+        success: false,
+        blocked: true,
+        retryable_tool_args: forcedDeploy.retryableToolArgs === true,
+        reason: forcedDeploy.reason,
+        details: forcedDeploy.details ?? null,
+      };
+    }
+    if (forcedDeploy.repaired) {
+      log("deploy", `[forced-single-side-bidask] Repaired deploy args: ${JSON.stringify(forcedDeploy.repairs)}`);
+      args = forcedDeploy.args;
     }
   }
 

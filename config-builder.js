@@ -213,6 +213,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
     strategy: {
       strategy: u.strategy ?? "bid_ask",
       binsBelow: u.binsBelow ?? 69,
+      forceSingleSidedSolBidAsk: u.forceSingleSidedSolBidAsk ?? isNanocapPreset,
       // Nanocap prompt canon is 35-90 bins below; keep live guard deterministic.
       minSingleSidedSolBins: u.minSingleSidedSolBins ?? (isNanocapPreset ? 35 : 5),
       minSingleSidedSolDownsidePct: u.minSingleSidedSolDownsidePct ?? (isNanocapPreset ? 1 : null),
