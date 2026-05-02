@@ -50,9 +50,19 @@ function isEarlyDumpCloseReason(reason) {
   return /early.dump/i.test(String(reason || ""));
 }
 
+function isRollingFastDrawdownCloseReason(reason) {
+  return /rolling.fast.drawdown/i.test(String(reason || ""));
+}
+
 function isStopLossCooldownCloseReason(reason) {
   const text = String(reason || "");
-  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text);
+  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text) || isRollingFastDrawdownCloseReason(text);
+}
+
+function getStopLossCooldownReason(reason) {
+  if (isEarlyDumpCloseReason(reason)) return "early dump";
+  if (isRollingFastDrawdownCloseReason(reason)) return "rolling fast drawdown";
+  return "stop loss";
 }
 
 function isAdjustedWinRateExcludedReason(reason) {
@@ -265,10 +275,11 @@ export function recordPoolDeploy(poolAddress, deployData) {
   // Set cooldown for stop-loss style closes — token dumped on us, don't redeploy soon.
   // Early-dump closes are emitted as STOP_LOSS actions but may be stored with a
   // "Trailing TP: Early dump..." prefix by older callers, so classify by content.
+  // Rolling fast-drawdown closes are emergency stop-loss-family exits too.
   // Duration configurable via config.management.stopLossCooldownHours (default fallback: 12h)
   if (isStopLossCooldownCloseReason(deploy.close_reason)) {
     const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
-    const cooldownReason = isEarlyDumpCloseReason(deploy.close_reason) ? "early dump" : "stop loss";
+    const cooldownReason = getStopLossCooldownReason(deploy.close_reason);
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, cooldownReason);
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, cooldownReason);
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (${cooldownReason} close)`);

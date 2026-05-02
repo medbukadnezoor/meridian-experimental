@@ -672,11 +672,15 @@ function buildChecks() {
     },
     {
       file: "pool-memory.js",
-      label: "[Patch 9] early-dump close reasons use the stop-loss cooldown path",
+      label: "[Patch 9] stop-loss-family close reasons use the stop-loss cooldown path",
       test: (src) =>
         src.includes("function isEarlyDumpCloseReason") &&
+        src.includes("function isRollingFastDrawdownCloseReason") &&
         src.includes("function isStopLossCooldownCloseReason") &&
-        src.includes('cooldownReason = isEarlyDumpCloseReason(deploy.close_reason) ? "early dump" : "stop loss"'),
+        src.includes("function getStopLossCooldownReason") &&
+        src.includes("isRollingFastDrawdownCloseReason(text)") &&
+        src.includes('if (isRollingFastDrawdownCloseReason(reason)) return "rolling fast drawdown"') &&
+        src.includes("cooldownReason = getStopLossCooldownReason(deploy.close_reason)"),
     },
     {
       file: "index.js",
@@ -1268,12 +1272,15 @@ function buildChecks() {
     },
     {
       file: "scripts/verify-early-dump-cooldown.js",
-      label: "[Runtime] legacy-prefixed early-dump close writes pool and token cooldowns",
+      label: "[Runtime] stop-loss-family closes write pool and token cooldowns",
       test: () =>
         earlyDumpProof?.success === true &&
-        earlyDumpProof?.closeReasonMatched === true &&
-        earlyDumpProof?.poolCooldownReason === "early dump" &&
-        earlyDumpProof?.tokenCooldownReason === "early dump" &&
+        earlyDumpProof?.earlyDump?.closeReasonMatched === true &&
+        earlyDumpProof?.earlyDump?.poolCooldownReason === "early dump" &&
+        earlyDumpProof?.earlyDump?.tokenCooldownReason === "early dump" &&
+        earlyDumpProof?.rollingFastDrawdown?.closeReasonMatched === true &&
+        earlyDumpProof?.rollingFastDrawdown?.poolCooldownReason === "rolling fast drawdown" &&
+        earlyDumpProof?.rollingFastDrawdown?.tokenCooldownReason === "rolling fast drawdown" &&
         earlyDumpProof?.tempStateFileCreated === true &&
         earlyDumpProof?.tempDirRemoved === true,
     },
