@@ -82,11 +82,11 @@ export async function evaluateSupertrendLossExit(
   }
 
   return {
-    action: "CLOSE",
+    action: "STOP_LOSS",
     rule: "supertrend_loss_exit",
     reason: `Supertrend loss exit: PnL ${currentPnlPct.toFixed(2)}% <= ${thresholdPct}% and ${intervalLabel(interval)} Supertrend bearish for ${check.confirmChecks} checks`,
     indicatorPolicy: "bypass",
-    urgent: false,
+    urgent: true,
     signal: summary,
     interval,
     count: check.count,

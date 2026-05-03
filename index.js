@@ -474,6 +474,15 @@ export async function runManagementCycle({ silent = false } = {}) {
         continue;
       }
       if (supertrendExit) {
+        if (isEmergencyDirectExit(supertrendExit)) {
+          const result = await closeEmergencyDirect(p, supertrendExit, "Management cycle Supertrend loss");
+          directEmergencyMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: supertrendExit.reason,
+            result,
+          });
+          continue;
+        }
         exitMap.set(p.position, supertrendExit);
         log("state", `Exit alert for ${p.pair}: ${supertrendExit.reason}`);
       }
@@ -1162,14 +1171,17 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (supertrendExit?.pending) {
           log("state", `[PnL poll] ${supertrendExit.reason}`);
         } else if (supertrendExit) {
-          const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
-          const sinceLastTrigger = Date.now() - _pollTriggeredAt;
-          if (sinceLastTrigger >= cooldownMs) {
-            _pollTriggeredAt = Date.now();
-            log("state", `[PnL poll] Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — triggering management`);
-            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered management failed: ${e.message}`));
-          } else {
-            log("state", `[PnL poll] Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
+          log("state", `[PnL poll] URGENT Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — closing directly (no cooldown, no LLM)`);
+          _pollTriggeredAt = Date.now();
+          try {
+            const result = await closeEmergencyDirect(p, supertrendExit, "PnL poll Supertrend loss");
+            if (!result?.success) {
+              log("state", `[PnL poll] Direct Supertrend loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+            }
+          } catch (e) {
+            log("cron_error", `Direct Supertrend loss close error: ${e.message}`);
+            runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
           }
           break;
         }

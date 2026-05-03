@@ -1188,21 +1188,27 @@ function buildChecks() {
     },
     {
       file: "scripts/verify-supertrend-loss-exit.js",
-      label: "[Runtime] synthetic Supertrend loss exit proof covers two-check close, resets, suspicious PnL, disabled config, and no live API",
+      label: "[Runtime] synthetic Supertrend loss exit proof covers urgent PnL-poller direct close, fallback, resets, suspicious PnL, disabled config, and no live API",
       test: () =>
         supertrendLossExitProof?.success === true &&
         supertrendLossExitProof?.cases?.firstBearishPending?.pending === true &&
         Number(supertrendLossExitProof?.cases?.firstBearishPending?.count) === 1 &&
         Number(supertrendLossExitProof?.cases?.firstBearishPending?.confirmChecks) === 2 &&
-        supertrendLossExitProof?.cases?.secondBearishClose?.action === "CLOSE" &&
+        supertrendLossExitProof?.cases?.secondBearishClose?.action === "STOP_LOSS" &&
         supertrendLossExitProof?.cases?.secondBearishClose?.indicatorPolicy === "bypass" &&
-        supertrendLossExitProof?.cases?.secondBearishClose?.urgent === false &&
+        supertrendLossExitProof?.cases?.secondBearishClose?.urgent === true &&
         supertrendLossExitProof?.cases?.bullishReset === true &&
         supertrendLossExitProof?.cases?.unknownReset === true &&
         supertrendLossExitProof?.cases?.unavailableReset === true &&
         supertrendLossExitProof?.cases?.recoveredReset === true &&
         supertrendLossExitProof?.cases?.suspiciousNoTrigger === true &&
         supertrendLossExitProof?.cases?.disabledNoTrigger === true &&
+        supertrendLossExitProof?.sourceMarkers?.pnlPollerBranchPresent === true &&
+        supertrendLossExitProof?.sourceMarkers?.pnlPollerDirectClose === true &&
+        supertrendLossExitProof?.sourceMarkers?.pnlPollerBypassesCooldown === true &&
+        supertrendLossExitProof?.sourceMarkers?.directFailureFallback === true &&
+        supertrendLossExitProof?.sourceMarkers?.directThrowFallback === true &&
+        supertrendLossExitProof?.sourceMarkers?.managementCycleBypassesManager === true &&
         Number(supertrendLossExitProof?.sourceSafety?.liveApiCalls) === 0 &&
         supertrendLossExitProof?.sourceSafety?.importedIndexJs === false &&
         supertrendLossExitProof?.sourceSafety?.importedChartIndicators === false,
