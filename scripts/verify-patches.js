@@ -33,6 +33,7 @@ const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
+const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -265,6 +266,22 @@ function runRelayGuardEvidenceSelfTest() {
   return JSON.parse(result.stdout);
 }
 
+function runRelayRetryEvidenceProof() {
+  const result = spawnSync(process.execPath, [RELAY_RETRY_EVIDENCE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-relay-retry-evidence failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runGpt54RiskReportSelfTest() {
   const result = spawnSync(process.execPath, [GPT54_RISK_REPORT_PATH, "--self-test"], {
     cwd: ROOT,
@@ -363,6 +380,7 @@ function buildChecks() {
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
+  const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -427,6 +445,16 @@ function buildChecks() {
         src.includes("changes_config: false") &&
         src.includes("experimental_security_verifier_passed") &&
         src.includes("relay_guard_exercise_status"),
+    },
+    {
+      file: "scripts/verify-relay-retry-evidence.js",
+      label: "[Runtime] Agent Meridian relay fallback logs retry evidence and marker",
+      test: () =>
+        relayRetryEvidenceProof?.ok === true &&
+        relayRetryEvidenceProof?.relayOpenPositionBudget?.maxElapsedMs === 45_000 &&
+        relayRetryEvidenceProof?.relayOpenPositionBudget?.perAttemptTimeoutMs === 20_000 &&
+        relayRetryEvidenceProof?.relayOpenPositionBudget?.maxAttempts === 2 &&
+        relayRetryEvidenceProof?.logMarker === "Agent Meridian relay retry evidence enabled",
     },
     {
       file: "config-builder.js",
