@@ -39,6 +39,7 @@ const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
+const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -362,6 +363,22 @@ function runSupertrendLossExitProof() {
   return JSON.parse(result.stdout);
 }
 
+function runSupertrendUrgentRuntimeProof() {
+  const result = spawnSync(process.execPath, [SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-supertrend-urgent-runtime-proof failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -386,6 +403,7 @@ function buildChecks() {
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
   const supertrendLossExitProof = runSupertrendLossExitProof();
+  const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
 
   return [
     {
@@ -1212,6 +1230,20 @@ function buildChecks() {
         Number(supertrendLossExitProof?.sourceSafety?.liveApiCalls) === 0 &&
         supertrendLossExitProof?.sourceSafety?.importedIndexJs === false &&
         supertrendLossExitProof?.sourceSafety?.importedChartIndicators === false,
+    },
+    {
+      file: "scripts/verify-supertrend-urgent-runtime-proof.js",
+      label: "[Runtime] Supertrend urgent runtime proof distinguishes proven, no-event-yet, and old cooldown regression states",
+      test: () =>
+        supertrendUrgentRuntimeProof?.success === true &&
+        supertrendUrgentRuntimeProof?.cases?.noQualifyingEventYet === "no_qualifying_event_yet" &&
+        supertrendUrgentRuntimeProof?.cases?.provenUrgent === "proven_urgent" &&
+        supertrendUrgentRuntimeProof?.cases?.regressionOldRouteSeen === "regression_old_route_seen" &&
+        supertrendUrgentRuntimeProof?.cases?.preDeployFailurePatternSeen === true &&
+        supertrendUrgentRuntimeProof?.sourceSafety?.importsRuntimeModules === false &&
+        supertrendUrgentRuntimeProof?.sourceSafety?.writesFiles === false &&
+        supertrendUrgentRuntimeProof?.sourceSafety?.startsBot === false &&
+        supertrendUrgentRuntimeProof?.sourceSafety?.callsTradingApis === false,
     },
     {
       file: "user-config.example.json",
