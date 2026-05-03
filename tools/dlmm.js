@@ -47,6 +47,7 @@ let _deriveBinArrayBitmapExtension = null;
 let _isOverflowDefaultBinArrayBitmap = null;
 let _BIN_ARRAY_FEE = null;
 let _BIN_ARRAY_BITMAP_FEE = null;
+let _relayRetryEvidenceMarkerLogged = false;
 
 async function getDLMM() {
   if (!_DLMM) {
@@ -192,6 +193,25 @@ function retryDelayMs(error, attempt) {
   return Math.min(500 * 2 ** attempt, 5_000);
 }
 
+function attachRetryMetadata(error, metadata) {
+  error.retryMeta = metadata;
+  return error;
+}
+
+function describeRetryEvidence(error) {
+  const meta = error?.retryMeta;
+  if (!meta || !Array.isArray(meta.attempts) || meta.attempts.length === 0) return "";
+
+  const attempts = meta.attempts
+    .map((attempt) => {
+      const label = attempt.status ? `HTTP ${attempt.status}` : (attempt.name || "error");
+      return `#${attempt.attempt} ${label} retryable=${attempt.retryable} after ${attempt.elapsedMs}ms timeout=${attempt.timeoutMs}ms`;
+    })
+    .join("; ");
+
+  return `elapsed=${meta.totalElapsedMs}ms, attempts=${meta.attempts.length}/${meta.maxAttempts}, budget=${meta.maxElapsedMs}ms, perAttempt=${meta.perAttemptTimeoutMs}ms, evidence=[${attempts}]`;
+}
+
 async function fetchWithTimeout(url, options, timeoutMs) {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     return fetch(url, options);
@@ -241,32 +261,61 @@ async function meridianJson(pathname, options = {}) {
 
   const maxElapsedMs = Number(retry.maxElapsedMs || 30_000);
   const maxAttempts = Number(retry.maxAttempts || 10);
+  const perAttemptTimeoutMs = Number(retry.perAttemptTimeoutMs || 10_000);
   const startedAt = Date.now();
   let attempt = 0;
   let lastError = null;
+  const attempts = [];
+
+  const retryMetadata = () => ({
+    pathname,
+    maxElapsedMs,
+    perAttemptTimeoutMs,
+    maxAttempts,
+    totalElapsedMs: Date.now() - startedAt,
+    attempts,
+  });
 
   while (Date.now() - startedAt < maxElapsedMs && attempt < maxAttempts) {
     const elapsedMs = Date.now() - startedAt;
     const remainingMs = Math.max(1, maxElapsedMs - elapsedMs);
+    const attemptNumber = attempt + 1;
+    const timeoutMs = Math.min(perAttemptTimeoutMs, remainingMs);
+    const attemptStartedAt = Date.now();
     try {
       return await meridianJsonOnce(
         pathname,
         fetchOptions,
-        Math.min(Number(retry.perAttemptTimeoutMs || 10_000), remainingMs),
+        timeoutMs,
       );
     } catch (error) {
       lastError = error;
-      if (!isRetryableError(error) || attempt >= maxAttempts - 1) {
+      const retryable = isRetryableError(error);
+      attempts.push({
+        attempt: attemptNumber,
+        elapsedMs: Date.now() - attemptStartedAt,
+        timeoutMs,
+        status: Number(error?.status || 0) || null,
+        name: error?.name || null,
+        message: error?.message || "",
+        retryable,
+      });
+      attachRetryMetadata(error, retryMetadata());
+      if (!retryable || attempt >= maxAttempts - 1) {
         throw error;
       }
-      const waitMs = Math.min(retryDelayMs(error, attempt), Math.max(0, remainingMs - 1));
+      const remainingAfterAttemptMs = Math.max(0, maxElapsedMs - (Date.now() - startedAt));
+      const waitMs = Math.min(retryDelayMs(error, attempt), Math.max(0, remainingAfterAttemptMs - 1));
       if (waitMs <= 0) break;
       await sleep(waitMs);
       attempt += 1;
     }
   }
 
-  throw lastError || new Error(`${pathname} retry budget exhausted`);
+  if (lastError) {
+    throw attachRetryMetadata(lastError, retryMetadata());
+  }
+  throw attachRetryMetadata(new Error(`${pathname} retry budget exhausted`), retryMetadata());
 }
 
 function normalizeExecutionSignatures(result) {
@@ -1157,11 +1206,16 @@ async function fetchOpenPositionsFromMeridian({ walletAddress, agentId }) {
     owner: walletAddress,
     agentId: agentId || "agent-local",
   });
+  if (!_relayRetryEvidenceMarkerLogged) {
+    log("positions", "Agent Meridian relay retry evidence enabled: open-position budget=45000ms perAttempt=20000ms maxAttempts=2 fallback=LPAgent.io direct");
+    _relayRetryEvidenceMarkerLogged = true;
+  }
   const payload = await meridianJson(`/positions/open?${search.toString()}`, {
     headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
     retry: {
-      maxElapsedMs: 30_000,
-      perAttemptTimeoutMs: 30_000,
+      maxElapsedMs: 45_000,
+      perAttemptTimeoutMs: 20_000,
+      maxAttempts: 2,
     },
   });
   return {
@@ -1276,7 +1330,8 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         _positionsCacheAt = Date.now();
         return _positionsCache;
       } catch (error) {
-        log("positions_warn", `Agent Meridian relay failed; trying LPAgent.io direct: ${error.message}`);
+        const retryEvidence = describeRetryEvidence(error);
+        log("positions_warn", `Agent Meridian relay failed; trying LPAgent.io direct: ${error.message}${retryEvidence ? ` (${retryEvidence})` : ""}`);
       }
     }
 

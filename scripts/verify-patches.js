@@ -28,6 +28,7 @@ const STOP_LOSS_TRIAL_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-be
 const ROLLING_DRAWDOWN_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
 const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-cooldown.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
+const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -141,6 +142,22 @@ function runFallingKnifeVetoProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRelayRetryEvidenceProof() {
+  const result = spawnSync(process.execPath, [RELAY_RETRY_EVIDENCE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-relay-retry-evidence failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -148,6 +165,7 @@ const stopLossTrialProof = runStopLossTrialProof();
 const rollingDrawdownExitProof = runRollingDrawdownExitProof();
 const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 const fallingKnifeProof = runFallingKnifeVetoProof();
+const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -196,6 +214,17 @@ const checks = [
       upstreamSecurityProof?.relayProof?.simulationErrorRejected === true &&
       upstreamSecurityProof?.relayProof?.maxSolLossEnforced === true &&
       upstreamSecurityProof?.relayProof?.unrelatedTokenDebitRejected === true,
+  },
+
+  {
+    file: 'scripts/verify-relay-retry-evidence.js',
+    label: '[Runtime] Agent Meridian relay fallback logs retry evidence and marker',
+    test: () =>
+      relayRetryEvidenceProof?.ok === true &&
+      relayRetryEvidenceProof?.relayOpenPositionBudget?.maxElapsedMs === 45_000 &&
+      relayRetryEvidenceProof?.relayOpenPositionBudget?.perAttemptTimeoutMs === 20_000 &&
+      relayRetryEvidenceProof?.relayOpenPositionBudget?.maxAttempts === 2 &&
+      relayRetryEvidenceProof?.logMarker === 'Agent Meridian relay retry evidence enabled',
   },
 
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)
