@@ -30,6 +30,7 @@ const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const MAIN_DEPLOY_GUARD_VERIFIER_PATH = join(__dirname, "verify-main-deploy-guard.js");
+const SUPERTREND_URGENT_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-exit.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -175,6 +176,22 @@ function runMainDeployGuardProof() {
   return JSON.parse(result.stdout);
 }
 
+function runSupertrendUrgentExitProof() {
+  const result = spawnSync(process.execPath, [SUPERTREND_URGENT_EXIT_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-supertrend-urgent-exit failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -184,6 +201,7 @@ const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 const fallingKnifeProof = runFallingKnifeVetoProof();
 const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
 const mainDeployGuardProof = runMainDeployGuardProof();
+const supertrendUrgentExitProof = runSupertrendUrgentExitProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -400,6 +418,21 @@ const checks = [
       src.includes('pnl-snapshots-${dateStr}.jsonl') &&
       src.includes('config.management.pnlSnapshotLoggingEnabled') &&
       src.includes('appendPnlSnapshot(null, p, exit)'),
+  },
+
+  {
+    file: 'scripts/verify-supertrend-urgent-exit.js',
+    label: '[Runtime] confirmed Supertrend loss exits close directly from the PnL poller',
+    test: () =>
+      supertrendUrgentExitProof?.success === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.helperRecognizesSupertrendLoss === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.nonSupertrendNotUrgent === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.profitableSupertrendNotUrgent === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.trailingTpNotUrgent === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.pnlPollerDirectClose === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.pnlPollerBypassesCooldown === true &&
+      supertrendUrgentExitProof?.sourceMarkers?.directFailureFallback === true &&
+      String(supertrendUrgentExitProof?.formattedReason || '').includes('Supertrend urgent loss exit:'),
   },
 
   {

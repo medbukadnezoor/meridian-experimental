@@ -27,6 +27,7 @@ import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
+import { formatSupertrendUrgentExitReason, isUrgentSupertrendLossExit } from "./supertrend-urgent-exit.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -1088,6 +1089,17 @@ Summarize the current portfolio health, total fees earned, and performance of al
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
+          }
+          if (isUrgentSupertrendLossExit({ exit, position: p, indicatorConfirmation })) {
+            const urgentReason = formatSupertrendUrgentExitReason(exit, indicatorConfirmation);
+            log("state", `[PnL poll] URGENT Supertrend loss exit: ${p.pair} — ${urgentReason} — closing directly (no cooldown, no LLM)`);
+            _pollTriggeredAt = Date.now();
+            const direct = await closeUrgentStopLossDirect(p, urgentReason, "PnL poll Supertrend loss", null);
+            if (!direct.success) {
+              log("state", `[PnL poll] Direct Supertrend loss close failed for ${p.pair}: ${direct.error ?? "unknown"}, falling back to management`);
+              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+            }
+            break;
           }
           // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
           const isStopLoss = exit.action === "STOP_LOSS";
