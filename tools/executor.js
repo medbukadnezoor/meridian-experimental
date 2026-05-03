@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, validateDeployCandidateLease } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -21,7 +21,7 @@ import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, reloadScreeningThresholds } from "../config.js";
-import { getRecentDecisions } from "../decision-log.js";
+import { appendDecision, getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -330,9 +330,38 @@ export async function executeTool(name, args) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
+      if (name === "deploy_position" && safetyCheck.guard === "deploy_guard") {
+        const duration = Date.now() - startTime;
+        logAction({
+          tool: name,
+          args,
+          result: {
+            blocked: true,
+            reason: safetyCheck.reason,
+            guard: safetyCheck.guard,
+            failures: safetyCheck.failures || [],
+            audit: safetyCheck.audit || null,
+          },
+          duration_ms: duration,
+          success: false,
+        });
+        appendDecision({
+          type: "deploy_guard",
+          actor: "SCREENER",
+          pool: args.pool_address || safetyCheck.audit?.attempted?.pool_address,
+          pool_name: args.pool_name || safetyCheck.audit?.attempted?.pool_name,
+          summary: "Blocked deploy_position before execution",
+          reason: safetyCheck.reason,
+          risks: (safetyCheck.failures || []).map((failure) => failure.message),
+          metrics: safetyCheck.audit || {},
+          rejected: (safetyCheck.failures || []).map((failure) => failure.code),
+        });
+      }
       return {
         blocked: true,
         reason: safetyCheck.reason,
+        ...(safetyCheck.guard ? { guard: safetyCheck.guard } : {}),
+        ...(safetyCheck.failures ? { failures: safetyCheck.failures } : {}),
       };
     }
   }
@@ -420,6 +449,17 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      const deployGuard = validateDeployCandidateLease(args, config.screening);
+      if (!deployGuard.pass) {
+        return {
+          pass: false,
+          reason: deployGuard.reason,
+          guard: "deploy_guard",
+          failures: deployGuard.failures,
+          audit: deployGuard.audit,
+        };
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;

@@ -137,6 +137,7 @@ HARD RULES:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
 - Do not send both bins and percentage ranges. If using bins_below, omit downside_pct/upside_pct entirely.
   Zero or negative percentage fields are ignored by the deterministic range guard.
+- deploy_position can only execute after a fresh get_top_candidates result for the same pool passes live screening thresholds.
 
 Guidelines (only when user hasn't specified):
 - Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
@@ -190,8 +191,12 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           base_fee: { type: "number", description: "Pool base fee percentage (from discover_pools)" },
           volatility: { type: "number", description: "Pool volatility at deploy time" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
+          fee_active_tvl_ratio: { type: "number", description: "fee/active TVL ratio at deploy time" },
+          volume_window: { type: "number", description: "Screening-window pool volume at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
-          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" }
+          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
+          rationale: { type: "string", description: "Optional caller rationale for the attempted deploy. Preserved for deploy guard audit logs." },
+          confidence: { type: "number", description: "Optional caller confidence from 0 to 1. Preserved for deploy guard audit logs." }
         },
         required: ["pool_address"]
       }

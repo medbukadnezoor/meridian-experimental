@@ -29,6 +29,7 @@ const ROLLING_DRAWDOWN_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-
 const REPEAT_LOW_YIELD_VERIFIER_PATH = join(__dirname, "verify-repeat-low-yield-cooldown.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
+const MAIN_DEPLOY_GUARD_VERIFIER_PATH = join(__dirname, "verify-main-deploy-guard.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -158,6 +159,22 @@ function runRelayRetryEvidenceProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMainDeployGuardProof() {
+  const result = spawnSync(process.execPath, [MAIN_DEPLOY_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-main-deploy-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -166,6 +183,7 @@ const rollingDrawdownExitProof = runRollingDrawdownExitProof();
 const repeatLowYieldProof = runRepeatLowYieldCooldownProof();
 const fallingKnifeProof = runFallingKnifeVetoProof();
 const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
+const mainDeployGuardProof = runMainDeployGuardProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -225,6 +243,31 @@ const checks = [
       relayRetryEvidenceProof?.relayOpenPositionBudget?.perAttemptTimeoutMs === 20_000 &&
       relayRetryEvidenceProof?.relayOpenPositionBudget?.maxAttempts === 2 &&
       relayRetryEvidenceProof?.logMarker === 'Agent Meridian relay retry evidence enabled',
+  },
+
+  {
+    file: 'scripts/verify-main-deploy-guard.js',
+    label: '[Runtime] deploy_position requires fresh get_top_candidates lease and live thresholds',
+    test: () =>
+      mainDeployGuardProof?.success === true &&
+      mainDeployGuardProof?.fresh_pass?.pass === true &&
+      mainDeployGuardProof?.missing_lease_block?.pass === false &&
+      mainDeployGuardProof?.stale_lease_block?.pass === false &&
+      mainDeployGuardProof?.low_fee_block?.failures?.some((failure) =>
+        failure.code === 'fee_active_tvl_ratio_below_threshold' &&
+        failure.actual === 0.02 &&
+        failure.threshold === 1
+      ) &&
+      mainDeployGuardProof?.low_volume_block?.failures?.some((failure) =>
+        failure.code === 'volume_window_below_threshold' &&
+        failure.actual === 19999 &&
+        failure.threshold === 20000
+      ) &&
+      mainDeployGuardProof?.low_fee_block?.audit?.attempted?.rationale === 'caller still wants deploy' &&
+      mainDeployGuardProof?.low_fee_block?.audit?.attempted?.confidence === 0.9 &&
+      mainDeployGuardProof?.source_markers?.leases_recorded_from_get_top_candidates === true &&
+      mainDeployGuardProof?.source_markers?.executor_guard_wired === true &&
+      mainDeployGuardProof?.source_markers?.deploy_guard_decision_logged === true,
   },
 
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)

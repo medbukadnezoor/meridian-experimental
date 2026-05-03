@@ -14,11 +14,261 @@ const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
 const PVP_MIN_HOLDERS = 500;
 const PVP_MIN_GLOBAL_FEES_SOL = 30;
+const DEPLOY_LEASE_TTL_MS = 10 * 60 * 1000;
+const deployCandidateLeases = new Map();
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function getPoolAddress(value = {}) {
+  return value.pool ?? value.pool_address ?? value.address ?? null;
+}
+
+function getPoolName(value = {}) {
+  return value.name || value.pool_name || `${value.base?.symbol || "?"}-${value.quote?.symbol || "?"}`;
+}
+
+function getBaseMint(value = {}) {
+  return value.base_mint ?? value.base?.mint ?? value.token_x?.address ?? null;
+}
+
+function getFeeActiveTvlRatio(value = {}) {
+  return finiteNumberOrNull(value.fee_active_tvl_ratio ?? value.fee_tvl_ratio);
+}
+
+function getVolumeWindow(value = {}) {
+  return finiteNumberOrNull(value.volume_window ?? value.volume);
+}
+
+function getBinStep(value = {}) {
+  return finiteNumberOrNull(value.bin_step ?? value.dlmm_params?.bin_step);
+}
+
+export function buildDeployCandidateLease(candidate = {}, screeningConfig = {}, {
+  now = Date.now(),
+  ttlMs = DEPLOY_LEASE_TTL_MS,
+} = {}) {
+  const pool = getPoolAddress(candidate);
+  if (!pool) return null;
+
+  return {
+    created_at: new Date(now).toISOString(),
+    expires_at: new Date(now + ttlMs).toISOString(),
+    created_at_ms: now,
+    expires_at_ms: now + ttlMs,
+    ttl_ms: ttlMs,
+    pool,
+    name: getPoolName(candidate),
+    fee_tvl_ratio: getFeeActiveTvlRatio(candidate),
+    fee_active_tvl_ratio: getFeeActiveTvlRatio(candidate),
+    volume: getVolumeWindow(candidate),
+    volume_window: getVolumeWindow(candidate),
+    bin_step: getBinStep(candidate),
+    base_mint: getBaseMint(candidate),
+    threshold_snapshot: {
+      minFeeActiveTvlRatio: finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio),
+      minVolume: finiteNumberOrNull(screeningConfig.minVolume),
+      minBinStep: finiteNumberOrNull(screeningConfig.minBinStep),
+      maxBinStep: finiteNumberOrNull(screeningConfig.maxBinStep),
+      timeframe: screeningConfig.timeframe ?? null,
+      category: screeningConfig.category ?? null,
+    },
+  };
+}
+
+export function recordDeployCandidateLeases(candidates = [], screeningConfig = config.screening, {
+  now = Date.now(),
+  ttlMs = DEPLOY_LEASE_TTL_MS,
+} = {}) {
+  const activePools = new Set();
+  for (const candidate of candidates) {
+    const lease = buildDeployCandidateLease(candidate, screeningConfig, { now, ttlMs });
+    if (!lease) continue;
+    activePools.add(lease.pool);
+    deployCandidateLeases.set(lease.pool, lease);
+  }
+
+  for (const [pool, lease] of deployCandidateLeases.entries()) {
+    if (lease.expires_at_ms <= now || !activePools.has(pool)) {
+      deployCandidateLeases.delete(pool);
+    }
+  }
+
+  return candidates.length;
+}
+
+export function getDeployCandidateLease(poolAddress, { now = Date.now() } = {}) {
+  const pool = String(poolAddress || "").trim();
+  if (!pool) return null;
+  const lease = deployCandidateLeases.get(pool);
+  if (!lease) return null;
+  if (lease.expires_at_ms <= now) {
+    deployCandidateLeases.delete(pool);
+    return null;
+  }
+  return lease;
+}
+
+export function clearDeployCandidateLeases() {
+  deployCandidateLeases.clear();
+}
+
+function makeDeployGuardFailure({
+  code,
+  field,
+  actual = null,
+  threshold = null,
+  comparator = null,
+  message,
+}) {
+  return { code, field, actual, threshold, comparator, message };
+}
+
+export function validateDeployCandidateLease(args = {}, screeningConfig = {}, {
+  now = Date.now(),
+  lease = undefined,
+  getLease = getDeployCandidateLease,
+} = {}) {
+  const pool = String(args.pool_address || args.pool || "").trim();
+  const resolvedLease = lease === undefined ? getLease(pool, { now }) : lease;
+  const failures = [];
+
+  if (!pool) {
+    failures.push(makeDeployGuardFailure({
+      code: "missing_pool_address",
+      field: "pool_address",
+      message: "pool_address is required for deploy guard validation",
+    }));
+  } else if (!resolvedLease) {
+    failures.push(makeDeployGuardFailure({
+      code: "missing_fresh_candidate_lease",
+      field: "pool_address",
+      actual: pool,
+      message: `No fresh get_top_candidates deploy lease found for pool ${pool}`,
+    }));
+  } else if (resolvedLease.expires_at_ms <= now) {
+    failures.push(makeDeployGuardFailure({
+      code: "stale_candidate_lease",
+      field: "expires_at",
+      actual: resolvedLease.expires_at,
+      threshold: new Date(now).toISOString(),
+      comparator: ">",
+      message: `Candidate lease expired at ${resolvedLease.expires_at}`,
+    }));
+  }
+
+  if (resolvedLease) {
+    const minFeeActiveTvlRatio = finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio);
+    const minVolume = finiteNumberOrNull(screeningConfig.minVolume);
+    const minBinStep = finiteNumberOrNull(screeningConfig.minBinStep);
+    const maxBinStep = finiteNumberOrNull(screeningConfig.maxBinStep);
+    const feeRatio = finiteNumberOrNull(resolvedLease.fee_active_tvl_ratio ?? resolvedLease.fee_tvl_ratio);
+    const volume = finiteNumberOrNull(resolvedLease.volume_window ?? resolvedLease.volume);
+    const binStep = finiteNumberOrNull(resolvedLease.bin_step);
+
+    if (minFeeActiveTvlRatio != null && (feeRatio == null || feeRatio < minFeeActiveTvlRatio)) {
+      failures.push(makeDeployGuardFailure({
+        code: "fee_active_tvl_ratio_below_threshold",
+        field: "fee_active_tvl_ratio",
+        actual: feeRatio,
+        threshold: minFeeActiveTvlRatio,
+        comparator: ">=",
+        message: `fee_active_tvl_ratio ${feeRatio ?? "missing"} < minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`,
+      }));
+    }
+    if (minVolume != null && (volume == null || volume < minVolume)) {
+      failures.push(makeDeployGuardFailure({
+        code: "volume_window_below_threshold",
+        field: "volume_window",
+        actual: volume,
+        threshold: minVolume,
+        comparator: ">=",
+        message: `volume_window ${volume ?? "missing"} < minVolume ${minVolume}`,
+      }));
+    }
+    if (minBinStep != null && binStep != null && binStep < minBinStep) {
+      failures.push(makeDeployGuardFailure({
+        code: "bin_step_below_threshold",
+        field: "bin_step",
+        actual: binStep,
+        threshold: minBinStep,
+        comparator: ">=",
+        message: `bin_step ${binStep} < minBinStep ${minBinStep}`,
+      }));
+    }
+    if (maxBinStep != null && binStep != null && binStep > maxBinStep) {
+      failures.push(makeDeployGuardFailure({
+        code: "bin_step_above_threshold",
+        field: "bin_step",
+        actual: binStep,
+        threshold: maxBinStep,
+        comparator: "<=",
+        message: `bin_step ${binStep} > maxBinStep ${maxBinStep}`,
+      }));
+    }
+    if (args.base_mint && resolvedLease.base_mint && args.base_mint !== resolvedLease.base_mint) {
+      failures.push(makeDeployGuardFailure({
+        code: "base_mint_mismatch",
+        field: "base_mint",
+        actual: args.base_mint,
+        threshold: resolvedLease.base_mint,
+        comparator: "===",
+        message: `base_mint ${args.base_mint} does not match leased base_mint ${resolvedLease.base_mint}`,
+      }));
+    }
+  }
+
+  const reason = failures.length
+    ? `deploy_guard rejected ${pool || "unknown pool"}: ${failures.map((failure) => failure.message).join("; ")}`
+    : null;
+
+  return {
+    pass: failures.length === 0,
+    reason,
+    failures,
+    lease: resolvedLease || null,
+    audit: buildDeployGuardAuditPayload({
+      args,
+      lease: resolvedLease || null,
+      screeningConfig,
+      failures,
+      now,
+    }),
+  };
+}
+
+export function buildDeployGuardAuditPayload({
+  args = {},
+  lease = null,
+  screeningConfig = {},
+  failures = [],
+  now = Date.now(),
+} = {}) {
+  return {
+    guard: "deploy_guard",
+    decision: failures.length > 0 ? "safety_block" : "allow",
+    checked_at: new Date(now).toISOString(),
+    attempted: {
+      pool_address: args.pool_address ?? args.pool ?? null,
+      pool_name: args.pool_name ?? lease?.name ?? null,
+      deploy_args: { ...args },
+      rationale: args.rationale ?? null,
+      confidence: args.confidence ?? null,
+    },
+    lease: lease ? { ...lease } : null,
+    current_thresholds: {
+      minFeeActiveTvlRatio: finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio),
+      minVolume: finiteNumberOrNull(screeningConfig.minVolume),
+      minBinStep: finiteNumberOrNull(screeningConfig.minBinStep),
+      maxBinStep: finiteNumberOrNull(screeningConfig.maxBinStep),
+      timeframe: screeningConfig.timeframe ?? null,
+      category: screeningConfig.category ?? null,
+    },
+    failures,
+  };
 }
 
 function normalizeSymbol(symbol) {
@@ -669,6 +919,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   const ranked = rankCandidatesByDarwin(eligible);
+  recordDeployCandidateLeases(ranked, config.screening);
 
   return {
     candidates: ranked,
