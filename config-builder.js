@@ -18,6 +18,13 @@ export function normalizeScreeningReasoningEffort(value) {
   return SCREENING_REASONING_EFFORTS.has(normalized) ? normalized : null;
 }
 
+export function normalizeDeepSeekThinking(value) {
+  if (value === true) return "enabled";
+  if (value === false || value == null) return "disabled";
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return normalized === "enabled" || normalized === "true" ? "enabled" : "disabled";
+}
+
 export function firstNonEmptyString(...values) {
   for (const value of values) {
     const normalized = normalizeOptionalString(value);
@@ -235,6 +242,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       fallbackModel,
       screeningBaseUrl,
       screeningApiKey: resolveRoleApiKey(u.screeningApiKey, screeningBaseUrl ?? globalLlmBaseUrl, screeningModel, env, globalLlmApiKey) ?? null,
+      screeningThinking: normalizeDeepSeekThinking(u.screeningThinking),
       screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
       screeningFallbackModel,
       screeningFallbackBaseUrl,

@@ -488,7 +488,9 @@ function buildChecks() {
       test: (src) =>
         src.includes("normalizeScreeningReasoningEffort") &&
         src.includes('new Set(["low", "medium", "high"])') &&
-        src.includes("screeningReasoningEffort"),
+        src.includes("screeningReasoningEffort") &&
+        src.includes("normalizeDeepSeekThinking") &&
+        src.includes("screeningThinking"),
     },
     {
       file: "agent.js",
@@ -506,7 +508,13 @@ function buildChecks() {
       test: (src) =>
         src.includes("reasoningEffort: llmCfg.screeningReasoningEffort || null") &&
         src.includes("callParams.reasoning_effort = activeRoute.reasoningEffort") &&
-        src.includes("reasoning_effort: activeRoute.reasoningEffort || null"),
+        src.includes("reasoning_effort: activeRoute.reasoningEffort || null") &&
+        src.includes("getDeepSeekThinkingForRoute") &&
+        src.includes("thinking: deepSeekThinking || null") &&
+        src.includes("LLM route: role=") &&
+        src.includes("omitToolChoice ? undefined") &&
+        src.includes("buildAssistantHistoryMessage") &&
+        src.includes("reasoning_content"),
     },
     {
       file: "agent.js",
@@ -620,10 +628,11 @@ function buildChecks() {
       file: "scripts/verify-runtime-config.js",
       label: "[CLIProxy] runtime config proof masks role routes and provider-param policy",
       test: () =>
-        exampleProof?.llm?.screeningModel === "deepseek-v4-flash" &&
+        exampleProof?.llm?.screeningModel === "deepseek-v4-pro" &&
         exampleProof?.llm?.screeningBaseUrl === "https://api.deepseek.com" &&
         exampleProof?.llm?.screeningApiKeySet === "not_set" &&
-        exampleProof?.llm?.screeningReasoningEffort === null &&
+        exampleProof?.llm?.screeningThinking === "enabled" &&
+        exampleProof?.llm?.screeningReasoningEffort === "high" &&
         exampleProof?.llm?.screeningFallbackModel === null &&
         exampleProof?.llm?.screeningFallbackBaseUrl === null &&
         exampleProof?.llm?.screeningFallbackApiKeySet === "not_set" &&

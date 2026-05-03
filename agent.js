@@ -222,6 +222,18 @@ function isDeepSeekRoute(route) {
   return isDeepSeekBaseUrl(route?.baseURL) || isDeepSeekModel(route?.model);
 }
 
+function getDeepSeekThinkingForRoute(agentType, route) {
+  if (!isDeepSeekRoute(route)) return null;
+  if ((agentType || "").toUpperCase() === "SCREENER" && route.routeKind === "primary") {
+    return config.llm.screeningThinking === "enabled" ? "enabled" : "disabled";
+  }
+  return "disabled";
+}
+
+function isDeepSeekThinkingRoute(agentType, route) {
+  return getDeepSeekThinkingForRoute(agentType, route) === "enabled";
+}
+
 function isTransientProviderError(error) {
   const message = sanitizeErrorMessage(error);
   const code = String(error?.code || error?.cause?.code || "");
@@ -285,6 +297,16 @@ function isToolChoiceRequiredError(error) {
   );
 }
 
+function buildAssistantHistoryMessage(msg) {
+  const historyMsg = {
+    role: msg.role || "assistant",
+    content: msg.content ?? null,
+  };
+  if (msg.reasoning_content) historyMsg.reasoning_content = msg.reasoning_content;
+  if (msg.tool_calls) historyMsg.tool_calls = msg.tool_calls;
+  return historyMsg;
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -336,8 +358,9 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       // GLM and similar models don't support tool_choice: "required" — use "auto" for those
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
-      const modelSupportsRequiredToolChoice = !/glm|qwen|deepseek.*think/i.test(activeRoute.model);
-      let toolChoice = (step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
+      const omitToolChoice = isDeepSeekThinkingRoute(agentType, activeRoute);
+      const modelSupportsRequiredToolChoice = !omitToolChoice && !/glm|qwen|deepseek.*think/i.test(activeRoute.model);
+      let toolChoice = omitToolChoice ? undefined : ((step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto");
       let providerIgnore = providerIgnoreForBaseUrl(activeRoute.baseURL);
       let switchedToProviderFallback = false;
 
@@ -354,16 +377,19 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
-          // DeepSeek V4 defaults thinking mode on; live bot routes need low-latency dense tool calls.
-          if (isDeepSeekRoute(activeRoute)) callParams.thinking = { type: "disabled" };
+          // DeepSeek V4 defaults thinking on; only SCREENER primary may opt into thinking.
+          const deepSeekThinking = getDeepSeekThinkingForRoute(agentType, activeRoute);
+          if (deepSeekThinking) callParams.thinking = { type: deepSeekThinking };
           // Chat Completions uses reasoning_effort; Responses uses reasoning.effort.
           if (activeRoute.reasoningEffort) callParams.reasoning_effort = activeRoute.reasoningEffort;
+          log("agent", `LLM route: role=${agentType} route=${activeRoute.routeKind} model=${activeRoute.model} host=${sanitizeBaseUrlHost(activeRoute.baseURL)} thinking=${deepSeekThinking || "n/a"} reasoning_effort=${activeRoute.reasoningEffort || "none"}`);
           response = await getClientForRoute(activeRoute).chat.completions.create(callParams);
           logApiActivity({
             agent_role: agentType,
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            thinking: deepSeekThinking || null,
             reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "success",
@@ -379,6 +405,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            thinking: getDeepSeekThinkingForRoute(agentType, activeRoute) || null,
             reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "error",
@@ -434,6 +461,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             model: activeRoute.model,
             base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
             route_kind: activeRoute.routeKind,
+            thinking: getDeepSeekThinkingForRoute(agentType, activeRoute) || null,
             reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "error",
@@ -500,7 +528,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
         }
       }
-      messages.push(msg);
+      messages.push(buildAssistantHistoryMessage(msg));
 
       // If the model didn't call any tools, it's done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {

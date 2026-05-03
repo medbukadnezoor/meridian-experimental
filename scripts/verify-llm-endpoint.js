@@ -10,10 +10,11 @@ import OpenAI from "openai";
 
 function usage() {
   console.log(`Usage:
-node scripts/verify-llm-endpoint.js --base-url <url> --model <model> --api-key <key> [--chat-smoke] [--tool-call-smoke] [--json]
+node scripts/verify-llm-endpoint.js --base-url <url> --model <model> --api-key <key> [--chat-smoke] [--tool-call-smoke] [--reasoning-effort high] [--thinking enabled|disabled] [--json]
 
 Examples:
 node scripts/verify-llm-endpoint.js --base-url https://api.deepseek.com --model deepseek-v4-flash --api-key "$DEEPSEEK_API_KEY" --chat-smoke --tool-call-smoke
+node scripts/verify-llm-endpoint.js --base-url https://api.deepseek.com --model deepseek-v4-pro --api-key "$DEEPSEEK_API_KEY" --reasoning-effort high --thinking enabled --chat-smoke --tool-call-smoke
 `);
 }
 
@@ -25,6 +26,7 @@ function parseArgs(argv) {
     chatSmoke: false,
     toolCallSmoke: false,
     reasoningEffort: null,
+    thinking: null,
     json: false,
   };
 
@@ -48,6 +50,12 @@ function parseArgs(argv) {
     }
     if (arg === "--reasoning-effort") {
       options.reasoningEffort = argv[++i] || null;
+      continue;
+    }
+    if (arg === "--thinking") {
+      const thinking = String(argv[++i] || "").toLowerCase();
+      if (thinking !== "enabled" && thinking !== "disabled") throw new Error("--thinking must be enabled or disabled");
+      options.thinking = thinking;
       continue;
     }
     if (arg === "--chat-smoke") {
@@ -116,7 +124,11 @@ function maybeReasoningEffort(reasoningEffort) {
   return reasoningEffort ? { reasoning_effort: reasoningEffort } : {};
 }
 
-async function runChatSmoke(client, model, reasoningEffort) {
+function maybeThinking(thinking) {
+  return thinking ? { thinking: { type: thinking } } : {};
+}
+
+async function runChatSmoke(client, model, reasoningEffort, thinking) {
   return runTimed("chat_smoke", async () => {
     const response = await client.chat.completions.create({
       model,
@@ -126,6 +138,7 @@ async function runChatSmoke(client, model, reasoningEffort) {
       ],
       temperature: 0,
       max_tokens: 32,
+      ...maybeThinking(thinking),
       ...maybeReasoningEffort(reasoningEffort),
     });
     const content = response?.choices?.[0]?.message?.content || "";
@@ -137,8 +150,14 @@ async function runChatSmoke(client, model, reasoningEffort) {
   });
 }
 
-async function runToolCallSmoke(client, model, reasoningEffort) {
+async function runToolCallSmoke(client, model, reasoningEffort, thinking) {
   return runTimed("tool_call_smoke", async () => {
+    const toolChoice = thinking === "enabled" ? {} : {
+      tool_choice: {
+        type: "function",
+        function: { name: "record_health_check" },
+      },
+    };
     const response = await client.chat.completions.create({
       model,
       messages: [
@@ -163,12 +182,10 @@ async function runToolCallSmoke(client, model, reasoningEffort) {
           },
         },
       ],
-      tool_choice: {
-        type: "function",
-        function: { name: "record_health_check" },
-      },
       temperature: 0,
       max_tokens: 96,
+      ...toolChoice,
+      ...maybeThinking(thinking),
       ...maybeReasoningEffort(reasoningEffort),
     });
     const toolCalls = response?.choices?.[0]?.message?.tool_calls || [];
@@ -197,8 +214,8 @@ async function main() {
   });
 
   const checks = [];
-  if (options.chatSmoke) checks.push(await runChatSmoke(client, options.model, options.reasoningEffort));
-  if (options.toolCallSmoke) checks.push(await runToolCallSmoke(client, options.model, options.reasoningEffort));
+  if (options.chatSmoke) checks.push(await runChatSmoke(client, options.model, options.reasoningEffort, options.thinking));
+  if (options.toolCallSmoke) checks.push(await runToolCallSmoke(client, options.model, options.reasoningEffort, options.thinking));
 
   const proof = {
     success: checks.every((check) => check.ok),
@@ -208,6 +225,7 @@ async function main() {
     base_url_host: sanitizeHost(options.baseUrl),
     model: options.model,
     reasoning_effort: options.reasoningEffort,
+    thinking: options.thinking,
     api_key_set: options.apiKey ? "set" : "not_set",
     checks,
   };
