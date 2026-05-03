@@ -61,9 +61,15 @@ assert.strictEqual(example.maxDeployAmount, 1.55, "sizing unchanged: maxDeployAm
 assert.strictEqual(example.stopLossPct, -8, "stop loss unchanged");
 assert.strictEqual(example.hardStopLossPct, -15, "hard stop unchanged");
 assert.strictEqual(example.takeProfitPct, 25, "take profit unchanged");
-assert.strictEqual(example.screeningModel, "gpt-5.5", "screening model unchanged");
-assert.strictEqual(example.managementModel, "qwen3.6-plus", "management model unchanged");
-assert.strictEqual(example.generalModel, "qwen3.6-plus", "general model unchanged");
+
+const configuredModel = example.llmModel;
+assert.ok(/^deepseek-/i.test(configuredModel), "base LLM model is DeepSeek");
+assert.strictEqual(example.screeningModel, configuredModel, "screening model follows configured base model");
+assert.strictEqual(example.managementModel, configuredModel, "management model follows configured base model");
+assert.strictEqual(example.generalModel, configuredModel, "general model follows configured base model");
+assert.strictEqual(resolved.llm.screeningModel, configuredModel, "resolved screening model follows config");
+assert.strictEqual(resolved.llm.managementModel, configuredModel, "resolved management model follows config");
+assert.strictEqual(resolved.llm.generalModel, configuredModel, "resolved general model follows config");
 
 const passingShadow = buildShadowQualityGatesFromSignals({
   rsi2SignalsByInterval: {

@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { resolveConfigFromPath } from "../config-builder.js";
 import { classifyMaterialOutcome, summarizeMaterialPerformance } from "../performance-metrics.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -19,16 +20,19 @@ const API_LOG_RE = /^api-activity-\d{4}-\d{2}-\d{2}\.jsonl$|^api_activity\.jsonl
 const ACTION_LOG_RE = /^actions-\d{4}-\d{2}-\d{2}\.jsonl$/;
 const AGENT_LOG_RE = /^agent-\d{4}-\d{2}-\d{2}\.log$/;
 const SNAPSHOT_LOG_RE = /^pnl-snapshots-\d{4}-\d{2}-\d{2}\.jsonl$/;
-const TRIAL_MODEL = "gpt-5.5";
+const DEFAULT_CONFIG_PATH = fs.existsSync(join(ROOT, "user-config.json"))
+  ? join(ROOT, "user-config.json")
+  : join(ROOT, "user-config.example.json");
 
 function usage() {
-  console.error("Usage: node scripts/analyze-screener-trial.js [--hours 48] [--logs <dir>] [--json]");
+  console.error("Usage: node scripts/analyze-screener-trial.js [--hours 48] [--logs <dir>] [--user-config <path>] [--json]");
 }
 
 function parseArgs(argv) {
   const options = {
     hours: 48,
     logsDir: DEFAULT_LOG_DIR,
+    userConfigPath: DEFAULT_CONFIG_PATH,
     json: false,
   };
 
@@ -50,6 +54,12 @@ function parseArgs(argv) {
       options.logsDir = resolve(next);
       continue;
     }
+    if (arg === "--user-config") {
+      const next = argv[++i];
+      if (!next) throw new Error("--user-config requires a path");
+      options.userConfigPath = resolve(next);
+      continue;
+    }
     if (arg === "--json") {
       options.json = true;
       continue;
@@ -59,6 +69,14 @@ function parseArgs(argv) {
   }
 
   return options;
+}
+
+function resolveTrialModel(userConfigPath) {
+  const resolved = resolveConfigFromPath(userConfigPath, {
+    env: { ...process.env },
+    applyEnv: false,
+  }).config;
+  return resolved.llm.screeningModel;
 }
 
 function listFiles(logsDir, re) {
@@ -207,7 +225,7 @@ function finalizeCallMap(map) {
   return Object.fromEntries(Object.entries(map).map(([key, stats]) => [key, finalizeCallStats(stats)]));
 }
 
-function summarizeLlm(apiRows, agentEvents) {
+function summarizeLlm(apiRows, agentEvents, trialModel) {
   const screenerRows = apiRows.filter((row) => String(row.agent_role || row.agent || "").toUpperCase() === "SCREENER");
   const byModelRoute = {};
   const byModel = {};
@@ -235,7 +253,7 @@ function summarizeLlm(apiRows, agentEvents) {
     calls_by_model_route: finalizeCallMap(byModelRoute),
     calls_by_model: finalizeCallMap(byModel),
     calls_by_route: finalizeCallMap(byRoute),
-    gpt55_primary: finalizeCallStats(byModelRoute[`${TRIAL_MODEL}|primary`] || emptyCallStats()),
+    configured_primary: finalizeCallStats(byModelRoute[`${trialModel}|primary`] || emptyCallStats()),
     error_reasons: errorReasons,
     json_tool_validity: {
       repaired_malformed_json_args: repairedJsonArgs,
@@ -470,7 +488,7 @@ function summarizeRealizedQuality(allActionRows, windowPositions, deploys, snaps
   };
 }
 
-function buildReport({ logsDir, hours, apiRows, actionRows, agentEvents, snapshotRows, files }) {
+function buildReport({ logsDir, userConfigPath, trialModel, hours, apiRows, actionRows, agentEvents, snapshotRows, files }) {
   const untilMs = Date.now();
   const sinceMs = untilMs - hours * 60 * 60 * 1000;
   const windowedApiRows = apiRows.filter((row) => inWindow(row, sinceMs, untilMs));
@@ -486,12 +504,13 @@ function buildReport({ logsDir, hours, apiRows, actionRows, agentEvents, snapsho
   return {
     success: true,
     generated_at: new Date().toISOString(),
-    trial_model: TRIAL_MODEL,
+    trial_model: trialModel,
     window: {
       hours,
       since: new Date(sinceMs).toISOString(),
       until: new Date(untilMs).toISOString(),
       logs_dir: logsDir,
+      user_config_path: userConfigPath,
     },
     files: {
       api_activity: files.api.length,
@@ -509,7 +528,7 @@ function buildReport({ logsDir, hours, apiRows, actionRows, agentEvents, snapsho
       pnl_snapshots_total: snapshotRows.length,
       pnl_snapshots_in_window: windowedSnapshotRows.length,
     },
-    llm: summarizeLlm(windowedApiRows, windowedAgentEvents),
+    llm: summarizeLlm(windowedApiRows, windowedAgentEvents, trialModel),
     deploys,
     deploy_audits: rangeAudits,
     realized_position_quality: quality,
@@ -536,7 +555,7 @@ function printText(report) {
   console.log(`Logs: ${report.window.logs_dir}`);
   console.log("");
   console.log(`SCREENER calls: ${report.llm.screener_calls}`);
-  console.log(`GPT-5.5 primary: ${report.llm.gpt55_primary.calls} calls | p50 ${report.llm.gpt55_primary.p50_latency_ms ?? "n/a"}ms | p95 ${report.llm.gpt55_primary.p95_latency_ms ?? "n/a"}ms | errors ${report.llm.gpt55_primary.error_rate_pct ?? "n/a"}%`);
+  console.log(`Configured primary (${report.trial_model}): ${report.llm.configured_primary.calls} calls | p50 ${report.llm.configured_primary.p50_latency_ms ?? "n/a"}ms | p95 ${report.llm.configured_primary.p95_latency_ms ?? "n/a"}ms | errors ${report.llm.configured_primary.error_rate_pct ?? "n/a"}%`);
   console.log(`Deploys: ${report.deploys.successes} success | ${report.deploys.action_rejects_or_errors} action rejects/errors | ${report.deploys.safety_blocks_from_agent_log} safety blocks`);
   console.log(`Range audits: raw ${report.deploy_audits.raw_count} | normalized ${report.deploy_audits.normalized_count} | narrow rejects ${report.deploy_audits.narrow_range_reject_count}`);
   console.log(`Closed trial positions: ${report.realized_position_quality.closed_positions_opened_in_window}`);
@@ -549,6 +568,7 @@ function printText(report) {
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
+  const trialModel = resolveTrialModel(options.userConfigPath);
   const files = {
     api: listFiles(options.logsDir, API_LOG_RE),
     actions: listFiles(options.logsDir, ACTION_LOG_RE),
@@ -557,6 +577,8 @@ function main() {
   };
   const report = buildReport({
     logsDir: options.logsDir,
+    userConfigPath: options.userConfigPath,
+    trialModel,
     hours: options.hours,
     apiRows: readJsonl(files.api),
     actionRows: readJsonl(files.actions),

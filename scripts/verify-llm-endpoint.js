@@ -13,7 +13,7 @@ function usage() {
 node scripts/verify-llm-endpoint.js --base-url <url> --model <model> --api-key <key> [--chat-smoke] [--tool-call-smoke] [--json]
 
 Examples:
-node scripts/verify-llm-endpoint.js --base-url http://127.0.0.1:8317/v1 --model gpt-5.4 --api-key NO_API_KEY --reasoning-effort high --chat-smoke --tool-call-smoke
+node scripts/verify-llm-endpoint.js --base-url https://api.deepseek.com --model deepseek-v4-flash --api-key "$DEEPSEEK_API_KEY" --chat-smoke --tool-call-smoke
 `);
 }
 

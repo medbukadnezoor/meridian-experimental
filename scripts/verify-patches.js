@@ -545,11 +545,11 @@ function buildChecks() {
     },
     {
       file: "scripts/analyze-screener-trial.js",
-      label: "[CLIProxy] GPT-5.5 screener trial analyzer reports latency, fallback, validity, deploy rejects, range audits, and realized quality",
+      label: "[CLIProxy] configured screener trial analyzer reports latency, fallback, validity, deploy rejects, range audits, and realized quality",
       test: (src) =>
         screenerTrialTelemetryProof?.success === true &&
-        screenerTrialTelemetryProof?.gpt55_primary?.calls === 3 &&
-        screenerTrialTelemetryProof?.gpt55_primary?.timeout_errors === 1 &&
+        screenerTrialTelemetryProof?.configured_primary?.calls === 3 &&
+        screenerTrialTelemetryProof?.configured_primary?.timeout_errors === 1 &&
         screenerTrialTelemetryProof?.fallback_route_calls === 1 &&
         screenerTrialTelemetryProof?.deploy_audits?.raw_count === 1 &&
         screenerTrialTelemetryProof?.deploy_audits?.normalized_count === 1 &&
@@ -563,7 +563,7 @@ function buildChecks() {
         screenerTrialTelemetryProof?.safe_read_only_markers?.network_calls === false &&
         screenerTrialTelemetryProof?.source_safety?.deploys_or_closes_positions === false &&
         screenerTrialTelemetryProof?.source_safety?.changes_config === false &&
-        src.includes("gpt-5.5") &&
+        src.includes("configured_primary") &&
         src.includes("calls_by_model_route") &&
         src.includes("json_tool_validity") &&
         src.includes("deploy_audits") &&
@@ -575,7 +575,7 @@ function buildChecks() {
     },
     {
       file: "scripts/report-gpt54-risk.js",
-      label: "[CLIProxy] owner risk report flags GPT-5.4 high-effort drift, fallback/error spikes, latency, PM2, and docs mismatch",
+      label: "[CLIProxy] owner risk report flags configured DeepSeek routing drift, fallback/error spikes, latency, PM2, and docs mismatch",
       test: (src) =>
         gpt54RiskReportProof?.success === true &&
         gpt54RiskReportProof?.safe_read_only_markers?.deploys_or_closes_positions === false &&
@@ -594,6 +594,7 @@ function buildChecks() {
         src.includes("deploys_or_closes_positions: false") &&
         src.includes("restarts_processes: false") &&
         src.includes("changes_config: false") &&
+        src.includes("screening_model_not_deepseek") &&
         src.includes("p95_latency_above_escalate_threshold") &&
         src.includes("context_docs_disagree_with_live_routing"),
     },
@@ -620,14 +621,13 @@ function buildChecks() {
     },
     {
       file: "docs/cliproxy-nanocap-runbook.md",
-      label: "[CLIProxy] ohox-first runbook documents OAuth tunnel, verifier, and rollback",
+      label: "[LLM routing] runbook documents DeepSeek config-driven routing, verifier, and rollback",
       test: (src) =>
-        src.includes("CLIProxyAPI runs on VPS `ohox`") &&
-        src.includes("ssh -N -o ExitOnForwardFailure=yes -L 1455:127.0.0.1:1455 ohox") &&
         src.includes("node scripts/verify-llm-endpoint.js") &&
+        src.includes("https://api.deepseek.com") &&
         src.includes("screeningReasoningEffort") &&
-        src.includes("gpt-5.5") &&
-        src.includes("reasoning_effort=medium") &&
+        src.includes("deepseek-v4-flash") &&
+        src.includes("SCREENER, MANAGER, and GENERAL") &&
         src.includes("node scripts/analyze-screener-trial.js --logs logs --hours 48 --json") &&
         src.includes("Do not restart the main `meridian`") &&
         src.includes("Rollback"),
@@ -1435,7 +1435,7 @@ function main() {
   let passed = 0;
 
   console.log("\n-- Meridian Patch Verification --------------------------------\n");
-  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, Supertrend loss exit, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, GPT-5.5 screener trial telemetry, and offline Birdeye decision-context logging.\n");
+  console.log("  Includes runtime-truth checks for nanocap cooldown mapping, early-dump cooldown classification, confirmed stop-loss trial config, Supertrend loss exit, narrow-range deploy guard, material win metrics, upstream env/relay security hardening, owner relay guard evidence, CLIProxy screener routing, configured screener trial telemetry, and offline Birdeye decision-context logging.\n");
 
   for (const check of checks) {
     let src = "";

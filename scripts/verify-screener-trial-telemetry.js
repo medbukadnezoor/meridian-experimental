@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Synthetic proof for GPT-5.5 SCREENER trial telemetry support.
+ * Synthetic proof for SCREENER trial telemetry support.
  *
  * Creates local throwaway log fixtures and runs the read-only analyzer. No
  * trading modules, network calls, deploys, closes, process restarts, or config
@@ -13,10 +13,16 @@ import os from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
+import { resolveConfigFromPath } from "../config-builder.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const ANALYZER = join(__dirname, "analyze-screener-trial.js");
+const EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
+const TRIAL_MODEL = resolveConfigFromPath(EXAMPLE_CONFIG_PATH, {
+  env: { ...process.env },
+  applyEnv: false,
+}).config.llm.screeningModel;
 
 function writeJsonl(filePath, rows) {
   fs.writeFileSync(filePath, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
@@ -31,11 +37,11 @@ function makeFixture() {
   const day = new Date().toISOString().slice(0, 10);
 
   writeJsonl(join(dir, `api-activity-${day}.jsonl`), [
-    { timestamp: iso(-3_600_000), agent_role: "SCREENER", model: "gpt-5.5", route_kind: "primary", reasoning_effort: "medium", duration_ms: 1200, status: "success", prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 },
-    { timestamp: iso(-3_500_000), agent_role: "SCREENER", model: "gpt-5.5", route_kind: "primary", reasoning_effort: "medium", duration_ms: 2400, status: "success", prompt_tokens: 110, completion_tokens: 40, total_tokens: 150 },
-    { timestamp: iso(-3_400_000), agent_role: "SCREENER", model: "gpt-5.5", route_kind: "primary", reasoning_effort: "medium", duration_ms: 5000, status: "error", error: "timeout waiting for provider" },
-    { timestamp: iso(-3_300_000), agent_role: "SCREENER", model: "qwen3.6-plus", route_kind: "fallback", reasoning_effort: null, duration_ms: 900, status: "success", total_tokens: 90 },
-    { timestamp: iso(-3_200_000), agent_role: "MANAGER", model: "qwen3.6-plus", route_kind: "primary", duration_ms: 800, status: "success", total_tokens: 70 },
+    { timestamp: iso(-3_600_000), agent_role: "SCREENER", model: TRIAL_MODEL, route_kind: "primary", reasoning_effort: null, duration_ms: 1200, status: "success", prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 },
+    { timestamp: iso(-3_500_000), agent_role: "SCREENER", model: TRIAL_MODEL, route_kind: "primary", reasoning_effort: null, duration_ms: 2400, status: "success", prompt_tokens: 110, completion_tokens: 40, total_tokens: 150 },
+    { timestamp: iso(-3_400_000), agent_role: "SCREENER", model: TRIAL_MODEL, route_kind: "primary", reasoning_effort: null, duration_ms: 5000, status: "error", error: "timeout waiting for provider" },
+    { timestamp: iso(-3_300_000), agent_role: "SCREENER", model: TRIAL_MODEL, route_kind: "fallback", reasoning_effort: null, duration_ms: 900, status: "success", total_tokens: 90 },
+    { timestamp: iso(-3_200_000), agent_role: "MANAGER", model: TRIAL_MODEL, route_kind: "primary", duration_ms: 800, status: "success", total_tokens: 70 },
   ]);
 
   writeJsonl(join(dir, `actions-${day}.jsonl`), [
@@ -94,7 +100,7 @@ function makeFixture() {
 }
 
 function runAnalyzer(logsDir) {
-  const result = spawnSync(process.execPath, [ANALYZER, "--logs", logsDir, "--hours", "48", "--json"], {
+  const result = spawnSync(process.execPath, [ANALYZER, "--logs", logsDir, "--user-config", EXAMPLE_CONFIG_PATH, "--hours", "48", "--json"], {
     cwd: ROOT,
     encoding: "utf8",
     env: { ...process.env, LOG_LEVEL: "error" },
@@ -122,11 +128,12 @@ function main() {
   const safety = sourceSafetyProof();
 
   assert.strictEqual(report.success, true, "analyzer succeeds");
-  assert.strictEqual(report.trial_model, "gpt-5.5", "trial model is gpt-5.5");
-  assert.strictEqual(report.llm.gpt55_primary.calls, 3, "gpt-5.5 primary calls counted");
-  assert.strictEqual(report.llm.gpt55_primary.error, 1, "gpt-5.5 error counted");
-  assert.strictEqual(report.llm.gpt55_primary.timeout_errors, 1, "timeout counted");
-  assert.strictEqual(report.llm.calls_by_model_route["qwen3.6-plus|fallback"].calls, 1, "fallback route counted");
+  assert.strictEqual(report.trial_model, TRIAL_MODEL, "trial model follows config");
+  assert.ok(/^deepseek-/i.test(report.trial_model), "trial model is DeepSeek");
+  assert.strictEqual(report.llm.configured_primary.calls, 3, "configured primary calls counted");
+  assert.strictEqual(report.llm.configured_primary.error, 1, "configured primary error counted");
+  assert.strictEqual(report.llm.configured_primary.timeout_errors, 1, "timeout counted");
+  assert.strictEqual(report.llm.calls_by_model_route[`${TRIAL_MODEL}|fallback`].calls, 1, "fallback route counted");
   assert.strictEqual(report.llm.json_tool_validity.repaired_malformed_json_args, 1, "JSON repair marker counted");
   assert.strictEqual(report.llm.json_tool_validity.no_tool_final_rejects, 1, "no-tool reject counted");
   assert.strictEqual(report.deploys.successes, 1, "deploy success counted");
@@ -147,8 +154,8 @@ function main() {
   console.log(JSON.stringify({
     success: true,
     fixture_dir: fixtureDir,
-    gpt55_primary: report.llm.gpt55_primary,
-    fallback_route_calls: report.llm.calls_by_model_route["qwen3.6-plus|fallback"].calls,
+    configured_primary: report.llm.configured_primary,
+    fallback_route_calls: report.llm.calls_by_model_route[`${TRIAL_MODEL}|fallback`].calls,
     deploy_audits: report.deploy_audits,
     deploys: {
       successes: report.deploys.successes,
