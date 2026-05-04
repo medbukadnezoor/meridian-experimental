@@ -132,6 +132,10 @@ function isDeepSeekRoute(agentType = "GENERAL", model = "") {
   return isDeepSeekBaseUrl(getBaseUrlForRole(agentType)) || isDeepSeekModel(model);
 }
 
+function getDeepSeekThinkingType(agentType = "GENERAL") {
+  return (agentType || "GENERAL").toUpperCase() === "SCREENER" && config.llm.screeningThinkingEnabled ? "enabled" : "disabled";
+}
+
 function getClient(agentType = "GENERAL") {
   const role = (agentType || "GENERAL").toUpperCase();
   if (_clientCache.has(role)) return _clientCache.get(role);
@@ -152,7 +156,8 @@ function getClient(agentType = "GENERAL") {
     apiKey  = llmCfg.generalApiKey     || globalKey;
   }
 
-  const c = new OpenAI({ baseURL, apiKey, timeout: 5 * 60 * 1000 });
+  const timeout = role === "SCREENER" ? config.llm.screeningRequestTimeoutMs : 5 * 60 * 1000;
+  const c = new OpenAI({ baseURL, apiKey, timeout });
   _clientCache.set(role, c);
   return c;
 }
@@ -276,8 +281,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
-          // DeepSeek V4 defaults thinking mode on; live bot routes need low-latency dense tool calls.
-          if (isDeepSeekRoute(agentType, usedModel)) callParams.thinking = { type: "disabled" };
+          // DeepSeek V4 defaults thinking mode on; only SCREENER may opt into it.
+          if (isDeepSeekRoute(agentType, usedModel)) callParams.thinking = { type: getDeepSeekThinkingType(agentType) };
           // Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.
           if (agentType === "SCREENER" && config.llm.screeningReasoningEffort) {
             callParams.reasoning_effort = config.llm.screeningReasoningEffort;

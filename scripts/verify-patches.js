@@ -219,6 +219,7 @@ function roleReasoningConfigKeysAbsent() {
 function managerAndGeneralReasoningEffortNull(src) {
   return (
     src.includes('Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.') &&
+    src.includes('getDeepSeekThinkingType(agentType)') &&
     src.includes('if (agentType === "SCREENER" && config.llm.screeningReasoningEffort)') &&
     src.includes('callParams.reasoning_effort = config.llm.screeningReasoningEffort') &&
     src.includes('reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null') &&
