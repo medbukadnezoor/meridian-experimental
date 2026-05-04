@@ -71,6 +71,8 @@
   "outOfRangeBinsToClose": 50,
   "outOfRangeWaitMinutes": 60,
   "outOfRangeHardCloseMinutes": 120,
+  "oorRepositionEnabled": false,
+  "oorRepositionCandidateLimit": 25,
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 1.5,
   "minVolumeToRebalance": 500,

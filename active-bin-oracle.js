@@ -3,6 +3,7 @@ import path from "path";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { log } from "./logger.js";
 import { getActiveBin } from "./tools/dlmm.js";
+import { deriveRangeSide } from "./oor-reposition.js";
 
 const DEFAULT_DEBOUNCE_MS = 3_000;
 const DEFAULT_LOG_DIR = "./logs";
@@ -202,15 +203,13 @@ export function classifyActiveBin(position, activeBin, priorActiveBin, previousO
   const inRange = active != null && lowerBin != null && upperBin != null
     ? active >= lowerBin && active <= upperBin
     : null;
-  const belowRange = inRange === false && active < lowerBin;
-  const aboveRange = inRange === false && active > upperBin;
   const binDelta = active != null && prior != null ? active - prior : null;
   const elapsedSec = previousObservedAtMs != null && observedAtMs != null
     ? Math.max(0, (observedAtMs - previousObservedAtMs) / 1000)
     : null;
   const binVelocity = binDelta != null && elapsedSec > 0 ? binDelta / elapsedSec : null;
   const adverseOorGuess = inRange === false && (pnlPct == null || pnlPct <= 0);
-  const rangeSide = belowRange ? "below_range" : aboveRange ? "above_range" : inRange === true ? "in_range" : "unknown";
+  const rangeSide = deriveRangeSide({ active_bin: active, lower_bin: lowerBin, upper_bin: upperBin });
   const velocitySignal = classifyShadowVelocity(velocityFeatures);
   const wouldCloseReason = adverseOorGuess
     ? [
@@ -229,6 +228,7 @@ export function classifyActiveBin(position, activeBin, priorActiveBin, previousO
     bin_delta: binDelta,
     bin_velocity: roundNumber(binVelocity),
     in_range: inRange,
+    range_side: rangeSide,
     adverse_oor_guess: adverseOorGuess,
     ...velocityFeatures,
     ...priceFeatures,
