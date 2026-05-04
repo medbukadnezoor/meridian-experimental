@@ -68,6 +68,22 @@ export function normalizeScreeningReasoningEffort(value) {
   return SCREENING_REASONING_EFFORTS.has(normalized) ? normalized : null;
 }
 
+export function normalizeBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+export function normalizePositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
 export const INTERNAL_FALLBACK_MODEL = "stepfun/step-3.5-flash:free";
 
 export function resolveFallbackModel(configuredFallbackModel) {
@@ -229,7 +245,9 @@ export const config = {
     // Per-role endpoint overrides — null falls back to global llmBaseUrl / llmApiKey
     screeningBaseUrl,
     screeningApiKey:  resolveRoleApiKey(u.screeningApiKey, screeningBaseUrl ?? globalLlmBaseUrl, screeningModel, process.env, globalLlmApiKey) ?? null,
+    screeningThinkingEnabled: normalizeBoolean(u.screeningThinkingEnabled, false),
     screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
+    screeningRequestTimeoutMs: normalizePositiveInteger(u.screeningRequestTimeoutMs ?? u.llmRequestTimeoutMs, 90_000),
     managementBaseUrl,
     managementApiKey:  resolveRoleApiKey(u.managementApiKey, managementBaseUrl ?? globalLlmBaseUrl, managementModel, process.env, globalLlmApiKey) ?? null,
     generalBaseUrl,
