@@ -505,6 +505,8 @@ function buildChecks() {
       label: "[CLIProxy] SCREENER sends and logs explicit Chat Completions reasoning_effort",
       test: (src) =>
         src.includes("reasoningEffort: llmCfg.screeningReasoningEffort || null") &&
+        src.includes('thinkingType: llmCfg.screeningThinkingEnabled ? "enabled" : "disabled"') &&
+        src.includes("timeout: route.requestTimeoutMs || 5 * 60 * 1000") &&
         src.includes("callParams.reasoning_effort = activeRoute.reasoningEffort") &&
         src.includes("reasoning_effort: activeRoute.reasoningEffort || null"),
     },
@@ -620,10 +622,12 @@ function buildChecks() {
       file: "scripts/verify-runtime-config.js",
       label: "[CLIProxy] runtime config proof masks role routes and provider-param policy",
       test: () =>
-        exampleProof?.llm?.screeningModel === "deepseek-v4-flash" &&
+        exampleProof?.llm?.screeningModel === "deepseek-v4-pro" &&
         exampleProof?.llm?.screeningBaseUrl === "https://api.deepseek.com" &&
         exampleProof?.llm?.screeningApiKeySet === "not_set" &&
-        exampleProof?.llm?.screeningReasoningEffort === null &&
+        exampleProof?.llm?.screeningThinkingEnabled === true &&
+        exampleProof?.llm?.screeningReasoningEffort === "high" &&
+        exampleProof?.llm?.screeningRequestTimeoutMs === 90000 &&
         exampleProof?.llm?.screeningFallbackModel === null &&
         exampleProof?.llm?.screeningFallbackBaseUrl === null &&
         exampleProof?.llm?.screeningFallbackApiKeySet === "not_set" &&

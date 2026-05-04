@@ -145,7 +145,7 @@ const _clientCache = new Map();
 function getClientForRoute(route) {
   const cacheKey = `${route.role}:${route.routeKind}:${route.baseURL}:${route.apiKey ? "key" : "no-key"}`;
   if (_clientCache.has(cacheKey)) return _clientCache.get(cacheKey);
-  const c = new OpenAI({ baseURL: route.baseURL, apiKey: route.apiKey || "NO_API_KEY", timeout: 5 * 60 * 1000 });
+  const c = new OpenAI({ baseURL: route.baseURL, apiKey: route.apiKey || "NO_API_KEY", timeout: route.requestTimeoutMs || 5 * 60 * 1000 });
   _clientCache.set(cacheKey, c);
   return c;
 }
@@ -164,6 +164,8 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       baseURL: llmCfg.screeningFallbackBaseUrl,
       apiKey: llmCfg.screeningFallbackApiKey || globalKey,
       reasoningEffort: null,
+      thinkingType: "disabled",
+      requestTimeoutMs: llmCfg.screeningRequestTimeoutMs,
     };
   }
 
@@ -175,6 +177,8 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       baseURL: llmCfg.screeningBaseUrl || globalUrl,
       apiKey: llmCfg.screeningApiKey || globalKey,
       reasoningEffort: llmCfg.screeningReasoningEffort || null,
+      thinkingType: llmCfg.screeningThinkingEnabled ? "enabled" : "disabled",
+      requestTimeoutMs: llmCfg.screeningRequestTimeoutMs,
     };
   }
 
@@ -187,6 +191,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
       apiKey: llmCfg.managementApiKey || globalKey,
       // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
       reasoningEffort: null,
+      thinkingType: "disabled",
     };
   }
 
@@ -198,6 +203,7 @@ function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverri
     apiKey: llmCfg.generalApiKey || globalKey,
     // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
     reasoningEffort: null,
+    thinkingType: "disabled",
   };
 }
 
@@ -354,8 +360,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
-          // DeepSeek V4 defaults thinking mode on; live bot routes need low-latency dense tool calls.
-          if (isDeepSeekRoute(activeRoute)) callParams.thinking = { type: "disabled" };
+          // DeepSeek V4 defaults thinking mode on; only SCREENER may opt into it.
+          if (isDeepSeekRoute(activeRoute)) callParams.thinking = { type: activeRoute.thinkingType || "disabled" };
           // Chat Completions uses reasoning_effort; Responses uses reasoning.effort.
           if (activeRoute.reasoningEffort) callParams.reasoning_effort = activeRoute.reasoningEffort;
           response = await getClientForRoute(activeRoute).chat.completions.create(callParams);

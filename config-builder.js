@@ -18,6 +18,22 @@ export function normalizeScreeningReasoningEffort(value) {
   return SCREENING_REASONING_EFFORTS.has(normalized) ? normalized : null;
 }
 
+export function normalizeBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) return true;
+    if (["false", "0", "no", "off"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+export function normalizePositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
 export function firstNonEmptyString(...values) {
   for (const value of values) {
     const normalized = normalizeOptionalString(value);
@@ -235,7 +251,9 @@ export function buildConfig(userConfig = {}, env = process.env) {
       fallbackModel,
       screeningBaseUrl,
       screeningApiKey: resolveRoleApiKey(u.screeningApiKey, screeningBaseUrl ?? globalLlmBaseUrl, screeningModel, env, globalLlmApiKey) ?? null,
+      screeningThinkingEnabled: normalizeBoolean(u.screeningThinkingEnabled, false),
       screeningReasoningEffort: normalizeScreeningReasoningEffort(u.screeningReasoningEffort),
+      screeningRequestTimeoutMs: normalizePositiveInteger(u.screeningRequestTimeoutMs ?? u.llmRequestTimeoutMs, 90_000),
       screeningFallbackModel,
       screeningFallbackBaseUrl,
       screeningFallbackApiKey: resolveRoleApiKey(u.screeningFallbackApiKey, screeningFallbackBaseUrl ?? globalLlmBaseUrl, screeningFallbackModel, env, globalLlmApiKey) ?? null,
