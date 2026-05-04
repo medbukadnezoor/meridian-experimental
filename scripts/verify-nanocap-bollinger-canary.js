@@ -64,10 +64,16 @@ assert.strictEqual(example.takeProfitPct, 25, "take profit unchanged");
 
 const configuredModel = example.llmModel;
 assert.ok(/^deepseek-/i.test(configuredModel), "base LLM model is DeepSeek");
-assert.strictEqual(example.screeningModel, configuredModel, "screening model follows configured base model");
+assert.strictEqual(example.screeningModel, "deepseek-v4-pro", "screening model uses DeepSeek V4 Pro");
 assert.strictEqual(example.managementModel, configuredModel, "management model follows configured base model");
 assert.strictEqual(example.generalModel, configuredModel, "general model follows configured base model");
-assert.strictEqual(resolved.llm.screeningModel, configuredModel, "resolved screening model follows config");
+assert.strictEqual(example.screeningThinkingEnabled, true, "screening thinking is enabled");
+assert.strictEqual(example.screeningReasoningEffort, "high", "screening reasoning effort is high");
+assert.strictEqual(example.screeningRequestTimeoutMs, 90000, "screening request timeout is 90 seconds");
+assert.strictEqual(resolved.llm.screeningModel, "deepseek-v4-pro", "resolved screening model follows Pro config");
+assert.strictEqual(resolved.llm.screeningThinkingEnabled, true, "resolved screening thinking follows config");
+assert.strictEqual(resolved.llm.screeningReasoningEffort, "high", "resolved screening reasoning follows config");
+assert.strictEqual(resolved.llm.screeningRequestTimeoutMs, 90000, "resolved screening timeout follows config");
 assert.strictEqual(resolved.llm.managementModel, configuredModel, "resolved management model follows config");
 assert.strictEqual(resolved.llm.generalModel, configuredModel, "resolved general model follows config");
 
