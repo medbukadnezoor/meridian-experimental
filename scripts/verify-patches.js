@@ -40,6 +40,7 @@ const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
+const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -379,6 +380,22 @@ function runSupertrendUrgentRuntimeProof() {
   return JSON.parse(result.stdout);
 }
 
+function runOorRepositionProof() {
+  const result = spawnSync(process.execPath, [OOR_REPOSITION_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-oor-reposition failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -404,8 +421,27 @@ function buildChecks() {
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
+  const oorRepositionProof = runOorRepositionProof();
 
   return [
+    {
+      file: "scripts/verify-oor-reposition.js",
+      label: "[Scout OOR reposition] direction-aware guarded same-pool reposition proof passes",
+      test: () =>
+        oorRepositionProof?.disabled_flag_default_off === true &&
+        oorRepositionProof?.range_side?.above === "above_range" &&
+        oorRepositionProof?.range_side?.below === "below_range" &&
+        oorRepositionProof?.range_side?.in_range === "in_range" &&
+        oorRepositionProof?.range_side?.unknown === "unknown" &&
+        oorRepositionProof?.above_success_path === true &&
+        oorRepositionProof?.below_blocked_path === true &&
+        oorRepositionProof?.non_oor_closes_not_enqueued === true &&
+        oorRepositionProof?.stale_close_confirmation_blocked === true &&
+        oorRepositionProof?.max_positions_blocked === true &&
+        oorRepositionProof?.cooldown_or_guard_failure_blocked === true &&
+        oorRepositionProof?.no_stale_latest_candidates === true &&
+        oorRepositionProof?.no_main_nanocap_hooks === true,
+    },
     {
       file: "decision-context-log.js",
       label: "[Birdeye context] live bot emits offline-first decision-context JSONL without Birdeye in the trading loop",

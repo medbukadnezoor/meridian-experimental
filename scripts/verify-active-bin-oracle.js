@@ -57,6 +57,7 @@ try {
     4_000,
   );
   assert.strictEqual(inRange.in_range, true);
+  assert.strictEqual(inRange.range_side, "in_range");
   assert.strictEqual(inRange.adverse_oor_guess, false);
   assert.strictEqual(inRange.bin_delta, 5);
   assert.strictEqual(inRange.bin_velocity, 1.666667);
@@ -70,6 +71,7 @@ try {
     14_000,
   );
   assert.strictEqual(adverseAbove.in_range, false);
+  assert.strictEqual(adverseAbove.range_side, "above_range");
   assert.strictEqual(adverseAbove.adverse_oor_guess, true);
   assert.strictEqual(adverseAbove.bin_delta, 16);
   assert.strictEqual(adverseAbove.bin_velocity, 4);
@@ -83,6 +85,7 @@ try {
     25_000,
   );
   assert.strictEqual(nonAdverseBelow.in_range, false);
+  assert.strictEqual(nonAdverseBelow.range_side, "below_range");
   assert.strictEqual(nonAdverseBelow.adverse_oor_guess, false);
   assert.strictEqual(nonAdverseBelow.would_close_reason, null);
 
@@ -180,6 +183,7 @@ try {
   assert.strictEqual(rows[0].prior_active_bin, 132);
   assert.strictEqual(rows[0].bin_delta, 16);
   assert.strictEqual(rows[0].in_range, false);
+  assert.strictEqual(rows[0].range_side, "above_range");
   assert.strictEqual(rows[0].adverse_oor_guess, true);
   assert.ok(Object.hasOwn(rows[0], "velocity_10s_bin_delta"));
   assert.ok(Object.hasOwn(rows[0], "velocity_30s_bin_delta"));
@@ -318,6 +322,7 @@ try {
     success: true,
     checks: {
       inRangeClassification: true,
+      rangeSideClassification: true,
       adverseOorClassification: true,
       nonAdverseProfitableOor: true,
       velocityCalculation: true,

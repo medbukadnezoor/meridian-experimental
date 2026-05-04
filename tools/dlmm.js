@@ -33,6 +33,7 @@ import {
   normalizeDeployRangeInputs,
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
+import { deriveRangeSide } from "../oor-reposition.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -1530,6 +1531,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
                 upper_bin:              upperBin,
                 active_bin:             activeBin,
                 in_range:               !!lpData.inRange,
+                range_side:             deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
                 unclaimed_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative  : lpData.unCollectedFee)  * 10000) / 10000,
                 total_value_usd:        Math.round(safeNum(config.management.solMode ? lpData.valueNative           : lpData.value)           * 10000) / 10000,
                 total_value_true_usd:   Math.round(safeNum(lpData.value)                                                                      * 10000) / 10000,
@@ -1629,6 +1631,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           upper_bin:          upperBin,
           active_bin:         activeBin,
           in_range:           binData ? !binData.isOutOfRange : !isOOR,
+          range_side:         deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
           unclaimed_fees_usd: lpData
             ? Math.round((
                 config.management.solMode

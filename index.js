@@ -4,7 +4,7 @@ import path from "path";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
-import { log } from "./logger.js";
+import { log, logAction } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin } from "./tools/screening.js";
@@ -29,6 +29,14 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
+import {
+  buildOorRepositionDecision,
+  buildOorRepositionDeployArgs,
+  deriveRangeSide,
+  findFreshSamePoolCandidate,
+  isOorRepositionEligibleRangeSide,
+  isOorRepositionEnabled,
+} from "./oor-reposition.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -337,6 +345,133 @@ async function closeEmergencyDirect(position, exit, source = "management") {
   return result;
 }
 
+function appendOorRepositionDecision(entry) {
+  const decision = buildOorRepositionDecision(entry);
+  logAction({
+    tool: "oor_reposition_decision",
+    ...decision,
+    args: {
+      position: decision.position,
+      pool: decision.pool,
+      rangeSide: decision.rangeSide,
+      decision: decision.decision,
+    },
+    result: decision,
+    success: !["failed"].includes(decision.decision),
+  });
+  appendDecisionContext({
+    stage: "oor_reposition_decision",
+    actor: "MANAGER",
+    pool: decision.pool,
+    poolName: decision.pair,
+    baseMint: decision.baseMint,
+    position: decision.position,
+    pair: decision.pair,
+    reason: decision.reason,
+    metrics: decision,
+    source: "management.oor_reposition",
+  });
+  return decision;
+}
+
+async function runOorRepositionAfterConfirmedClose(position, closeRule, closeResult) {
+  const closeReason = closeRule?.reason || "OOR";
+  const rangeSide = position.range_side || deriveRangeSide(position);
+  const baseEntry = { position, closeReason, closeResult, rangeSide };
+
+  if (!isOorRepositionEnabled(config)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "skip",
+      reason: "OOR reposition disabled",
+    });
+  }
+  if (!isOorRepositionEligibleRangeSide(rangeSide)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "skip",
+      reason: `range side ${rangeSide} is not eligible for reposition`,
+    });
+  }
+  if (!closeResult?.success || closeResult?.dry_run) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: closeResult?.dry_run
+        ? "close was dry-run only; no confirmed close"
+        : "close did not return success",
+    });
+  }
+
+  const afterClose = await getMyPositions({ force: true, silent: true }).catch((error) => ({ error: error.message, positions: [] }));
+  if (afterClose?.positions?.some((p) => p.position === position.position)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: "close confirmation blocked: old position still appears open",
+    });
+  }
+  if ((afterClose?.positions?.length ?? 0) >= config.risk.maxPositions) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: `max positions reached after close (${afterClose.positions.length}/${config.risk.maxPositions})`,
+    });
+  }
+
+  const balance = await getWalletBalances().catch((error) => ({ error: error.message, sol: null }));
+  const minRequired = config.management.deployAmountSol + config.management.gasReserve;
+  if (process.env.DRY_RUN !== "true" && !(Number.isFinite(balance.sol) && balance.sol >= minRequired)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: `insufficient SOL after close (${balance.sol ?? "unknown"} < ${minRequired})`,
+    });
+  }
+
+  const freshScreeningAt = new Date().toISOString();
+  const fresh = await getTopCandidates({ limit: config.management.oorRepositionCandidateLimit ?? 25 })
+    .catch((error) => ({ error: error.message, candidates: [] }));
+  const freshCandidates = fresh?.candidates || fresh?.pools || [];
+  const freshCandidate = findFreshSamePoolCandidate(freshCandidates, {
+    pool: position.pool,
+    baseMint: position.base_mint,
+  });
+  if (!freshCandidate) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      freshScreeningAt,
+      freshCandidates,
+      decision: "blocked",
+      reason: fresh?.error || "fresh screening did not return same pool/base mint candidate",
+    });
+  }
+
+  appendOorRepositionDecision({
+    ...baseEntry,
+    freshScreeningAt,
+    freshCandidates,
+    freshCandidate,
+    decision: "attempt",
+    reason: "fresh same-pool/base-mint candidate passed screening; attempting guarded deploy_position",
+  });
+
+  const deployArgs = buildOorRepositionDeployArgs(freshCandidate, config);
+  const deployResult = await executeTool("deploy_position", deployArgs);
+  const deploySucceeded = deployResult?.success !== false && !deployResult?.error && !deployResult?.blocked;
+  return appendOorRepositionDecision({
+    ...baseEntry,
+    freshScreeningAt,
+    freshCandidates,
+    freshCandidate,
+    guardResult: deployResult,
+    decision: deploySucceeded ? "success" : deployResult?.blocked ? "blocked" : "failed",
+    reason: deploySucceeded
+      ? "guarded same-pool reposition deployed"
+      : deployResult?.reason || deployResult?.error || "guarded same-pool reposition failed",
+  });
+}
+
 function formatActiveBinOracleExitReason(row) {
   return [
     `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
@@ -570,6 +705,20 @@ export async function runManagementCycle({ silent = false } = {}) {
             "indicators",
             `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${closeRule.reason}`,
           );
+        }
+        if (closeRule.rule === 4 && isOorRepositionEnabled(config) && isOorRepositionEligibleRangeSide(closeRule.rangeSide)) {
+          const result = await executeTool("close_position", {
+            position_address: p.position,
+            reason: closeRule.reason,
+            urgent: !!closeRule.urgent,
+          });
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
+          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
+          continue;
         }
         actionMap.set(p.position, closeRule);
         continue;
@@ -1322,26 +1471,28 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
+  const rangeSide = position.range_side || deriveRangeSide(position);
   if (
+    rangeSide === "above_range" &&
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range", rangeSide, oorSide: rangeSide };
   }
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin &&
+    (rangeSide === "above_range" || rangeSide === "below_range") &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
     const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
     return {
       action: "CLOSE",
       rule: 4,
-      reason: oorExit?.reason || "OOR",
+      reason: oorExit?.reason || `OOR ${rangeSide}`,
       indicatorPolicy: oorExit?.indicatorPolicy ?? "confirm",
       urgent: oorExit?.urgent ?? false,
+      rangeSide,
+      oorSide: rangeSide,
     };
   }
   if (

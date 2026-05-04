@@ -166,6 +166,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       outOfRangeBinsToClose: u.outOfRangeBinsToClose ?? 10,
       outOfRangeWaitMinutes: u.outOfRangeWaitMinutes ?? 30,
       outOfRangeHardCloseMinutes: u.outOfRangeHardCloseMinutes ?? null,
+      oorRepositionEnabled: u.oorRepositionEnabled ?? false,
+      oorRepositionCandidateLimit: u.oorRepositionCandidateLimit ?? 25,
       oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
       oorCooldownHours: u.oorCooldownHours ?? 12,
       stopLossCooldownHours: u.stopLossCooldownHours ?? 12,
