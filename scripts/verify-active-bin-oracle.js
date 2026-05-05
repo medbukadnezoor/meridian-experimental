@@ -44,8 +44,11 @@ try {
     ActiveBinOracleRecorder,
     classifyActiveBin,
     classifyShadowVelocity,
+    classifyWhaleEscapeShadow,
+    computeBinDistanceFields,
     computePriceWindows,
     computeVelocityWindows,
+    normalizeWhaleEscapeFlow,
     shouldTriggerActiveBinEmergencyExit,
   } = await import(join(ROOT, "active-bin-oracle.js"));
 
@@ -106,6 +109,61 @@ try {
   assert.strictEqual(missingPrice.price_delta_pct_10s, null);
   assert.strictEqual(missingPrice.price_elapsed_sec_10s, null);
   assert.strictEqual(missingPrice.price_rate_pct_per_sec_10s, null);
+
+  const binDistance = computeBinDistanceFields({ lower_bin: 100, upper_bin: 130 }, 106);
+  assert.strictEqual(binDistance.bin_distance_to_lower, 6);
+  assert.strictEqual(binDistance.bin_distance_to_upper, 24);
+  assert.strictEqual(binDistance.range_width_bins, 30);
+
+  const unavailableWhaleFlow = normalizeWhaleEscapeFlow(null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_net_dep_usd_5m, null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_net_dep_usd_15m, null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_net_dep_usd_30m, null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_add_count_5m, null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_remove_count_5m, null);
+  assert.strictEqual(unavailableWhaleFlow.pool_lp_largest_remove_usd_5m, null);
+  assert.strictEqual(unavailableWhaleFlow.whale_escape_data_source, null);
+
+  const normalizedWhaleFlow = normalizeWhaleEscapeFlow({
+    netDepUsd5m: "-1000.1234567",
+    netDepUsd15m: "-2500.5",
+    netDepUsd30m: "-7000",
+    addCount5m: "2.9",
+    removeCount5m: 3,
+    largestRemoveUsd5m: "1750.1234567",
+    dataSource: "reserve_delta_poll",
+  });
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_net_dep_usd_5m, -1000.123457);
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_net_dep_usd_15m, -2500.5);
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_net_dep_usd_30m, -7000);
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_add_count_5m, 2);
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_remove_count_5m, 3);
+  assert.strictEqual(normalizedWhaleFlow.pool_lp_largest_remove_usd_5m, 1750.123457);
+  assert.strictEqual(normalizedWhaleFlow.whale_escape_data_source, "reserve_delta_poll");
+
+  const whaleWatch = classifyWhaleEscapeShadow({
+    flow: normalizedWhaleFlow,
+    binDistanceToLower: 6,
+    pnlPct: -5,
+  });
+  assert.strictEqual(whaleWatch.whale_escape_shadow_signal, "watch");
+  assert.ok(whaleWatch.whale_escape_shadow_reason.includes("shadow_only_whale_escape_watch"));
+
+  const whaleCandidate = classifyWhaleEscapeShadow({
+    flow: { ...normalizedWhaleFlow, pool_lp_net_dep_usd_15m: -5500 },
+    binDistanceToLower: 4,
+    pnlPct: -1.5,
+  });
+  assert.strictEqual(whaleCandidate.whale_escape_shadow_signal, "candidate");
+  assert.ok(whaleCandidate.whale_escape_shadow_reason.includes("shadow_only_whale_escape_candidate"));
+
+  const whaleMissing = classifyWhaleEscapeShadow({
+    flow: unavailableWhaleFlow,
+    binDistanceToLower: 4,
+    pnlPct: -1.5,
+  });
+  assert.strictEqual(whaleMissing.whale_escape_shadow_signal, null);
+  assert.strictEqual(whaleMissing.whale_escape_shadow_reason, null);
 
   const velocity30s = computeVelocityWindows(165, 31_000, [
     { activeBin: 100, observedAtMs: 0 },
@@ -193,7 +251,74 @@ try {
   assert.strictEqual(rows[0].price_rate_pct_per_sec_10s, null);
   assert.ok(Object.hasOwn(rows[0], "shadow_velocity_signal"));
   assert.ok(Object.hasOwn(rows[0], "shadow_velocity_reason"));
+  assert.strictEqual(rows[0].pool_lp_net_dep_usd_5m, null);
+  assert.strictEqual(rows[0].pool_lp_net_dep_usd_15m, null);
+  assert.strictEqual(rows[0].pool_lp_net_dep_usd_30m, null);
+  assert.strictEqual(rows[0].pool_lp_add_count_5m, null);
+  assert.strictEqual(rows[0].pool_lp_remove_count_5m, null);
+  assert.strictEqual(rows[0].pool_lp_largest_remove_usd_5m, null);
+  assert.strictEqual(rows[0].bin_distance_to_lower, 48);
+  assert.strictEqual(rows[0].bin_distance_to_upper, -18);
+  assert.strictEqual(rows[0].range_width_bins, 30);
+  assert.strictEqual(rows[0].whale_escape_shadow_signal, null);
+  assert.strictEqual(rows[0].whale_escape_shadow_reason, null);
+  assert.strictEqual(rows[0].whale_escape_data_source, null);
   assert.ok(rows[0].would_close_reason.includes("shadow_only_active_bin_above_range"));
+
+  const whaleTempDir = mkdtempSync(join(tmpdir(), "meridian-whale-escape-"));
+  const whaleConnection = new FakeConnection();
+  const whaleRowsSeen = [];
+  const whaleRecorder = new ActiveBinOracleRecorder({
+    connection: whaleConnection,
+    debounceMs: 10,
+    logDir: whaleTempDir,
+    getActiveBinFn: async () => ({ binId: 104, price: 1.04, pricePerLamport: "1040000000" }),
+    getPoolLiquidityFlowFn: async (context) => {
+      whaleRowsSeen.push(context.pool);
+      return {
+        pool_lp_net_dep_usd_5m: -1200,
+        pool_lp_net_dep_usd_15m: -5500,
+        pool_lp_net_dep_usd_30m: -8000,
+        pool_lp_add_count_5m: 1,
+        pool_lp_remove_count_5m: 4,
+        pool_lp_largest_remove_usd_5m: 3250.25,
+        whale_escape_data_source: "reserve_delta_poll",
+      };
+    },
+    logger: () => {},
+    now: () => new Date("2026-04-29T09:05:00.000Z"),
+  });
+  whaleRecorder.updatePositions([
+    {
+      pool,
+      position: "Whale11111111111111111111111111111111",
+      pair: "WHALE-SOL",
+      lower_bin: 100,
+      upper_bin: 130,
+      active_bin: 106,
+      pnl_pct: -1.2,
+    },
+  ]);
+  await whaleRecorder.recordPoolSample(pool);
+  const whaleRows = readFileSync(join(whaleTempDir, "active-bin-oracle-2026-04-29.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.strictEqual(whaleRowsSeen.length, 1);
+  assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_5m, -1200);
+  assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_15m, -5500);
+  assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_30m, -8000);
+  assert.strictEqual(whaleRows[0].pool_lp_add_count_5m, 1);
+  assert.strictEqual(whaleRows[0].pool_lp_remove_count_5m, 4);
+  assert.strictEqual(whaleRows[0].pool_lp_largest_remove_usd_5m, 3250.25);
+  assert.strictEqual(whaleRows[0].bin_distance_to_lower, 4);
+  assert.strictEqual(whaleRows[0].bin_distance_to_upper, 26);
+  assert.strictEqual(whaleRows[0].range_width_bins, 30);
+  assert.strictEqual(whaleRows[0].whale_escape_shadow_signal, "candidate");
+  assert.ok(whaleRows[0].whale_escape_shadow_reason.includes("shadow_only_whale_escape_candidate"));
+  assert.strictEqual(whaleRows[0].whale_escape_data_source, "reserve_delta_poll");
+  await whaleRecorder.stop();
+  rmSync(whaleTempDir, { recursive: true, force: true });
 
   const velocityTempDir = mkdtempSync(join(tmpdir(), "meridian-active-bin-velocity-"));
   const velocityConnection = new FakeConnection();
@@ -313,6 +438,19 @@ try {
   const source = readFileSync(join(ROOT, "active-bin-oracle.js"), "utf8");
   assert.ok(!source.includes("closePosition"));
   assert.ok(!source.includes("executeTool"));
+  const executionConsumerFiles = [
+    "index.js",
+    "pool-memory.js",
+    "tools/dlmm.js",
+    "tools/executor.js",
+    "tools/screening.js",
+    "oor-reposition.js",
+  ];
+  for (const file of executionConsumerFiles) {
+    const consumerSource = readFileSync(join(ROOT, file), "utf8");
+    assert.ok(!consumerSource.includes("whale_escape_"), `${file} must not consume whale_escape fields`);
+    assert.ok(!consumerSource.includes("pool_lp_net_dep_usd"), `${file} must not consume pool_lp fields`);
+  }
 
   recorder.updatePositions([]);
   assert.deepStrictEqual(fakeConnection.removed, [1], "unsubscribes removed pools");
@@ -328,6 +466,12 @@ try {
       velocityCalculation: true,
       priceWindowCalculation: true,
       missingPriceNullFields: true,
+      binDistanceFields: true,
+      whaleEscapeNullFields: true,
+      whaleEscapeNormalization: true,
+      whaleEscapeWatchSignal: true,
+      whaleEscapeCandidateSignal: true,
+      whaleEscapeFieldsPreservedInRows: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
       liveEmergencyTriggersExtremeOnly: true,
@@ -337,6 +481,7 @@ try {
       oneSubscriptionPerPool: true,
       jsonlRowsWritten: rows.length,
       noCloseOrExecuteImports: true,
+      noWhaleEscapeExecutionConsumers: true,
       unsubscribeRemovedPools: true,
     },
     sampleLogFile: logFile,

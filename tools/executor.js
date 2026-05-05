@@ -414,16 +414,19 @@ export async function executeTool(name, args) {
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
-    const duration = Date.now() - startTime;
+    let duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
+    const delayCloseActionLog = name === "close_position";
 
-    logAction({
-      tool: name,
-      args,
-      result: summarizeResult(result),
-      duration_ms: duration,
-      success,
-    });
+    if (!delayCloseActionLog) {
+      logAction({
+        tool: name,
+        args,
+        result: summarizeResult(result),
+        duration_ms: duration,
+        success,
+      });
+    }
 
     if (success) {
       if (name === "swap_token" && result.tx) {
@@ -438,7 +441,8 @@ export async function executeTool(name, args) {
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
         // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
+        if (!args.skip_swap && !result.skip_post_close_swap && result.base_mint) {
+          const autoSwapStartedAt = Date.now();
           try {
             const balances = await getWalletBalances({});
             const token = balances.tokens?.find(t => t.mint === result.base_mint);
@@ -449,10 +453,21 @@ export async function executeTool(name, args) {
               result.auto_swapped = true;
               result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+              if (result.adaptive_close) {
+                result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+                result.adaptive_close.final_sol_received = swapResult?.amount_out ?? null;
+              }
             }
           } catch (e) {
+            if (result.adaptive_close) {
+              result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+              result.adaptive_close.post_close_swap_error = e.message;
+            }
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);
           }
+        } else if (result.skip_post_close_swap && result.adaptive_close) {
+          result.adaptive_close.post_close_swap_ms = 0;
+          result.adaptive_close.post_close_swap_skipped = true;
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
@@ -466,6 +481,17 @@ export async function executeTool(name, args) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
         }
       }
+    }
+
+    if (delayCloseActionLog) {
+      duration = Date.now() - startTime;
+      logAction({
+        tool: name,
+        args,
+        result: summarizeResult(result),
+        duration_ms: duration,
+        success,
+      });
     }
 
     return result;
@@ -605,6 +631,25 @@ async function runSafetyChecks(name, args) {
  * Summarize a result for logging (truncate large responses).
  */
 function summarizeResult(result) {
+  if (result?.adaptive_close) {
+    return {
+      success: result.success,
+      relay: result.relay,
+      close_mode: result.close_mode,
+      adaptive_close: result.adaptive_close,
+      position: result.position,
+      pool: result.pool,
+      pool_name: result.pool_name,
+      pnl_usd: result.pnl_usd,
+      pnl_pct: result.pnl_pct,
+      sol_received: result.sol_received,
+      auto_swapped: result.auto_swapped,
+      skip_post_close_swap: result.skip_post_close_swap,
+      txs: result.txs,
+      close_txs: result.close_txs,
+      error: result.error,
+    };
+  }
   const str = JSON.stringify(result);
   if (str.length > 1000) {
     return str.slice(0, 1000) + "...(truncated)";
