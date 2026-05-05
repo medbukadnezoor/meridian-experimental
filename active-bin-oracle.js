@@ -11,6 +11,28 @@ const DEFAULT_HISTORY_RETENTION_MS = 60_000;
 const DEFAULT_MAX_HISTORY_POINTS = 120;
 const DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT = 2;
 
+export const WHALE_ESCAPE_NULL_FIELDS = Object.freeze({
+  pool_lp_net_dep_usd_5m: null,
+  pool_lp_net_dep_usd_15m: null,
+  pool_lp_net_dep_usd_30m: null,
+  pool_lp_add_count_5m: null,
+  pool_lp_remove_count_5m: null,
+  pool_lp_largest_remove_usd_5m: null,
+  whale_escape_data_source: null,
+});
+
+export const WHALE_ESCAPE_SHADOW_THRESHOLDS = Object.freeze({
+  watch: {
+    maxNetDepUsd15m: -2_500,
+    maxBinDistanceToLower: 6,
+  },
+  candidate: {
+    maxNetDepUsd15m: -5_000,
+    maxBinDistanceToLower: 4,
+    minPnlPct: -2,
+  },
+});
+
 export const VELOCITY_WINDOWS = [
   { label: "10s", targetMs: 10_000, minMs: 7_000, maxMs: 20_000 },
   { label: "30s", targetMs: 30_000, minMs: 20_000, maxMs: 45_000 },
@@ -54,6 +76,87 @@ function normalizeActiveBinResult(active) {
     activeBin: asNumber(active?.binId),
     activePrice: asNumber(active?.price),
     activePricePerLamport: asNumber(active?.pricePerLamport),
+  };
+}
+
+function normalizeCount(value) {
+  const number = asNumber(value);
+  return number != null && number >= 0 ? Math.trunc(number) : null;
+}
+
+function normalizeWhaleEscapeDataSource(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+export function normalizeWhaleEscapeFlow(flow = {}) {
+  if (!flow || typeof flow !== "object") return { ...WHALE_ESCAPE_NULL_FIELDS };
+  return {
+    pool_lp_net_dep_usd_5m: roundNumber(asNumber(flow.pool_lp_net_dep_usd_5m) ?? asNumber(flow.netDepUsd5m)),
+    pool_lp_net_dep_usd_15m: roundNumber(asNumber(flow.pool_lp_net_dep_usd_15m) ?? asNumber(flow.netDepUsd15m)),
+    pool_lp_net_dep_usd_30m: roundNumber(asNumber(flow.pool_lp_net_dep_usd_30m) ?? asNumber(flow.netDepUsd30m)),
+    pool_lp_add_count_5m: normalizeCount(flow.pool_lp_add_count_5m ?? flow.addCount5m),
+    pool_lp_remove_count_5m: normalizeCount(flow.pool_lp_remove_count_5m ?? flow.removeCount5m),
+    pool_lp_largest_remove_usd_5m: roundNumber(asNumber(flow.pool_lp_largest_remove_usd_5m) ?? asNumber(flow.largestRemoveUsd5m)),
+    whale_escape_data_source: normalizeWhaleEscapeDataSource(flow.whale_escape_data_source ?? flow.dataSource),
+  };
+}
+
+export function computeBinDistanceFields(position, activeBin) {
+  const lowerBin = asNumber(position?.lower_bin);
+  const upperBin = asNumber(position?.upper_bin);
+  const active = asNumber(activeBin);
+  return {
+    bin_distance_to_lower: active != null && lowerBin != null ? active - lowerBin : null,
+    bin_distance_to_upper: active != null && upperBin != null ? upperBin - active : null,
+    range_width_bins: lowerBin != null && upperBin != null ? upperBin - lowerBin : null,
+  };
+}
+
+export function classifyWhaleEscapeShadow({
+  flow = {},
+  binDistanceToLower = null,
+  pnlPct = null,
+  thresholds = WHALE_ESCAPE_SHADOW_THRESHOLDS,
+} = {}) {
+  const netDep15m = asNumber(flow.pool_lp_net_dep_usd_15m);
+  const distanceToLower = asNumber(binDistanceToLower);
+  const pnl = asNumber(pnlPct);
+  if (netDep15m == null || distanceToLower == null) {
+    return {
+      whale_escape_shadow_signal: null,
+      whale_escape_shadow_reason: null,
+    };
+  }
+
+  const candidate = (
+    netDep15m <= thresholds.candidate.maxNetDepUsd15m &&
+    distanceToLower <= thresholds.candidate.maxBinDistanceToLower &&
+    pnl != null &&
+    pnl > thresholds.candidate.minPnlPct
+  );
+  if (candidate) {
+    return {
+      whale_escape_shadow_signal: "candidate",
+      whale_escape_shadow_reason: `shadow_only_whale_escape_candidate net_dep_15m=${roundNumber(netDep15m, 2)} bin_distance_to_lower=${distanceToLower} pnl_pct=${roundNumber(pnl, 2)}`,
+    };
+  }
+
+  const watch = (
+    netDep15m <= thresholds.watch.maxNetDepUsd15m &&
+    distanceToLower <= thresholds.watch.maxBinDistanceToLower
+  );
+  if (watch) {
+    return {
+      whale_escape_shadow_signal: "watch",
+      whale_escape_shadow_reason: `shadow_only_whale_escape_watch net_dep_15m=${roundNumber(netDep15m, 2)} bin_distance_to_lower=${distanceToLower}`,
+    };
+  }
+
+  return {
+    whale_escape_shadow_signal: null,
+    whale_escape_shadow_reason: null,
   };
 }
 
@@ -251,6 +354,7 @@ export class ActiveBinOracleRecorder {
     emergencyExitHandler = null,
     liveEmergencyExitEnabled = false,
     liveEmergencyExitMaxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
+    getPoolLiquidityFlowFn = null,
   } = {}) {
     this.connection = connection;
     this.rpcUrl = rpcUrl;
@@ -264,6 +368,7 @@ export class ActiveBinOracleRecorder {
     this.emergencyExitHandler = emergencyExitHandler;
     this.liveEmergencyExitEnabled = liveEmergencyExitEnabled;
     this.liveEmergencyExitMaxPnlPct = liveEmergencyExitMaxPnlPct;
+    this.getPoolLiquidityFlowFn = typeof getPoolLiquidityFlowFn === "function" ? getPoolLiquidityFlowFn : null;
     this.positionsByPool = new Map();
     this.subscriptions = new Map();
     this.pendingSubscriptions = new Set();
@@ -403,6 +508,23 @@ export class ActiveBinOracleRecorder {
     const history = trimHistory(previous.history || [], observedAtMs, this.historyRetentionMs, this.maxHistoryPoints);
     const velocityFeatures = computeVelocityWindows(activeBin, observedAtMs, history);
     const priceFeatures = computePriceWindows(activePrice, observedAtMs, history);
+    let whaleEscapeFlow = { ...WHALE_ESCAPE_NULL_FIELDS };
+    if (this.getPoolLiquidityFlowFn) {
+      try {
+        whaleEscapeFlow = normalizeWhaleEscapeFlow(await this.getPoolLiquidityFlowFn({
+          pool,
+          activeBin,
+          activePrice,
+          activePricePerLamport,
+          observedAt,
+          observedAtMs,
+          positions,
+          history,
+        }));
+      } catch (error) {
+        this.logger("active_bin_oracle_warn", `Whale Escape flow unavailable for ${pool.slice(0, 8)}: ${error.message}`);
+      }
+    }
     const rows = positions.map((position) => {
       const classification = classifyActiveBin(
         position,
@@ -413,6 +535,12 @@ export class ActiveBinOracleRecorder {
         velocityFeatures,
         priceFeatures,
       );
+      const binDistanceFields = computeBinDistanceFields(position, activeBin);
+      const whaleEscapeSignal = classifyWhaleEscapeShadow({
+        flow: whaleEscapeFlow,
+        binDistanceToLower: binDistanceFields.bin_distance_to_lower,
+        pnlPct: position.pnl_pct,
+      });
       return {
         timestamp: observedAt.toISOString(),
         pool,
@@ -421,6 +549,9 @@ export class ActiveBinOracleRecorder {
         active_price: activePrice,
         active_price_per_lamport: activePricePerLamport,
         ...classification,
+        ...whaleEscapeFlow,
+        ...binDistanceFields,
+        ...whaleEscapeSignal,
         pnl_pct: position.pnl_pct ?? null,
         pnl_usd: position.pnl_usd ?? null,
         pnl_pct_derived: position.pnl_pct_derived ?? null,

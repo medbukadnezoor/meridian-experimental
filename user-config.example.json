@@ -73,6 +73,18 @@
   "outOfRangeHardCloseMinutes": 120,
   "oorRepositionEnabled": false,
   "oorRepositionCandidateLimit": 25,
+  "adaptiveCloseModeEnabled": false,
+  "adaptiveCloseFastZapTimeoutMs": 1500,
+  "adaptiveCloseModes": {
+    "hard_stop": "local_liquidity_first",
+    "fast_stop": "local_liquidity_first",
+    "velocity_stop": "local_liquidity_first",
+    "rolling_drawdown": "fast_zap_attempt",
+    "profit_giveback": "fast_zap_attempt",
+    "low_yield": "relay_zap_normal",
+    "oor_above": "relay_zap_normal",
+    "manual": "relay_zap_normal"
+  },
   "oorCooldownTriggerCount": 3,
   "oorCooldownHours": 1.5,
   "minVolumeToRebalance": 500,

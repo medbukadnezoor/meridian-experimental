@@ -336,6 +336,150 @@ function normalizeExecutionSignatures(result) {
   return signatures;
 }
 
+export const ADAPTIVE_CLOSE_MODE_DEFAULTS = Object.freeze({
+  hard_stop: "local_liquidity_first",
+  fast_stop: "local_liquidity_first",
+  velocity_stop: "local_liquidity_first",
+  rolling_drawdown: "fast_zap_attempt",
+  profit_giveback: "fast_zap_attempt",
+  low_yield: "relay_zap_normal",
+  oor_above: "relay_zap_normal",
+  manual: "relay_zap_normal",
+});
+
+const VALID_ADAPTIVE_CLOSE_MODES = new Set([
+  "local_liquidity_first",
+  "fast_zap_attempt",
+  "relay_zap_normal",
+  "local_close_no_swap",
+]);
+
+function normalizeAdaptiveCloseMode(value, fallback) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return VALID_ADAPTIVE_CLOSE_MODES.has(normalized) ? normalized : fallback;
+}
+
+export function classifyAdaptiveCloseReason(reason, urgent = false) {
+  const text = String(reason || "").toLowerCase();
+  if (text.includes("hard stop")) return "hard_stop";
+  if (text.includes("velocity stop") || text.includes("rug_like") || text.includes("rug-like")) return "velocity_stop";
+  if (text.includes("fast stop") || text.includes("early dump")) return "fast_stop";
+  if (text.includes("rolling fast drawdown") || text.includes("rolling drawdown")) return "rolling_drawdown";
+  if (text.includes("profit giveback")) return "profit_giveback";
+  if (text.includes("low yield") || text.includes("low-yield") || text.includes("yield")) return "low_yield";
+  if ((text.includes("out of range") || text.includes("oor")) && (text.includes("above") || text.includes("benign"))) return "oor_above";
+  if (text.includes("manual") || text.includes("operator")) return "manual";
+  return urgent ? "fast_stop" : "manual";
+}
+
+export function selectAdaptiveCloseMode({
+  reason,
+  urgent = false,
+  relayEnabled = false,
+  managementConfig = {},
+} = {}) {
+  const exitType = classifyAdaptiveCloseReason(reason, urgent);
+  const enabled = managementConfig.adaptiveCloseModeEnabled === true;
+  const configuredModes = managementConfig.adaptiveCloseModes && typeof managementConfig.adaptiveCloseModes === "object"
+    ? managementConfig.adaptiveCloseModes
+    : {};
+  const configuredMode = normalizeAdaptiveCloseMode(configuredModes[exitType], ADAPTIVE_CLOSE_MODE_DEFAULTS[exitType] || "local_liquidity_first");
+  const selectedMode = enabled
+    ? configuredMode
+    : (urgent ? "local_liquidity_first" : (relayEnabled ? "relay_zap_normal" : "local_liquidity_first"));
+  const fastZapTimeoutMs = Math.max(1, Number(managementConfig.adaptiveCloseFastZapTimeoutMs ?? 1500) || 1500);
+
+  return {
+    enabled,
+    exitType,
+    selectedMode,
+    requestedMode: configuredMode,
+    fastZapTimeoutMs,
+    shouldAttemptRelay: !!relayEnabled && (selectedMode === "relay_zap_normal" || selectedMode === "fast_zap_attempt"),
+    shouldUseFastZapBudget: enabled && selectedMode === "fast_zap_attempt",
+    skipPostCloseSwap: enabled && selectedMode === "local_close_no_swap",
+  };
+}
+
+function createCloseModeAudit(positionAddress, reason, urgent, decision) {
+  return {
+    adaptive_close_enabled: decision.enabled,
+    requested_reason: reason || "agent decision",
+    exit_type: decision.exitType,
+    selected_close_mode: decision.selectedMode,
+    requested_close_mode: decision.requestedMode,
+    urgent: !!urgent,
+    zap_attempted: false,
+    zap_submitted: false,
+    zap_quote_ms: null,
+    zap_order_ms: null,
+    zap_sign_ms: null,
+    zap_submit_ms: null,
+    zap_total_ms: null,
+    zap_fast_timeout_ms: decision.shouldUseFastZapBudget ? decision.fastZapTimeoutMs : null,
+    fallback_reason: null,
+    local_close_ms: null,
+    post_close_swap_ms: null,
+    final_sol_received: null,
+    no_duplicate_close_or_swap_guard: true,
+    position: positionAddress,
+  };
+}
+
+function closeModeContext(audit) {
+  return {
+    adaptive_close_enabled: audit.adaptive_close_enabled,
+    requested_reason: audit.requested_reason,
+    exit_type: audit.exit_type,
+    selected_close_mode: audit.selected_close_mode,
+    requested_close_mode: audit.requested_close_mode,
+    zap_attempted: audit.zap_attempted,
+    zap_submitted: audit.zap_submitted,
+    zap_quote_ms: audit.zap_quote_ms,
+    zap_order_ms: audit.zap_order_ms,
+    zap_sign_ms: audit.zap_sign_ms,
+    zap_submit_ms: audit.zap_submit_ms,
+    zap_total_ms: audit.zap_total_ms,
+    zap_fast_timeout_ms: audit.zap_fast_timeout_ms,
+    fallback_reason: audit.fallback_reason,
+    local_close_ms: audit.local_close_ms,
+    post_close_swap_ms: audit.post_close_swap_ms,
+    final_sol_received: audit.final_sol_received,
+    no_duplicate_close_or_swap_guard: audit.no_duplicate_close_or_swap_guard,
+  };
+}
+
+function startTimedStage(audit, stageName) {
+  const startedAt = Date.now();
+  return () => {
+    audit[`${stageName}_ms`] = Date.now() - startedAt;
+  };
+}
+
+async function meridianJsonAdaptive(pathname, options, audit, stageName, deadlineAt = null) {
+  const finish = startTimedStage(audit, `zap_${stageName}`);
+  try {
+    if (Number.isFinite(deadlineAt)) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`fast zap ${stageName} budget expired before ${stageName}`);
+      }
+      return await meridianJsonOnce(pathname, options, Math.max(1, remainingMs));
+    }
+    return await meridianJson(pathname, options);
+  } finally {
+    finish();
+  }
+}
+
+function assertFastZapSubmitBudget(audit, deadlineAt) {
+  if (!Number.isFinite(deadlineAt)) return;
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error("fast zap budget expired before submit");
+  }
+}
+
 const METEORA_INIT_BIN_ARRAY_DISCRIMINATOR = Buffer.from([35, 86, 19, 185, 78, 212, 75, 211]).toString("hex");
 const METEORA_INIT_BITMAP_EXTENSION_DISCRIMINATOR = Buffer.from([47, 157, 226, 180, 12, 240, 33, 71]).toString("hex");
 
@@ -1853,18 +1997,37 @@ export async function closePosition({ position_address, reason, urgent }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  let closeModeDecision = null;
+  let closeModeAudit = null;
 
   try {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
-    if (urgent && shouldUseLpAgentRelay()) {
+    closeModeDecision = selectAdaptiveCloseMode({
+      reason,
+      urgent,
+      relayEnabled: shouldUseLpAgentRelay(),
+      managementConfig: config.management,
+    });
+    closeModeAudit = createCloseModeAudit(position_address, reason, urgent, closeModeDecision);
+    const fastZapDeadlineAt = closeModeDecision.shouldUseFastZapBudget
+      ? Date.now() + closeModeDecision.fastZapTimeoutMs
+      : null;
+
+    log(
+      "close",
+      `Adaptive close mode: enabled=${closeModeDecision.enabled} exit=${closeModeDecision.exitType} mode=${closeModeDecision.selectedMode} reason="${reason || "agent decision"}"`,
+    );
+    if (urgent && shouldUseLpAgentRelay() && !closeModeDecision.shouldAttemptRelay) {
       log("close", "Urgent close: skipping relay zap-out and using local close-liquidity-first path");
     }
-    if (!urgent && shouldUseLpAgentRelay()) {
+    if (closeModeDecision.shouldAttemptRelay) {
       let relaySubmitted = false;
+      const relayStartedAt = Date.now();
       try {
+        closeModeAudit.zap_attempted = true;
         const pool = await getPool(poolAddress);
         const relayAllowedDebitMints = [
           pool.lbPair.tokenXMint.toString(),
@@ -1877,7 +2040,7 @@ export async function closePosition({ position_address, reason, urgent }) {
         const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
         const closeOutput = "allToken1";
 
-        const quotes = await meridianJson("/execution/zap-out/quotes", {
+        const quotes = await meridianJsonAdaptive("/execution/zap-out/quotes", {
           method: "POST",
           headers: getMeridianHeaders(),
           body: JSON.stringify({
@@ -1885,9 +2048,9 @@ export async function closePosition({ position_address, reason, urgent }) {
             positionId: position_address,
             bps: 10000,
           }),
-        });
+        }, closeModeAudit, "quote", fastZapDeadlineAt);
 
-        const order = await meridianJson("/execution/zap-out/order", {
+        const order = await meridianJsonAdaptive("/execution/zap-out/order", {
           method: "POST",
           headers: getMeridianHeaders(),
           body: JSON.stringify({
@@ -1904,7 +2067,7 @@ export async function closePosition({ position_address, reason, urgent }) {
             toBinId: closeToBinId,
             quoteRequestId: quotes.requestId,
           }),
-        });
+        }, closeModeAudit, "order", fastZapDeadlineAt);
 
         const closeUnsigned = order?.order?.transactions?.close || [];
         const swapUnsigned = order?.order?.transactions?.swap || [];
@@ -1912,6 +2075,7 @@ export async function closePosition({ position_address, reason, urgent }) {
           throw new Error(`Relay close returned no transactions for ${position_address}.`);
         }
 
+        const finishZapSign = startTimedStage(closeModeAudit, "zap_sign");
         const closeSigned = await signAndSimulateRelayTransactions(closeUnsigned, wallet, {
           connection: getConnection(),
           label: "zap-out close",
@@ -1926,8 +2090,12 @@ export async function closePosition({ position_address, reason, urgent }) {
           maxSolLoss: 0.05,
           requiredStaticAccounts: [wallet.publicKey.toString()],
         });
+        finishZapSign();
 
+        assertFastZapSubmitBudget(closeModeAudit, fastZapDeadlineAt);
         relaySubmitted = true;
+        closeModeAudit.zap_submitted = true;
+        const finishZapSubmit = startTimedStage(closeModeAudit, "zap_submit");
         const submit = await meridianJson("/execution/zap-out/submit", {
           method: "POST",
           headers: getMeridianHeaders(),
@@ -1940,6 +2108,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             },
           }),
         });
+        finishZapSubmit();
+        closeModeAudit.zap_total_ms = Date.now() - relayStartedAt;
 
         const claimTxHashes = [];
         const closeTxHashes = normalizeExecutionSignatures(submit);
@@ -1970,6 +2140,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             error: "Close submit succeeded but position still appears open after verification window",
             position: position_address,
             pool: poolAddress,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
             close_txs: closeTxHashes,
             txs: txHashes,
           };
@@ -2074,6 +2246,7 @@ export async function closePosition({ position_address, reason, urgent }) {
               urgent: !!urgent,
               request_id: order.requestId,
               txs: txHashes,
+              close_mode: closeModeContext(closeModeAudit),
             },
             source: "dlmm.close.relay_success",
           });
@@ -2081,6 +2254,8 @@ export async function closePosition({ position_address, reason, urgent }) {
           return {
             success: true,
             relay: true,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
             request_id: order.requestId,
             position: position_address,
             pool: poolAddress,
@@ -2118,6 +2293,7 @@ export async function closePosition({ position_address, reason, urgent }) {
             urgent: !!urgent,
             request_id: order.requestId,
             txs: txHashes,
+            close_mode: closeModeContext(closeModeAudit),
           },
           source: "dlmm.close.relay_success_untracked",
         });
@@ -2125,6 +2301,8 @@ export async function closePosition({ position_address, reason, urgent }) {
         return {
           success: true,
           relay: true,
+          close_mode: closeModeAudit.selected_close_mode,
+          adaptive_close: closeModeContext(closeModeAudit),
           request_id: order.requestId,
           position: position_address,
           pool: poolAddress,
@@ -2136,10 +2314,12 @@ export async function closePosition({ position_address, reason, urgent }) {
         };
       } catch (relayError) {
         if (relaySubmitted) throw relayError;
+        closeModeAudit.fallback_reason = relayError.message;
         log("close_warn", `Relay zap-out failed before submit; falling back to local close + Jupiter autoswap: ${relayError.message}`);
       }
     }
 
+    const localCloseStartedAt = Date.now();
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
@@ -2252,17 +2432,21 @@ export async function closePosition({ position_address, reason, urgent }) {
     }
 
     if (!closedConfirmed) {
+      closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
       return {
         success: false,
         error: "Close transactions sent but position still appears open after verification window",
         position: position_address,
         pool: poolAddress,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
       };
     }
 
+    closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
     recordClose(position_address, reason || "agent decision");
 
     // Record performance for learning
@@ -2414,12 +2598,17 @@ export async function closePosition({ position_address, reason, urgent }) {
           relay: false,
           urgent: !!urgent,
           txs: txHashes,
+          close_mode: closeModeContext(closeModeAudit),
         },
         source: "dlmm.close.local_success",
       });
 
       return {
         success: true,
+        relay: false,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
+        skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
         position: position_address,
         pool: poolAddress,
         pool_name: tracked.pool_name || poolMeta.name || null,
@@ -2455,12 +2644,17 @@ export async function closePosition({ position_address, reason, urgent }) {
         relay: false,
         urgent: !!urgent,
         txs: txHashes,
+        close_mode: closeModeContext(closeModeAudit),
       },
       source: "dlmm.close.local_success_untracked",
     });
 
     return {
       success: true,
+      relay: false,
+      close_mode: closeModeAudit.selected_close_mode,
+      adaptive_close: closeModeContext(closeModeAudit),
+      skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
       position: position_address,
       pool: poolAddress,
       pool_name: poolMeta.name || null,
@@ -2480,6 +2674,7 @@ export async function closePosition({ position_address, reason, urgent }) {
         success: false,
         urgent: !!urgent,
         requested_reason: reason || null,
+        close_mode: closeModeAudit ? closeModeContext(closeModeAudit) : null,
       },
       source: "dlmm.close.error",
     });

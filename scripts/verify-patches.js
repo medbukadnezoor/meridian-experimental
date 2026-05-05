@@ -40,7 +40,9 @@ const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
+const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracle.js");
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
+const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -396,6 +398,38 @@ function runOorRepositionProof() {
   return JSON.parse(result.stdout);
 }
 
+function runActiveBinOracleProof() {
+  const result = spawnSync(process.execPath, [ACTIVE_BIN_ORACLE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-active-bin-oracle failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runAdaptiveCloseModeProof() {
+  const result = spawnSync(process.execPath, [ADAPTIVE_CLOSE_MODE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-adaptive-close-mode failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -421,9 +455,44 @@ function buildChecks() {
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
+  const activeBinOracleProof = runActiveBinOracleProof();
   const oorRepositionProof = runOorRepositionProof();
+  const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
 
   return [
+    {
+      file: "scripts/verify-active-bin-oracle.js",
+      label: "[Active-bin oracle] shadow velocity and Whale Escape row-shape proof passes",
+      test: () =>
+        activeBinOracleProof?.success === true &&
+        activeBinOracleProof?.checks?.velocityWindowFieldsPreservedInRows === true &&
+        activeBinOracleProof?.checks?.binDistanceFields === true &&
+        activeBinOracleProof?.checks?.whaleEscapeNullFields === true &&
+        activeBinOracleProof?.checks?.whaleEscapeNormalization === true &&
+        activeBinOracleProof?.checks?.whaleEscapeWatchSignal === true &&
+        activeBinOracleProof?.checks?.whaleEscapeCandidateSignal === true &&
+        activeBinOracleProof?.checks?.whaleEscapeFieldsPreservedInRows === true &&
+        activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
+        activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
+    },
+    {
+      file: "scripts/verify-adaptive-close-mode.js",
+      label: "[Scout adaptive close mode] default-off routing, fast zap budget, fallback, and audit proof pass",
+      test: () =>
+        adaptiveCloseModeProof?.success === true &&
+        adaptiveCloseModeProof?.default_off === true &&
+        adaptiveCloseModeProof?.disabled_urgent_preserves_local === true &&
+        adaptiveCloseModeProof?.disabled_normal_preserves_relay === true &&
+        adaptiveCloseModeProof?.rolling_drawdown_fast_zap === true &&
+        adaptiveCloseModeProof?.profit_giveback_fast_zap === true &&
+        adaptiveCloseModeProof?.catastrophic_local_first === true &&
+        adaptiveCloseModeProof?.fast_zap_submit_guard_present === true &&
+        adaptiveCloseModeProof?.fallback_before_submit_present === true &&
+        adaptiveCloseModeProof?.audit_fields_present === true &&
+        adaptiveCloseModeProof?.source_safety?.deploys_or_closes_positions === false &&
+        adaptiveCloseModeProof?.source_safety?.restarts_processes === false &&
+        adaptiveCloseModeProof?.source_safety?.changes_live_config === false,
+    },
     {
       file: "scripts/verify-oor-reposition.js",
       label: "[Scout OOR reposition] direction-aware guarded same-pool reposition proof passes",
