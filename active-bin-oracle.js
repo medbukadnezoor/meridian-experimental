@@ -54,6 +54,7 @@ export const SHADOW_VELOCITY_THRESHOLDS = {
 };
 
 function asNumber(value) {
+  if (value == null) return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
