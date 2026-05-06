@@ -85,7 +85,7 @@ function main() {
   assert.ok(executorSource.includes("computeDeployAmount"), "executor uses computed deploy amount as forced repair target when available");
   assert.ok(executorSource.indexOf("normalizeForcedSingleSidedSolBidAskArgs") < executorSource.indexOf("runSafetyChecks"), "forced repair runs before safety checks");
   assert.ok(agentSource.includes("result?.retryable_tool_args !== true"), "agent duplicate deploy guard skips retryable deterministic arg rejections");
-  assert.ok(definitionsSource.includes("nanocap forced SOL-only mode"), "tool wording explains forced nanocap SOL-only mode");
+  assert.ok(definitionsSource.includes("forced SOL-only mode"), "tool wording explains forced SOL-only mode");
 
   console.log(JSON.stringify({
     success: true,

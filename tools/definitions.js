@@ -140,21 +140,21 @@ Only call this if you need the current price to calculate a specific bin range (
 
 PRIORITY ORDER for strategy and bins:
 1. User explicitly specifies → follow exactly unless code-enforced safety/forced-mode rules reject or repair it
-2. No user spec → use active strategy's lp_strategy and choose bins based on volatility
+2. No user spec → use active strategy's lp_strategy and configured range bounds/defaults
 
 HARD RULES:
 - Never use 'curve'.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
-- In nanocap forced SOL-only mode, deploy_position is code-enforced as strategy='bid_ask', amount_y = full computed deploy amount, amount_x=0, bins_above=0, and no positive upside_pct.
+- In forced SOL-only mode, deploy_position is code-enforced from active config/strategy as strategy='bid_ask', amount_y = full computed deploy amount, amount_x=0, bins_above=0, and no positive upside_pct.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
 - Do not send both bins and percentage ranges. If using bins_below, omit downside_pct/upside_pct entirely.
   Zero or negative percentage fields are ignored by the deterministic range guard.
 
 Guidelines (only when user hasn't specified):
-- Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
-- Bins: choose 35–69 for standard volatility; up to 350 for wide-range strategies. Max 1400 total.
-- Deposit: Standard mode can be single-sided or dual-sided. Nanocap forced mode is SOL-only: amount_y only, amount_x=0.
+- Strategy: use the active strategy's lp_strategy field (bid_ask or spot).
+- Bins: use active strategy range fields when present: bins_below, bins_below_min, bins_below_max, and bins_above. Max 1400 total.
+- Deposit: Standard mode can be single-sided or dual-sided. Forced SOL-only mode is amount_y only, amount_x=0.
 
 WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
       parameters: {
