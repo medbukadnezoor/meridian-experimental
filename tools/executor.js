@@ -20,7 +20,9 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds } from "../config.js";
+import { config, computeDeployAmount, reloadScreeningThresholds } from "../config.js";
+import { getActiveStrategy } from "../strategy-library.js";
+import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-guard.js";
 import { appendDecision, getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -36,6 +38,16 @@ const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
   "Telegram slash command /setcfg",
 ]);
+
+function shouldForceSingleSidedSolBidAsk() {
+  if (config.strategy.forceSingleSidedSolBidAsk === false) return false;
+  const activeStrategy = getActiveStrategy();
+  if (activeStrategy) {
+    if (activeStrategy.lp_strategy !== "bid_ask") return false;
+    if (activeStrategy.entry?.single_side && activeStrategy.entry.single_side !== "sol") return false;
+  }
+  return config.strategy.strategy === "bid_ask";
+}
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
@@ -329,6 +341,62 @@ export async function executeTool(name, args) {
         blocked: true,
         reason: "update_config is operator-only. Use explicit operator paths such as /setcfg or CLI config set.",
       };
+    }
+  }
+
+  if (name === "deploy_position") {
+    const forceSingleSide = shouldForceSingleSidedSolBidAsk();
+    const computedDeployAmountSol = forceSingleSide && process.env.DRY_RUN !== "true"
+      ? computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol)
+      : config.management.deployAmountSol;
+    const forcedDeploy = normalizeForcedSingleSidedSolBidAskArgs(args, {
+      force: forceSingleSide,
+      deployAmountSol: Number.isFinite(computedDeployAmountSol) ? computedDeployAmountSol : config.management.deployAmountSol,
+      binsBelow: config.strategy.binsBelow,
+    });
+    if (!forcedDeploy.ok) {
+      const duration = Date.now() - startTime;
+      log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);
+      logAction({
+        tool: name,
+        args,
+        result: {
+          blocked: true,
+          guard: "forced_single_side_bidask",
+          retryable_tool_args: forcedDeploy.retryableToolArgs === true,
+          reason: forcedDeploy.reason,
+          details: forcedDeploy.details ?? null,
+        },
+        duration_ms: duration,
+        success: false,
+      });
+      appendDecision({
+        type: "deploy_guard",
+        actor: "SCREENER",
+        pool: args?.pool_address,
+        pool_name: args?.pool_name || args?.pool_address,
+        summary: "Blocked malformed SOL-only bid_ask deploy args before safety checks",
+        reason: forcedDeploy.reason,
+        risks: ["No on-chain deploy attempt was made"],
+        metrics: {
+          guard: "forced_single_side_bidask",
+          attempted: args,
+          details: forcedDeploy.details ?? null,
+        },
+        rejected: ["forced_single_side_bidask_args"],
+      });
+      return {
+        success: false,
+        blocked: true,
+        retryable_tool_args: forcedDeploy.retryableToolArgs === true,
+        guard: "forced_single_side_bidask",
+        reason: forcedDeploy.reason,
+        details: forcedDeploy.details ?? null,
+      };
+    }
+    if (forcedDeploy.repaired) {
+      log("deploy", `[forced-single-side-bidask] Repaired deploy args: ${JSON.stringify(forcedDeploy.repairs)}`);
+      args = forcedDeploy.args;
     }
   }
 
