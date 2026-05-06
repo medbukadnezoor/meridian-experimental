@@ -15,7 +15,7 @@ import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, g
 import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
-import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
+import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy, getActiveStrategy, resolveStrategyRangePolicy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
@@ -349,10 +349,15 @@ export async function executeTool(name, args) {
     const forcedDeployAmountSol = process.env.DRY_RUN === "true"
       ? config.management.deployAmountSol
       : computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol);
+    const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
     const forcedDeploy = normalizeForcedSingleSidedSolBidAskArgs(args, {
-      force: config.strategy.forceSingleSidedSolBidAsk,
+      force: config.strategy.forceSingleSidedSolBidAsk || activeRangePolicy.singleSidedSol,
       deployAmountSol: Number.isFinite(forcedDeployAmountSol) ? forcedDeployAmountSol : config.management.deployAmountSol,
-      binsBelow: config.strategy.binsBelow,
+      strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
+      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsBelowMin: activeRangePolicy.binsBelowMin,
+      binsBelowMax: activeRangePolicy.binsBelowMax,
+      binsAbove: activeRangePolicy.binsAbove ?? 0,
     });
     if (!forcedDeploy.ok) {
       log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);

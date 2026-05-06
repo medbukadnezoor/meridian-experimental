@@ -43,6 +43,7 @@ const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertre
 const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracle.js");
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
+const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -430,6 +431,22 @@ function runAdaptiveCloseModeProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutStrategyLibraryConfigProof() {
+  const result = spawnSync(process.execPath, [SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-strategy-library-config failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -458,8 +475,24 @@ function buildChecks() {
   const activeBinOracleProof = runActiveBinOracleProof();
   const oorRepositionProof = runOorRepositionProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
+  const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
 
   return [
+    {
+      file: "scripts/verify-scout-strategy-library-config.js",
+      label: "[Scout strategy library] tight-bin range is strategy/config-driven and clamps deploy args",
+      test: () =>
+        scoutStrategyLibraryConfigProof?.success === true &&
+        scoutStrategyLibraryConfigProof?.range_policy_from_json === true &&
+        scoutStrategyLibraryConfigProof?.clamps_low_bins_to_min === true &&
+        scoutStrategyLibraryConfigProof?.clamps_high_bins_to_max === true &&
+        scoutStrategyLibraryConfigProof?.missing_bins_uses_default === true &&
+        scoutStrategyLibraryConfigProof?.alternate_json_changes_policy === true &&
+        scoutStrategyLibraryConfigProof?.no_prompt_formula === true &&
+        scoutStrategyLibraryConfigProof?.no_index_formula === true &&
+        scoutStrategyLibraryConfigProof?.tracked_example_matches_runtime_shape === true &&
+        scoutStrategyLibraryConfigProof?.no_executor_strategy_id === true,
+    },
     {
       file: "scripts/verify-active-bin-oracle.js",
       label: "[Active-bin oracle] shadow velocity and Whale Escape row-shape proof passes",

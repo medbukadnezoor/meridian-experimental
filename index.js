@@ -14,7 +14,7 @@ import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike } from "./state.js";
-import { getActiveStrategy } from "./strategy-library.js";
+import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -896,6 +896,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
+    const activeRangePolicy = resolveStrategyRangePolicy(activeStrategy, config);
+    const activeRangeGuidance = describeRangePolicyForPrompt(activeRangePolicy);
     const strategyBlock = activeStrategy
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
@@ -1108,7 +1110,8 @@ STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
    lp_strategy: MUST be "${activeStrategy?.lp_strategy ?? 'bid_ask'}" — taken from ACTIVE STRATEGY above. Do NOT use "spot". Do NOT change this value.
-   bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
+   Range policy: ${activeRangeGuidance}.
+   If bins_below bounds are configured by the active strategy, keep bins_below inside those bounds. Do not use volatility expansion unless the strategy JSON explicitly defines it.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
 3. Report in this exact format (no tables, no extra sections):
@@ -1890,13 +1893,15 @@ async function deployLatestCandidate(index) {
     stageSignals(candidate.pool, candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate));
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
-  const binsBelow = Math.max(35, Math.min(90, Math.round(35 + ((Number(candidate.volatility) || 0) / 5) * 55)));
+  const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
+  const binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
+  const binsAbove = activeRangePolicy.binsAbove ?? 0;
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
-    strategy: config.strategy.strategy,
+    strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: 0,
+    bins_above: binsAbove,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,
