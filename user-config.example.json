@@ -140,6 +140,13 @@
   "darwinCalibrationMinSamples": 20,
   "darwinMeanReversionRate": 0.02,
 
+  "materialWinPct": 1.0,
+  "materialLossPct": -1.0,
+  "dustNeutralAbsPct": 1.0,
+  "neutralCloseReasonBuckets": ["low_yield", "operator"],
+  "darwinUseMaterialOutcomes": true,
+  "darwinExcludeNeutralOutcomes": true,
+
   "autoresearchEnabled": true,
   "autoresearchMode": "shadow",
   "autoresearchMaxActiveTrials": 3,

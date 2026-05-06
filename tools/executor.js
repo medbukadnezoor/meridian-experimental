@@ -212,6 +212,13 @@ const toolMap = {
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
       healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
       // model routing is operator-only — not LLM-mutable
+      // performance classification
+      materialWinPct: ["performance", "materialWinPct"],
+      materialLossPct: ["performance", "materialLossPct"],
+      dustNeutralAbsPct: ["performance", "dustNeutralAbsPct"],
+      neutralCloseReasonBuckets: ["performance", "neutralCloseReasonBuckets"],
+      darwinUseMaterialOutcomes: ["performance", "darwinUseMaterialOutcomes"],
+      darwinExcludeNeutralOutcomes: ["performance", "darwinExcludeNeutralOutcomes"],
       // strategy
       strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "binsBelow"],

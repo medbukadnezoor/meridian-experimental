@@ -8,6 +8,7 @@
 
 import fs from "fs";
 import { log } from "./logger.js";
+import { classifyMaterialOutcome, getMaterialOutcomeOptions } from "./performance-metrics.js";
 
 const WEIGHTS_FILE = "./signal-weights.json";
 const LESSONS_FILE = "./lessons.json";
@@ -139,6 +140,9 @@ export function recalculateWeights(perfData, cfg = {}) {
   const weightCeiling = darwin.weightCeiling ?? 2.5;
   const calibrationMinSamples = darwin.calibrationMinSamples ?? 20;
   const meanReversionRate = darwin.meanReversionRate ?? 0.02;
+  const materialOptions = getMaterialOutcomeOptions(cfg);
+  const useMaterialOutcomes = materialOptions.darwinUseMaterialOutcomes;
+  const excludeNeutralOutcomes = materialOptions.darwinExcludeNeutralOutcomes;
 
   const data = loadWeights();
   const weights = data.weights || { ...DEFAULT_WEIGHTS };
@@ -160,24 +164,74 @@ export function recalculateWeights(perfData, cfg = {}) {
 
   if (recent.length < minSamples) {
     log("signal_weights", `Only ${recent.length} records in ${windowDays}d window (need ${minSamples}), skipping recalc`);
-    return { changes: [], weights, directions };
+    return {
+      changes: [],
+      weights,
+      directions,
+      learning: {
+        raw_recent_records: recent.length,
+        material_learning_records: 0,
+        material_wins: 0,
+        material_losses: 0,
+        neutral_excluded: 0,
+        use_material_outcomes: useMaterialOutcomes,
+      },
+    };
   }
 
-  const wins = recent.filter((p) => (p.pnl_usd ?? 0) > 0);
-  const losses = recent.filter((p) => (p.pnl_usd ?? 0) <= 0);
+  const classifiedRecent = recent.map((record) => ({
+    ...record,
+    ...classifyMaterialOutcome(record, cfg),
+  }));
+  const neutralExcluded = useMaterialOutcomes
+    ? classifiedRecent.filter((record) => record.material_outcome === "neutral").length
+    : 0;
+  const learningRecords = useMaterialOutcomes
+    ? classifiedRecent.filter((record) => (
+        excludeNeutralOutcomes
+          ? record.material_win || record.material_loss
+          : true
+      ))
+    : classifiedRecent;
+  const wins = useMaterialOutcomes
+    ? learningRecords.filter((p) => p.material_win)
+    : learningRecords.filter((p) => (p.pnl_usd ?? 0) > 0);
+  const losses = useMaterialOutcomes
+    ? learningRecords.filter((p) => p.material_loss)
+    : learningRecords.filter((p) => (p.pnl_usd ?? 0) <= 0);
+  const learning = {
+    raw_recent_records: recent.length,
+    material_learning_records: learningRecords.length,
+    material_wins: wins.length,
+    material_losses: losses.length,
+    neutral_excluded: neutralExcluded,
+    use_material_outcomes: useMaterialOutcomes,
+  };
+
+  if (useMaterialOutcomes) {
+    log(
+      "signal_weights",
+      `Material learning window: raw=${learning.raw_recent_records}, learning=${learning.material_learning_records}, material_wins=${learning.material_wins}, material_losses=${learning.material_losses}, neutral_excluded=${learning.neutral_excluded}`
+    );
+  }
+
+  if (useMaterialOutcomes && learningRecords.length < minSamples) {
+    log("signal_weights", `Only ${learningRecords.length} material learning records after neutral exclusion (need ${minSamples}), skipping recalc`);
+    return { changes: [], weights, directions, learning };
+  }
 
   if (wins.length === 0 || losses.length === 0) {
     log("signal_weights", `Need both wins (${wins.length}) and losses (${losses.length}) to compute lift, skipping`);
-    return { changes: [], weights, directions };
+    return { changes: [], weights, directions, learning };
   }
 
-  data.calibration = buildCalibrationStats(recent, calibrationMinSamples);
+  data.calibration = buildCalibrationStats(learningRecords, calibrationMinSamples);
 
   const statsBySignal = {};
   const sampleCounts = {};
   for (const signal of SIGNAL_NAMES) {
     const stats = computeSignalStats(signal, wins, losses, perSignalMinSamples);
-    sampleCounts[signal] = countSignalSamples(signal, recent);
+    sampleCounts[signal] = countSignalSamples(signal, learningRecords);
     if (!stats) continue;
     statsBySignal[signal] = stats;
     directions[signal] = stats.direction || directions[signal] || DEFAULT_DIRECTIONS[signal] || "higher";
@@ -194,7 +248,7 @@ export function recalculateWeights(perfData, cfg = {}) {
 
   if (ranked.length === 0) {
     log("signal_weights", "No signals had enough samples for lift calculation");
-    return { changes: [], weights, directions };
+    return { changes: [], weights, directions, learning };
   }
 
   const q1End = Math.ceil(adjustable.length * 0.25);
@@ -252,6 +306,10 @@ export function recalculateWeights(perfData, cfg = {}) {
       window_size: recent.length,
       win_count: wins.length,
       loss_count: losses.length,
+      raw_recent_records: learning.raw_recent_records,
+      material_learning_records: learning.material_learning_records,
+      neutral_excluded: learning.neutral_excluded,
+      use_material_outcomes: learning.use_material_outcomes,
     });
     if (data.history.length > 20) data.history = data.history.slice(-20);
   }
@@ -260,11 +318,11 @@ export function recalculateWeights(perfData, cfg = {}) {
   log(
     "signal_weights",
     changes.length > 0
-      ? `Recalculated: ${changes.length} weight(s) adjusted from ${recent.length} records`
-      : `Recalculated: no changes needed (${recent.length} records, ${ranked.length} signals evaluated)`
+      ? `Recalculated: ${changes.length} weight(s) adjusted from ${learningRecords.length} learning records (${recent.length} raw)`
+      : `Recalculated: no changes needed (${learningRecords.length} learning records, ${ranked.length} signals evaluated)`
   );
 
-  return { changes, weights, directions };
+  return { changes, weights, directions, learning };
 }
 
 // ─── Candidate Scoring ───────────────────────────────────────────

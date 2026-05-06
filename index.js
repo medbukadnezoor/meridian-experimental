@@ -2257,7 +2257,7 @@ Commands:
       const perf = getPerformanceSummary();
       if (perf) {
         console.log(`\n  Based on ${perf.total_positions_closed} closed positions`);
-        console.log(`  Win rate: ${perf.win_rate_pct}%  |  Avg PnL: ${perf.avg_pnl_pct}%`);
+        console.log(`  Raw WR: ${perf.raw_win_rate_pct ?? perf.win_rate_pct}%  |  Material WR: ${perf.material_win_rate_pct ?? "n/a"}% (${perf.material_sample_count ?? 0} material / ${perf.neutral_count ?? 0} neutral)  |  Avg PnL: ${perf.avg_pnl_pct}%`);
       } else {
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }
