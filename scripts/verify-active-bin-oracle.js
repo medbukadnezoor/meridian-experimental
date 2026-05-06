@@ -43,9 +43,11 @@ try {
   const {
     ActiveBinOracleRecorder,
     classifyActiveBin,
+    classifyRangeProximityZone,
     classifyShadowVelocity,
     classifyWhaleEscapeShadow,
     computeBinDistanceFields,
+    computeRangeProximityFields,
     computePriceWindows,
     computeVelocityWindows,
     normalizeWhaleEscapeFlow,
@@ -114,6 +116,44 @@ try {
   assert.strictEqual(binDistance.bin_distance_to_lower, 6);
   assert.strictEqual(binDistance.bin_distance_to_upper, 24);
   assert.strictEqual(binDistance.range_width_bins, 30);
+
+  assert.strictEqual(classifyRangeProximityZone({ activeBin: 106, lowerBin: 100, upperBin: 130 }), "lower_half");
+  assert.strictEqual(classifyRangeProximityZone({ activeBin: 124, lowerBin: 100, upperBin: 130 }), "upper_half");
+  assert.strictEqual(classifyRangeProximityZone({ activeBin: 90, lowerBin: 100, upperBin: 130 }), "below_range");
+  assert.strictEqual(classifyRangeProximityZone({ activeBin: 140, lowerBin: 100, upperBin: 130 }), "above_range");
+  const proximity = computeRangeProximityFields(
+    { lower_bin: 100, upper_bin: 130 },
+    112,
+    90_000,
+    { zone: "lower_half", zoneSinceMs: 30_000 },
+  );
+  assert.strictEqual(proximity.bin_distance_to_lower_pct_of_range, 40);
+  assert.strictEqual(proximity.bin_distance_to_upper_pct_of_range, 60);
+  assert.strictEqual(proximity.range_position_pct, 40);
+  assert.strictEqual(proximity.range_proximity_zone, "lower_half");
+  assert.strictEqual(proximity.previous_range_proximity_zone, "lower_half");
+  assert.strictEqual(proximity.range_edge_zone, null);
+  assert.strictEqual(proximity.range_edge_threshold_bins, 3);
+  assert.strictEqual(proximity.rolling_lower_half_sec_60s, 60);
+  assert.strictEqual(proximity.rolling_upper_half_sec_60s, 0);
+  assert.strictEqual(proximity.rolling_near_edge_sec_60s, 0);
+  assert.strictEqual(proximity.time_in_current_range_zone_minutes, 1);
+
+  const edgeProximity = computeRangeProximityFields(
+    { lower_bin: 100, upper_bin: 130 },
+    102,
+    90_000,
+    {
+      zone: "lower_half",
+      edgeZone: "near_lower_edge",
+      zoneSinceMs: 30_000,
+      observedAtMs: 30_000,
+    },
+  );
+  assert.strictEqual(edgeProximity.range_edge_zone, "near_lower_edge");
+  assert.strictEqual(edgeProximity.rolling_near_edge_sec_60s, 60);
+  assert.strictEqual(edgeProximity.rolling_near_lower_edge_sec_60s, 60);
+  assert.strictEqual(edgeProximity.rolling_near_upper_edge_sec_60s, 0);
 
   const unavailableWhaleFlow = normalizeWhaleEscapeFlow(null);
   assert.strictEqual(unavailableWhaleFlow.pool_lp_net_dep_usd_5m, null);
@@ -260,6 +300,17 @@ try {
   assert.strictEqual(rows[0].bin_distance_to_lower, 48);
   assert.strictEqual(rows[0].bin_distance_to_upper, -18);
   assert.strictEqual(rows[0].range_width_bins, 30);
+  assert.strictEqual(rows[0].bin_distance_to_lower_pct_of_range, 160);
+  assert.strictEqual(rows[0].bin_distance_to_upper_pct_of_range, -60);
+  assert.strictEqual(rows[0].range_position_pct, 160);
+  assert.strictEqual(rows[0].range_proximity_zone, "above_range");
+  assert.strictEqual(rows[0].previous_range_proximity_zone, null);
+  assert.strictEqual(rows[0].range_edge_zone, null);
+  assert.strictEqual(rows[0].range_edge_threshold_bins, 3);
+  assert.strictEqual(rows[0].rolling_lower_half_sec_60s, 0);
+  assert.strictEqual(rows[0].rolling_upper_half_sec_60s, 0);
+  assert.strictEqual(rows[0].rolling_near_edge_sec_60s, 0);
+  assert.strictEqual(rows[0].time_in_current_range_zone_minutes, 0);
   assert.strictEqual(rows[0].whale_escape_shadow_signal, null);
   assert.strictEqual(rows[0].whale_escape_shadow_reason, null);
   assert.strictEqual(rows[0].whale_escape_data_source, null);
@@ -314,6 +365,15 @@ try {
   assert.strictEqual(whaleRows[0].bin_distance_to_lower, 4);
   assert.strictEqual(whaleRows[0].bin_distance_to_upper, 26);
   assert.strictEqual(whaleRows[0].range_width_bins, 30);
+  assert.strictEqual(whaleRows[0].bin_distance_to_lower_pct_of_range, 13.333);
+  assert.strictEqual(whaleRows[0].bin_distance_to_upper_pct_of_range, 86.667);
+  assert.strictEqual(whaleRows[0].range_position_pct, 13.333);
+  assert.strictEqual(whaleRows[0].range_proximity_zone, "lower_half");
+  assert.strictEqual(whaleRows[0].range_edge_zone, null);
+  assert.strictEqual(whaleRows[0].range_edge_threshold_bins, 3);
+  assert.strictEqual(whaleRows[0].rolling_lower_half_sec_60s, 0);
+  assert.strictEqual(whaleRows[0].rolling_near_edge_sec_60s, 0);
+  assert.strictEqual(whaleRows[0].time_in_current_range_zone_minutes, 0);
   assert.strictEqual(whaleRows[0].whale_escape_shadow_signal, "candidate");
   assert.ok(whaleRows[0].whale_escape_shadow_reason.includes("shadow_only_whale_escape_candidate"));
   assert.strictEqual(whaleRows[0].whale_escape_data_source, "reserve_delta_poll");
@@ -379,6 +439,9 @@ try {
   assert.strictEqual(velocityRows[1].active_price_per_lamport, 1650000000);
   assert.strictEqual(velocityRows[1].price_delta_pct_30s, 43.478261);
   assert.strictEqual(velocityRows[1].price_rate_pct_per_sec_30s, 2.070393);
+  assert.strictEqual(velocityRows[1].rolling_lower_half_sec_60s, 21);
+  assert.strictEqual(velocityRows[1].rolling_upper_half_sec_60s, 0);
+  assert.strictEqual(velocityRows[1].rolling_near_edge_sec_60s, 0);
   assert.strictEqual(velocityRows[1].shadow_velocity_signal, "rug_like_extreme");
   assert.strictEqual(emergencyRows.length, 1);
   assert.strictEqual(emergencyRows[0].position, "Velocity111111111111111111111111111111");
@@ -450,6 +513,11 @@ try {
     const consumerSource = readFileSync(join(ROOT, file), "utf8");
     assert.ok(!consumerSource.includes("whale_escape_"), `${file} must not consume whale_escape fields`);
     assert.ok(!consumerSource.includes("pool_lp_net_dep_usd"), `${file} must not consume pool_lp fields`);
+    assert.ok(!consumerSource.includes("range_proximity_"), `${file} must not consume LPTELE-1 range proximity fields`);
+    assert.ok(!consumerSource.includes("time_in_current_range_zone"), `${file} must not consume LPTELE-1 range duration fields`);
+    assert.ok(!consumerSource.includes("range_edge_zone"), `${file} must not consume LPTELE-1 range edge fields`);
+    assert.ok(!consumerSource.includes("rolling_near_edge_sec_60s"), `${file} must not consume LPTELE-1 rolling edge fields`);
+    assert.ok(!consumerSource.includes("rolling_lower_half_sec_60s"), `${file} must not consume LPTELE-1 rolling half fields`);
   }
 
   recorder.updatePositions([]);
@@ -467,6 +535,10 @@ try {
       priceWindowCalculation: true,
       missingPriceNullFields: true,
       binDistanceFields: true,
+      rangeProximityFields: true,
+      rangeZoneDurationFields: true,
+      rangeEdgeFields: true,
+      rollingRangeDwellFields: true,
       whaleEscapeNullFields: true,
       whaleEscapeNormalization: true,
       whaleEscapeWatchSignal: true,
@@ -482,6 +554,7 @@ try {
       jsonlRowsWritten: rows.length,
       noCloseOrExecuteImports: true,
       noWhaleEscapeExecutionConsumers: true,
+      noRangeProximityExecutionConsumers: true,
       unsubscribeRemovedPools: true,
     },
     sampleLogFile: logFile,

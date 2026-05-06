@@ -101,6 +101,12 @@ pool_lp_largest_remove_usd_5m
 bin_distance_to_lower
 bin_distance_to_upper
 range_width_bins
+range_proximity_zone
+previous_range_proximity_zone
+range_position_pct
+bin_distance_to_lower_pct_of_range
+bin_distance_to_upper_pct_of_range
+time_in_current_range_zone_minutes
 whale_escape_shadow_signal
 whale_escape_shadow_reason
 whale_escape_data_source
@@ -156,7 +162,7 @@ This is a hypothesis-only menu after Whale Escape, not permission to ship more l
 
 Milestone order:
 
-1. `LPTELE-1` position-relative bin proximity: `bin_distance_to_lower`, `bin_distance_to_upper`, range width, and time in the current range half.
+1. `LPTELE-1` position-relative bin proximity: `bin_distance_to_lower`, `bin_distance_to_upper`, range width, range-position pct, range proximity zone, previous zone, and time spent in the current range zone.
 2. `LPTELE-2` bin-localized liquidity shape: quote reserves near active bin, adjacent-bin liquidity cliffs, and our share of active-bin TVL.
 3. `LPTELE-3` tagged LP flow: net deposits/removes split by smart wallets, bot holders, and other LPs.
 4. `LPTELE-4` aggressive sell pressure: rolling buy/sell USD, sell/buy ratio, large sells, and swap slippage.

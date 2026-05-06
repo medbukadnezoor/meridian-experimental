@@ -500,12 +500,17 @@ function buildChecks() {
         activeBinOracleProof?.success === true &&
         activeBinOracleProof?.checks?.velocityWindowFieldsPreservedInRows === true &&
         activeBinOracleProof?.checks?.binDistanceFields === true &&
+        activeBinOracleProof?.checks?.rangeProximityFields === true &&
+        activeBinOracleProof?.checks?.rangeZoneDurationFields === true &&
+        activeBinOracleProof?.checks?.rangeEdgeFields === true &&
+        activeBinOracleProof?.checks?.rollingRangeDwellFields === true &&
         activeBinOracleProof?.checks?.whaleEscapeNullFields === true &&
         activeBinOracleProof?.checks?.whaleEscapeNormalization === true &&
         activeBinOracleProof?.checks?.whaleEscapeWatchSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeCandidateSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeFieldsPreservedInRows === true &&
         activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
+        activeBinOracleProof?.checks?.noRangeProximityExecutionConsumers === true &&
         activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
     },
     {
