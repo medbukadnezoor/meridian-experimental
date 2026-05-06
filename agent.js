@@ -451,7 +451,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
         // Lock deploy_position after first attempt regardless of outcome — retrying is never right
         // For close/swap: only lock on success so genuine failures can be retried
-        if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
+        if (NO_RETRY_TOOLS.has(functionName) && result?.retryable_tool_args !== true) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
 
         return {

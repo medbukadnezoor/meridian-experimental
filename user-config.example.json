@@ -17,6 +17,7 @@
 
   "strategy": "bid_ask",
   "binsBelow": 69,
+  "forceSingleSidedSolBidAsk": true,
   "minSingleSidedSolBins": 35,
   "minSingleSidedSolDownsidePct": 1,
 

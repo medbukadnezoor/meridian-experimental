@@ -32,6 +32,7 @@ const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-e
 const MAIN_DEPLOY_GUARD_VERIFIER_PATH = join(__dirname, "verify-main-deploy-guard.js");
 const SUPERTREND_URGENT_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-exit.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
+const MAIN_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-main-single-side-bidask.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -209,6 +210,22 @@ function runMaterialWinMetricsProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMainSingleSideBidAskProof() {
+  const result = spawnSync(process.execPath, [MAIN_SINGLE_SIDE_BIDASK_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-main-single-side-bidask failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -220,6 +237,7 @@ const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
 const mainDeployGuardProof = runMainDeployGuardProof();
 const supertrendUrgentExitProof = runSupertrendUrgentExitProof();
 const materialWinMetricsProof = runMaterialWinMetricsProof();
+const mainSingleSideBidAskProof = runMainSingleSideBidAskProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -305,6 +323,23 @@ const checks = [
       mainDeployGuardProof?.source_markers?.leases_recorded_from_get_top_candidates === true &&
       mainDeployGuardProof?.source_markers?.executor_guard_wired === true &&
       mainDeployGuardProof?.source_markers?.deploy_guard_decision_logged === true,
+  },
+
+  {
+    file: 'scripts/verify-main-single-side-bidask.js',
+    label: '[Runtime] main SOL-only bid_ask deploy args normalize before safety checks',
+    test: () =>
+      mainSingleSideBidAskProof?.success === true &&
+      mainSingleSideBidAskProof?.config?.example_forceSingleSidedSolBidAsk === true &&
+      mainSingleSideBidAskProof?.repairs_and_rejections?.noForce?.args?.strategy === "spot" &&
+      mainSingleSideBidAskProof?.repairs_and_rejections?.spotRepair?.args?.strategy === "bid_ask" &&
+      mainSingleSideBidAskProof?.repairs_and_rejections?.dualSidedReject?.ok === false &&
+      mainSingleSideBidAskProof?.repairs_and_rejections?.dualSidedReject?.retryableToolArgs === true &&
+      Number(mainSingleSideBidAskProof?.repairs_and_rejections?.binsAboveRepair?.args?.bins_above) === 0 &&
+      Number(mainSingleSideBidAskProof?.repairs_and_rejections?.halfAmountRepair?.args?.amount_y) === 1 &&
+      mainSingleSideBidAskProof?.repairs_and_rejections?.upsideReject?.ok === false &&
+      mainSingleSideBidAskProof?.source_markers?.executor_active_strategy_gate === true &&
+      mainSingleSideBidAskProof?.source_markers?.agent_retryable_arg_rejection === true,
   },
 
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)

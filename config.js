@@ -222,6 +222,7 @@ export const config = {
   strategy: {
     strategy:  u.strategy  ?? "bid_ask",
     binsBelow: u.binsBelow ?? 69,
+    forceSingleSidedSolBidAsk: u.forceSingleSidedSolBidAsk ?? true,
     minSingleSidedSolBins: u.minSingleSidedSolBins ?? 5,
     minSingleSidedSolDownsidePct: u.minSingleSidedSolDownsidePct ?? null,
   },
