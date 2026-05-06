@@ -10,6 +10,10 @@ const DEFAULT_LOG_DIR = "./logs";
 const DEFAULT_HISTORY_RETENTION_MS = 60_000;
 const DEFAULT_MAX_HISTORY_POINTS = 120;
 const DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT = 2;
+const RANGE_PROXIMITY_ROLLING_MS = 60_000;
+const RANGE_EDGE_MIN_BINS = 2;
+const RANGE_EDGE_MAX_BINS = 6;
+const RANGE_EDGE_WIDTH_PCT = 0.10;
 
 export const WHALE_ESCAPE_NULL_FIELDS = Object.freeze({
   pool_lp_net_dep_usd_5m: null,
@@ -112,6 +116,165 @@ export function computeBinDistanceFields(position, activeBin) {
     bin_distance_to_lower: active != null && lowerBin != null ? active - lowerBin : null,
     bin_distance_to_upper: active != null && upperBin != null ? upperBin - active : null,
     range_width_bins: lowerBin != null && upperBin != null ? upperBin - lowerBin : null,
+  };
+}
+
+export function classifyRangeProximityZone({
+  activeBin = null,
+  lowerBin = null,
+  upperBin = null,
+} = {}) {
+  const active = asNumber(activeBin);
+  const lower = asNumber(lowerBin);
+  const upper = asNumber(upperBin);
+  if (active == null || lower == null || upper == null || upper <= lower) return "unknown";
+  if (active < lower) return "below_range";
+  if (active > upper) return "above_range";
+  const midpoint = lower + ((upper - lower) / 2);
+  return active <= midpoint ? "lower_half" : "upper_half";
+}
+
+function computeRangeEdgeThreshold(width) {
+  const rangeWidth = asNumber(width);
+  if (rangeWidth == null || rangeWidth < 0) return null;
+  if (rangeWidth === 0) return 0;
+  return Math.min(
+    RANGE_EDGE_MAX_BINS,
+    Math.max(RANGE_EDGE_MIN_BINS, Math.ceil(rangeWidth * RANGE_EDGE_WIDTH_PCT)),
+  );
+}
+
+function classifyRangeEdgeZone({
+  activeBin = null,
+  lowerBin = null,
+  upperBin = null,
+  edgeThresholdBins = null,
+} = {}) {
+  const active = asNumber(activeBin);
+  const lower = asNumber(lowerBin);
+  const upper = asNumber(upperBin);
+  const threshold = asNumber(edgeThresholdBins);
+  if (active == null || lower == null || upper == null || threshold == null) return null;
+  if (active < lower || active > upper) return null;
+  const distanceToLower = active - lower;
+  const distanceToUpper = upper - active;
+  if (distanceToLower > threshold && distanceToUpper > threshold) return null;
+  return distanceToLower <= distanceToUpper ? "near_lower_edge" : "near_upper_edge";
+}
+
+function buildRangeProximitySamples(previousState, currentSample, observedAtMs) {
+  const observed = asNumber(observedAtMs);
+  const windowStart = observed != null ? observed - RANGE_PROXIMITY_ROLLING_MS : null;
+  const previousSamples = Array.isArray(previousState?.samples) ? previousState.samples : [];
+  const fallbackObservedAtMs = asNumber(previousState?.observedAtMs) ?? asNumber(previousState?.zoneSinceMs);
+  const fallbackPrevious = previousSamples.length || fallbackObservedAtMs == null
+    ? []
+    : [{
+        observedAtMs: fallbackObservedAtMs,
+        zone: typeof previousState.zone === "string" ? previousState.zone : null,
+        edgeZone: typeof previousState.edgeZone === "string" ? previousState.edgeZone : null,
+      }];
+  return [
+    ...fallbackPrevious,
+    ...previousSamples,
+    currentSample,
+  ]
+    .filter((sample) => (
+      asNumber(sample?.observedAtMs) != null &&
+      (windowStart == null || sample.observedAtMs >= windowStart)
+    ))
+    .sort((a, b) => a.observedAtMs - b.observedAtMs);
+}
+
+function computeRollingRangeSeconds(samples, observedAtMs) {
+  const observed = asNumber(observedAtMs);
+  const totals = {
+    rolling_lower_half_sec_60s: null,
+    rolling_upper_half_sec_60s: null,
+    rolling_near_edge_sec_60s: null,
+    rolling_near_lower_edge_sec_60s: null,
+    rolling_near_upper_edge_sec_60s: null,
+  };
+  if (observed == null || !Array.isArray(samples) || !samples.length) return totals;
+  totals.rolling_lower_half_sec_60s = 0;
+  totals.rolling_upper_half_sec_60s = 0;
+  totals.rolling_near_edge_sec_60s = 0;
+  totals.rolling_near_lower_edge_sec_60s = 0;
+  totals.rolling_near_upper_edge_sec_60s = 0;
+  const windowStart = observed - RANGE_PROXIMITY_ROLLING_MS;
+  for (let index = 1; index < samples.length; index += 1) {
+    const previousObserved = asNumber(samples[index - 1]?.observedAtMs);
+    const currentObserved = asNumber(samples[index]?.observedAtMs);
+    if (previousObserved == null || currentObserved == null) continue;
+    const elapsedSec = Math.max(0, (currentObserved - Math.max(previousObserved, windowStart)) / 1000);
+    if (!Number.isFinite(elapsedSec) || elapsedSec <= 0) continue;
+    const zone = samples[index - 1].zone;
+    const edgeZone = samples[index - 1].edgeZone;
+    if (zone === "lower_half") totals.rolling_lower_half_sec_60s += elapsedSec;
+    if (zone === "upper_half") totals.rolling_upper_half_sec_60s += elapsedSec;
+    if (edgeZone) totals.rolling_near_edge_sec_60s += elapsedSec;
+    if (edgeZone === "near_lower_edge") totals.rolling_near_lower_edge_sec_60s += elapsedSec;
+    if (edgeZone === "near_upper_edge") totals.rolling_near_upper_edge_sec_60s += elapsedSec;
+  }
+  return {
+    rolling_lower_half_sec_60s: roundNumber(totals.rolling_lower_half_sec_60s, 3),
+    rolling_upper_half_sec_60s: roundNumber(totals.rolling_upper_half_sec_60s, 3),
+    rolling_near_edge_sec_60s: roundNumber(totals.rolling_near_edge_sec_60s, 3),
+    rolling_near_lower_edge_sec_60s: roundNumber(totals.rolling_near_lower_edge_sec_60s, 3),
+    rolling_near_upper_edge_sec_60s: roundNumber(totals.rolling_near_upper_edge_sec_60s, 3),
+  };
+}
+
+export function computeRangeProximityFields(position, activeBin, observedAtMs = null, previousState = null) {
+  const lowerBin = asNumber(position?.lower_bin);
+  const upperBin = asNumber(position?.upper_bin);
+  const active = asNumber(activeBin);
+  const width = lowerBin != null && upperBin != null ? upperBin - lowerBin : null;
+  const validWidth = width != null && width > 0;
+  const distanceToLower = active != null && lowerBin != null ? active - lowerBin : null;
+  const distanceToUpper = active != null && upperBin != null ? upperBin - active : null;
+  const positionPct = validWidth && distanceToLower != null ? (distanceToLower / width) * 100 : null;
+  const zone = classifyRangeProximityZone({ activeBin: active, lowerBin, upperBin });
+  const edgeThresholdBins = computeRangeEdgeThreshold(width);
+  const edgeZone = classifyRangeEdgeZone({
+    activeBin: active,
+    lowerBin,
+    upperBin,
+    edgeThresholdBins,
+  });
+  const previousZone = typeof previousState?.zone === "string" ? previousState.zone : null;
+  const previousSinceMs = asNumber(previousState?.zoneSinceMs);
+  const observed = asNumber(observedAtMs);
+  const zoneSinceMs = observed != null && zone !== "unknown" && zone === previousZone && previousSinceMs != null
+    ? previousSinceMs
+    : observed;
+  const timeInZoneMinutes = observed != null && zoneSinceMs != null && zone !== "unknown"
+    ? Math.max(0, (observed - zoneSinceMs) / 60_000)
+    : null;
+  const samples = buildRangeProximitySamples(previousState, {
+    observedAtMs: observed,
+    zone,
+    edgeZone,
+  }, observed);
+  const rollingFields = zone !== "unknown"
+    ? computeRollingRangeSeconds(samples, observed)
+    : computeRollingRangeSeconds([], null);
+
+  return {
+    bin_distance_to_lower: distanceToLower,
+    bin_distance_to_upper: distanceToUpper,
+    range_width_bins: width,
+    bin_distance_to_lower_pct_of_range: validWidth && distanceToLower != null ? roundNumber((distanceToLower / width) * 100, 3) : null,
+    bin_distance_to_upper_pct_of_range: validWidth && distanceToUpper != null ? roundNumber((distanceToUpper / width) * 100, 3) : null,
+    range_position_pct: positionPct != null ? roundNumber(positionPct, 3) : null,
+    range_proximity_zone: zone,
+    previous_range_proximity_zone: previousZone,
+    range_edge_zone: edgeZone,
+    range_edge_threshold_bins: edgeThresholdBins,
+    ...rollingFields,
+    time_in_current_range_zone_minutes: timeInZoneMinutes != null ? roundNumber(timeInZoneMinutes, 3) : null,
+    range_zone_since_ms: zoneSinceMs,
+    range_proximity_samples: samples,
   };
 }
 
@@ -375,6 +538,7 @@ export class ActiveBinOracleRecorder {
     this.pendingSubscriptions = new Set();
     this.timers = new Map();
     this.poolState = new Map();
+    this.positionProximityState = new Map();
     this.disabledReason = null;
   }
 
@@ -403,8 +567,10 @@ export class ActiveBinOracleRecorder {
 
   updatePositions(positions) {
     const nextByPool = new Map();
+    const activePositionIds = new Set();
     for (const position of Array.isArray(positions) ? positions : []) {
       if (!position?.pool || !position?.position) continue;
+      activePositionIds.add(position.position);
       if (position.lower_bin == null || position.upper_bin == null) continue;
       if (!nextByPool.has(position.pool)) nextByPool.set(position.pool, []);
       nextByPool.get(position.pool).push(position);
@@ -430,6 +596,9 @@ export class ActiveBinOracleRecorder {
     }
 
     this.positionsByPool = nextByPool;
+    for (const positionId of this.positionProximityState.keys()) {
+      if (!activePositionIds.has(positionId)) this.positionProximityState.delete(positionId);
+    }
 
     for (const pool of nextByPool.keys()) {
       this.subscribePool(pool).catch((error) => {
@@ -536,12 +705,30 @@ export class ActiveBinOracleRecorder {
         velocityFeatures,
         priceFeatures,
       );
-      const binDistanceFields = computeBinDistanceFields(position, activeBin);
+      const positionKey = position.position;
+      const rangeProximityFields = computeRangeProximityFields(
+        position,
+        activeBin,
+        observedAtMs,
+        this.positionProximityState.get(positionKey),
+      );
       const whaleEscapeSignal = classifyWhaleEscapeShadow({
         flow: whaleEscapeFlow,
-        binDistanceToLower: binDistanceFields.bin_distance_to_lower,
+        binDistanceToLower: rangeProximityFields.bin_distance_to_lower,
         pnlPct: position.pnl_pct,
       });
+      this.positionProximityState.set(positionKey, {
+        zone: rangeProximityFields.range_proximity_zone,
+        edgeZone: rangeProximityFields.range_edge_zone,
+        zoneSinceMs: rangeProximityFields.range_zone_since_ms,
+        observedAtMs,
+        samples: rangeProximityFields.range_proximity_samples,
+      });
+      const {
+        range_zone_since_ms: _rangeZoneSinceMs,
+        range_proximity_samples: _rangeProximitySamples,
+        ...rangeProximityLogFields
+      } = rangeProximityFields;
       return {
         timestamp: observedAt.toISOString(),
         pool,
@@ -551,7 +738,7 @@ export class ActiveBinOracleRecorder {
         active_price_per_lamport: activePricePerLamport,
         ...classification,
         ...whaleEscapeFlow,
-        ...binDistanceFields,
+        ...rangeProximityLogFields,
         ...whaleEscapeSignal,
         pnl_pct: position.pnl_pct ?? null,
         pnl_usd: position.pnl_usd ?? null,

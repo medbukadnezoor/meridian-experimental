@@ -67,6 +67,10 @@ function summarize(rows) {
   const candidateRows = rows.filter((row) => row.whale_escape_shadow_signal === "candidate");
   const flowRows = rows.filter((row) => asNumber(row.pool_lp_net_dep_usd_15m) != null);
   const distanceRows = rows.filter((row) => asNumber(row.bin_distance_to_lower) != null);
+  const proximityPctRows = rows.filter((row) => asNumber(row.range_position_pct) != null);
+  const timeInZoneRows = rows.filter((row) => asNumber(row.time_in_current_range_zone_minutes) != null);
+  const rangeEdgeRows = rows.filter((row) => typeof row.range_edge_zone === "string" && row.range_edge_zone);
+  const rollingDwellRows = rows.filter((row) => asNumber(row.rolling_lower_half_sec_60s) != null);
   const negativePnlRows = rows.filter((row) => asNumber(row.pnl_pct) != null && asNumber(row.pnl_pct) < 0);
   const signalNegativePnlRows = signalRows.filter((row) => asNumber(row.pnl_pct) != null && asNumber(row.pnl_pct) < 0);
 
@@ -76,6 +80,13 @@ function summarize(rows) {
     non_null_lp_flow_15m_pct: pct(flowRows.length, rows.length),
     bin_distance_coverage_count: distanceRows.length,
     bin_distance_coverage_pct: pct(distanceRows.length, rows.length),
+    range_position_pct_coverage_count: proximityPctRows.length,
+    range_position_pct_coverage_pct: pct(proximityPctRows.length, rows.length),
+    time_in_current_range_zone_count: timeInZoneRows.length,
+    time_in_current_range_zone_pct: pct(timeInZoneRows.length, rows.length),
+    range_edge_count: rangeEdgeRows.length,
+    rolling_dwell_coverage_count: rollingDwellRows.length,
+    rolling_dwell_coverage_pct: pct(rollingDwellRows.length, rows.length),
     whale_escape_watch_count: watchRows.length,
     whale_escape_candidate_count: candidateRows.length,
     whale_escape_signal_count: signalRows.length,
@@ -83,6 +94,8 @@ function summarize(rows) {
     signal_negative_pnl_count: signalNegativePnlRows.length,
     signal_negative_pnl_pct: pct(signalNegativePnlRows.length, signalRows.length),
     data_sources: groupBy(rows, "whale_escape_data_source"),
+    range_proximity_zones: groupBy(rows, "range_proximity_zone"),
+    range_edges: groupBy(rows, "range_edge_zone"),
     signal_pairs: groupBy(signalRows, "pair"),
     signal_pools: groupBy(signalRows, "pool"),
     examples: signalRows.slice(0, 10).map((row) => ({
@@ -95,6 +108,13 @@ function summarize(rows) {
       pnl_pct: row.pnl_pct ?? null,
       range_side: row.range_side ?? null,
       bin_distance_to_lower: row.bin_distance_to_lower ?? null,
+      range_position_pct: row.range_position_pct ?? null,
+      range_proximity_zone: row.range_proximity_zone ?? null,
+      range_edge_zone: row.range_edge_zone ?? null,
+      rolling_lower_half_sec_60s: row.rolling_lower_half_sec_60s ?? null,
+      rolling_upper_half_sec_60s: row.rolling_upper_half_sec_60s ?? null,
+      rolling_near_edge_sec_60s: row.rolling_near_edge_sec_60s ?? null,
+      time_in_current_range_zone_minutes: row.time_in_current_range_zone_minutes ?? null,
       pool_lp_net_dep_usd_15m: row.pool_lp_net_dep_usd_15m ?? null,
     })),
   };
@@ -112,6 +132,10 @@ function renderMarkdown(inputPath, summary) {
   lines.push(`- Rows: ${summary.row_count}`);
   lines.push(`- LP-flow 15m coverage: ${summary.non_null_lp_flow_15m_count} (${summary.non_null_lp_flow_15m_pct}%)`);
   lines.push(`- Bin-distance coverage: ${summary.bin_distance_coverage_count} (${summary.bin_distance_coverage_pct}%)`);
+  lines.push(`- Range-position pct coverage: ${summary.range_position_pct_coverage_count} (${summary.range_position_pct_coverage_pct}%)`);
+  lines.push(`- Time-in-zone coverage: ${summary.time_in_current_range_zone_count} (${summary.time_in_current_range_zone_pct}%)`);
+  lines.push(`- Near-edge rows: ${summary.range_edge_count}`);
+  lines.push(`- Rolling dwell coverage: ${summary.rolling_dwell_coverage_count} (${summary.rolling_dwell_coverage_pct}%)`);
   lines.push(`- Watch signals: ${summary.whale_escape_watch_count}`);
   lines.push(`- Candidate signals: ${summary.whale_escape_candidate_count}`);
   lines.push(`- Signal rows with negative API PnL: ${summary.signal_negative_pnl_count} (${summary.signal_negative_pnl_pct}%)`);
@@ -120,6 +144,16 @@ function renderMarkdown(inputPath, summary) {
   lines.push("");
   for (const source of summary.data_sources) lines.push(`- ${source.value}: ${source.count}`);
   if (!summary.data_sources.length) lines.push("- none");
+  lines.push("");
+  lines.push("## Range Proximity Zones");
+  lines.push("");
+  for (const zone of summary.range_proximity_zones) lines.push(`- ${zone.value}: ${zone.count}`);
+  if (!summary.range_proximity_zones.length) lines.push("- none");
+  lines.push("");
+  lines.push("## Range Edge Zones");
+  lines.push("");
+  for (const edge of summary.range_edges) lines.push(`- ${edge.value}: ${edge.count}`);
+  if (!summary.range_edges.length) lines.push("- none");
   lines.push("");
   lines.push("## Signal Pairs");
   lines.push("");
@@ -131,10 +165,10 @@ function renderMarkdown(inputPath, summary) {
   if (!summary.examples.length) {
     lines.push("No Whale Escape signal rows found.");
   } else {
-    lines.push("| Time | Pair | Signal | PnL % | Dist Lower | Net Dep 15m | Reason |");
-    lines.push("|---|---:|---:|---:|---:|---:|---|");
+    lines.push("| Time | Pair | Signal | PnL % | Zone | Edge | Lower 60s | Upper 60s | Edge 60s | Dist Lower | Net Dep 15m | Reason |");
+    lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
     for (const row of summary.examples) {
-      lines.push(`| ${row.timestamp} | ${row.pair || ""} | ${row.signal || ""} | ${row.pnl_pct ?? ""} | ${row.bin_distance_to_lower ?? ""} | ${row.pool_lp_net_dep_usd_15m ?? ""} | ${String(row.reason || "").replaceAll("|", "/")} |`);
+      lines.push(`| ${row.timestamp} | ${row.pair || ""} | ${row.signal || ""} | ${row.pnl_pct ?? ""} | ${row.range_proximity_zone ?? ""} | ${row.range_edge_zone ?? ""} | ${row.rolling_lower_half_sec_60s ?? ""} | ${row.rolling_upper_half_sec_60s ?? ""} | ${row.rolling_near_edge_sec_60s ?? ""} | ${row.bin_distance_to_lower ?? ""} | ${row.pool_lp_net_dep_usd_15m ?? ""} | ${String(row.reason || "").replaceAll("|", "/")} |`);
     }
   }
   lines.push("");
