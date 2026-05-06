@@ -31,6 +31,7 @@ const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-v
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const MAIN_DEPLOY_GUARD_VERIFIER_PATH = join(__dirname, "verify-main-deploy-guard.js");
 const SUPERTREND_URGENT_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-exit.js");
+const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -192,6 +193,22 @@ function runSupertrendUrgentExitProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMaterialWinMetricsProof() {
+  const result = spawnSync(process.execPath, [MATERIAL_WIN_METRICS_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-material-win-metrics failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -202,6 +219,7 @@ const fallingKnifeProof = runFallingKnifeVetoProof();
 const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
 const mainDeployGuardProof = runMainDeployGuardProof();
 const supertrendUrgentExitProof = runSupertrendUrgentExitProof();
+const materialWinMetricsProof = runMaterialWinMetricsProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -294,10 +312,11 @@ const checks = [
     file: 'pool-memory.js',
     label: '[Patch 6] Stop-loss-family cooldown on pool + base mint',
     test: src => {
-      const hasStopLossFamily = src.includes('function isStopLossFamilyCloseReason') && /stop.loss/i.test(src);
+      const hasStopLossFamily = src.includes('function isStopLossCooldownCloseReason') && /stop.loss/i.test(src);
       const hasEarlyDump = src.includes('function isEarlyDumpCloseReason') && /early.dump/i.test(src);
-      const hasMintCooldown = src.includes('setBaseMintCooldown') && src.includes('cooldownReason');
-      return hasStopLossFamily && hasEarlyDump && hasMintCooldown;
+      const hasRollingDrawdown = src.includes('function isRollingFastDrawdownCloseReason') && /rolling.fast.drawdown/i.test(src);
+      const hasMintCooldown = src.includes('setBaseMintCooldown') && src.includes('getStopLossCooldownReason');
+      return hasStopLossFamily && hasEarlyDump && hasRollingDrawdown && hasMintCooldown;
     },
   },
 
@@ -313,12 +332,15 @@ const checks = [
 
   {
     file: 'scripts/verify-early-dump-cooldown.js',
-    label: '[Runtime] Early-dump close writes pool and token cooldowns',
+    label: '[Runtime] Stop-loss-family closes write pool and token cooldowns',
     test: () =>
       earlyDumpProof?.success === true &&
-      earlyDumpProof?.closeReasonMatched === true &&
-      earlyDumpProof?.poolCooldownReason === 'early dump' &&
-      earlyDumpProof?.tokenCooldownReason === 'early dump' &&
+      earlyDumpProof?.earlyDump?.closeReasonMatched === true &&
+      earlyDumpProof?.earlyDump?.poolCooldownReason === 'early dump' &&
+      earlyDumpProof?.earlyDump?.tokenCooldownReason === 'early dump' &&
+      earlyDumpProof?.rollingFastDrawdown?.closeReasonMatched === true &&
+      earlyDumpProof?.rollingFastDrawdown?.poolCooldownReason === 'rolling fast drawdown' &&
+      earlyDumpProof?.rollingFastDrawdown?.tokenCooldownReason === 'rolling fast drawdown' &&
       earlyDumpProof?.tempStateFileCreated === true &&
         earlyDumpProof?.tempDirRemoved === true,
   },
@@ -419,6 +441,18 @@ const checks = [
       src.includes('pnl-snapshots-${dateStr}.jsonl') &&
       src.includes('config.management.pnlSnapshotLoggingEnabled') &&
       src.includes('appendPnlSnapshot(null, p, exit)'),
+  },
+
+  {
+    file: 'scripts/verify-material-win-metrics.js',
+    label: '[Runtime] Material-win metrics classify dust/low-yield neutrals and can feed Darwin learning',
+    test: () =>
+      materialWinMetricsProof?.success === true &&
+      materialWinMetricsProof?.summary?.raw_sample_count === 9 &&
+      materialWinMetricsProof?.summary?.material_sample_count === 6 &&
+      materialWinMetricsProof?.darwinProof?.material_learning_records === 4 &&
+      materialWinMetricsProof?.darwinProof?.neutral_excluded === 3 &&
+      materialWinMetricsProof?.ownerLabelProof?.thresholdsCommand === true,
   },
 
   {

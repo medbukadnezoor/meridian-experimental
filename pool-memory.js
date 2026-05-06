@@ -8,6 +8,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { config } from "./config.js";
+import { classifyMaterialOutcome } from "./performance-metrics.js";
 
 const POOL_MEMORY_FILE = "./pool-memory.json";
 const MAX_NOTE_LENGTH = 280;
@@ -49,9 +50,19 @@ function isEarlyDumpCloseReason(reason) {
   return /early.dump/i.test(String(reason || ""));
 }
 
-function isStopLossFamilyCloseReason(reason) {
+function isRollingFastDrawdownCloseReason(reason) {
+  return /rolling.fast.drawdown/i.test(String(reason || ""));
+}
+
+function isStopLossCooldownCloseReason(reason) {
   const text = String(reason || "");
-  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text);
+  return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text) || isRollingFastDrawdownCloseReason(text);
+}
+
+function getStopLossCooldownReason(reason) {
+  if (isEarlyDumpCloseReason(reason)) return "early dump";
+  if (isRollingFastDrawdownCloseReason(reason)) return "rolling fast drawdown";
+  return "stop loss";
 }
 
 function isAdjustedWinRateExcludedReason(reason) {
@@ -70,6 +81,18 @@ function isFeeGeneratingDeploy(deploy) {
   const hasFees = (Number.isFinite(feesUsd) && feesUsd > 0) || (Number.isFinite(feesSol) && feesSol > 0);
   if (!hasFees) return false;
   return Number.isFinite(feeEarnedPct) && feeEarnedPct >= minFeeEarnedPct;
+}
+
+function emptyMaterialStats() {
+  return {
+    material_win_rate: 0,
+    material_win_rate_sample_count: 0,
+    material_loss_rate: 0,
+    neutral_close_count: 0,
+    low_yield_neutral_count: 0,
+    dust_neutral_count: 0,
+    avg_material_pnl_pct: null,
+  };
 }
 
 function setPoolCooldown(entry, hours, reason) {
@@ -154,6 +177,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
       win_rate: 0,
       adjusted_win_rate: 0,
       adjusted_win_rate_sample_count: 0,
+      ...emptyMaterialStats(),
       last_deployed_at: null,
       last_outcome: null,
       notes: [],
@@ -173,14 +197,32 @@ export function recordPoolDeploy(poolAddress, deployData) {
     range_efficiency: deployData.range_efficiency ?? null,
     minutes_held: deployData.minutes_held ?? null,
     close_reason: deployData.close_reason || null,
+    raw_win: deployData.raw_win ?? null,
+    material_outcome: deployData.material_outcome ?? null,
+    material_win: deployData.material_win ?? null,
+    material_loss: deployData.material_loss ?? null,
+    neutral_reason: deployData.neutral_reason ?? null,
+    close_reason_bucket: deployData.close_reason_bucket ?? null,
     strategy: deployData.strategy || null,
     volatility_at_deploy: deployData.volatility ?? null,
   };
 
+  const materialClassification = classifyMaterialOutcome(deploy, config);
+  Object.assign(deploy, {
+    raw_win: deploy.raw_win ?? materialClassification.raw_win,
+    material_outcome: deploy.material_outcome ?? materialClassification.material_outcome,
+    material_win: deploy.material_win ?? materialClassification.material_win,
+    material_loss: deploy.material_loss ?? materialClassification.material_loss,
+    neutral_reason: deploy.neutral_reason ?? materialClassification.neutral_reason,
+    close_reason_bucket: deploy.close_reason_bucket ?? materialClassification.close_reason_bucket,
+  });
+
   entry.deploys.push(deploy);
   entry.total_deploys = entry.deploys.length;
   entry.last_deployed_at = deploy.closed_at;
-  entry.last_outcome = (deploy.pnl_pct ?? 0) >= 0 ? "profit" : "loss";
+  entry.last_outcome = deploy.material_outcome === "neutral"
+    ? `${deploy.close_reason_bucket || deploy.neutral_reason || "neutral"} neutral`
+    : deploy.material_outcome;
 
   // Recompute aggregates
   const withPnl = entry.deploys.filter((d) => d.pnl_pct != null);
@@ -197,6 +239,25 @@ export function recordPoolDeploy(poolAddress, deployData) {
   entry.adjusted_win_rate = adjusted.length > 0
     ? Math.round((adjusted.filter((d) => d.pnl_pct >= 0).length / adjusted.length) * 10000) / 100
     : 0;
+
+  const classified = withPnl.map((d) => ({ ...d, ...classifyMaterialOutcome(d, config) }));
+  const materialSamples = classified.filter((d) => d.material_win || d.material_loss);
+  const materialWins = materialSamples.filter((d) => d.material_win).length;
+  const materialLosses = materialSamples.filter((d) => d.material_loss).length;
+  const materialPnl = materialSamples.map((d) => Number(d.pnl_pct)).filter(Number.isFinite);
+  entry.material_win_rate_sample_count = materialSamples.length;
+  entry.material_win_rate = materialSamples.length > 0
+    ? Math.round((materialWins / materialSamples.length) * 10000) / 100
+    : 0;
+  entry.material_loss_rate = materialSamples.length > 0
+    ? Math.round((materialLosses / materialSamples.length) * 10000) / 100
+    : 0;
+  entry.neutral_close_count = classified.filter((d) => d.material_outcome === "neutral").length;
+  entry.low_yield_neutral_count = classified.filter((d) => d.neutral_reason === "low_yield").length;
+  entry.dust_neutral_count = classified.filter((d) => d.neutral_reason === "dust").length;
+  entry.avg_material_pnl_pct = materialPnl.length > 0
+    ? Math.round((materialPnl.reduce((sum, value) => sum + value, 0) / materialPnl.length) * 100) / 100
+    : null;
 
   if (deployData.base_mint && !entry.base_mint) {
     entry.base_mint = deployData.base_mint;
@@ -226,10 +287,11 @@ export function recordPoolDeploy(poolAddress, deployData) {
   // Set cooldown for stop-loss-family closes — token dumped on us, don't redeploy soon.
   // Early dump exits return STOP_LOSS and older records may be prefixed as
   // "Trailing TP: Early dump...", so classify by close-reason content.
+  // Rolling fast-drawdown exits are emergency stop-loss-family closes too.
   // Duration configurable via config.management.stopLossCooldownHours (default: 12h).
-  if (isStopLossFamilyCloseReason(deploy.close_reason)) {
+  if (isStopLossCooldownCloseReason(deploy.close_reason)) {
     const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
-    const cooldownReason = isEarlyDumpCloseReason(deploy.close_reason) ? "early dump" : "stop loss";
+    const cooldownReason = getStopLossCooldownReason(deploy.close_reason);
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, cooldownReason);
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, cooldownReason);
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (${cooldownReason} close)`);
@@ -393,6 +455,13 @@ export function getPoolMemory({ pool_address }) {
     win_rate: entry.win_rate,
     adjusted_win_rate: entry.adjusted_win_rate ?? 0,
     adjusted_win_rate_sample_count: entry.adjusted_win_rate_sample_count ?? 0,
+    material_win_rate: entry.material_win_rate ?? 0,
+    material_win_rate_sample_count: entry.material_win_rate_sample_count ?? 0,
+    material_loss_rate: entry.material_loss_rate ?? 0,
+    neutral_close_count: entry.neutral_close_count ?? 0,
+    low_yield_neutral_count: entry.low_yield_neutral_count ?? 0,
+    dust_neutral_count: entry.dust_neutral_count ?? 0,
+    avg_material_pnl_pct: entry.avg_material_pnl_pct ?? null,
     last_deployed_at: entry.last_deployed_at,
     last_outcome: entry.last_outcome,
     cooldown_until: entry.cooldown_until || null,
@@ -423,6 +492,7 @@ export function recordPositionSnapshot(poolAddress, snapshot) {
       win_rate: 0,
       adjusted_win_rate: 0,
       adjusted_win_rate_sample_count: 0,
+      ...emptyMaterialStats(),
       last_deployed_at: null,
       last_outcome: null,
       notes: [],
@@ -465,7 +535,10 @@ export function recallForPool(poolAddress) {
 
   // Deploy history summary
   if (entry.total_deploys > 0) {
-    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, win rate ${entry.win_rate}%, last outcome: ${entry.last_outcome}`);
+    const materialText = entry.material_win_rate_sample_count > 0
+      ? `, material WR ${entry.material_win_rate}% (${entry.material_win_rate_sample_count} material / ${entry.neutral_close_count ?? 0} neutral)`
+      : "";
+    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, raw WR ${entry.win_rate}%${materialText}, last outcome: ${entry.last_outcome}`);
   }
 
   if (entry.cooldown_until && new Date(entry.cooldown_until) > new Date()) {

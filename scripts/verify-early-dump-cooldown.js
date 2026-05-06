@@ -36,9 +36,6 @@ try {
     import(pathToFileURL(join(ROOT, "config.js")).href),
   ]);
 
-  const poolAddress = "EarlyDumpPool111111111111111111111111111111";
-  const baseMint = "EarlyDumpMint111111111111111111111111111111";
-  const closeReason = "Trailing TP: Early dump: PnL -7.58% <= -7% within first 3.94m (limit: 20m)";
   const cooldownHours = Number(config.management?.stopLossCooldownHours ?? 12);
 
   if (!Number.isFinite(cooldownHours)) {
@@ -46,18 +43,41 @@ try {
   }
 
   const before = Date.now();
-  recordPoolDeploy(poolAddress, {
-    pool_name: "uncraft-SOL proof",
-    base_mint: baseMint,
-    deployed_at: "2026-04-24T00:00:00.000Z",
-    closed_at: "2026-04-24T00:03:56.000Z",
-    pnl_pct: -7.58,
-    pnl_usd: -0.15,
-    range_efficiency: 0,
-    minutes_held: 3.94,
-    close_reason: closeReason,
-    strategy: "sol_dca_accumulator",
-  });
+  const scenarios = [
+    {
+      key: "earlyDump",
+      poolAddress: "EarlyDumpPool111111111111111111111111111111",
+      baseMint: "EarlyDumpMint111111111111111111111111111111",
+      poolName: "uncraft-SOL proof",
+      closeReason: "Trailing TP: Early dump: PnL -7.58% <= -7% within first 3.94m (limit: 20m)",
+      cooldownReason: "early dump",
+      pnlPct: -7.58,
+    },
+    {
+      key: "rollingFastDrawdown",
+      poolAddress: "RollingDrawdownPool11111111111111111111111",
+      baseMint: "RollingDrawdownMint11111111111111111111111",
+      poolName: "rolling-SOL proof",
+      closeReason: "Rolling fast drawdown: peak 4.25% -> current -3.14% (drop 7.39pp within 90m)",
+      cooldownReason: "rolling fast drawdown",
+      pnlPct: -3.14,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    recordPoolDeploy(scenario.poolAddress, {
+      pool_name: scenario.poolName,
+      base_mint: scenario.baseMint,
+      deployed_at: "2026-04-24T00:00:00.000Z",
+      closed_at: "2026-04-24T00:03:56.000Z",
+      pnl_pct: scenario.pnlPct,
+      pnl_usd: -0.15,
+      range_efficiency: 0,
+      minutes_held: 3.94,
+      close_reason: scenario.closeReason,
+      strategy: "sol_dca_accumulator",
+    });
+  }
   const after = Date.now();
 
   if (!existsSync(poolMemoryPath)) {
@@ -65,39 +85,47 @@ try {
   }
 
   const db = JSON.parse(readFileSync(poolMemoryPath, "utf8"));
-  const entry = db[poolAddress];
-  if (!entry) {
-    throw new Error("Proof pool was not recorded");
-  }
-
-  const poolCooldownUntilMs = Date.parse(entry.cooldown_until || "");
-  const tokenCooldownUntilMs = Date.parse(entry.base_mint_cooldown_until || "");
   const expectedMs = cooldownHours * 60 * 60 * 1000;
   const minExpected = before + expectedMs - 2000;
   const maxExpected = after + expectedMs + 2000;
+  const results = {};
 
-  if (entry.cooldown_reason !== "early dump") {
-    throw new Error(`Expected pool cooldown reason "early dump", got ${entry.cooldown_reason}`);
-  }
-  if (entry.base_mint_cooldown_reason !== "early dump") {
-    throw new Error(`Expected token cooldown reason "early dump", got ${entry.base_mint_cooldown_reason}`);
-  }
-  if (!Number.isFinite(poolCooldownUntilMs) || poolCooldownUntilMs < minExpected || poolCooldownUntilMs > maxExpected) {
-    throw new Error(`Pool cooldown timestamp outside expected ${cooldownHours}h window`);
-  }
-  if (!Number.isFinite(tokenCooldownUntilMs) || tokenCooldownUntilMs < minExpected || tokenCooldownUntilMs > maxExpected) {
-    throw new Error(`Token cooldown timestamp outside expected ${cooldownHours}h window`);
+  for (const scenario of scenarios) {
+    const entry = db[scenario.poolAddress];
+    if (!entry) {
+      throw new Error(`Proof pool was not recorded: ${scenario.key}`);
+    }
+
+    const poolCooldownUntilMs = Date.parse(entry.cooldown_until || "");
+    const tokenCooldownUntilMs = Date.parse(entry.base_mint_cooldown_until || "");
+
+    if (entry.cooldown_reason !== scenario.cooldownReason) {
+      throw new Error(`Expected pool cooldown reason "${scenario.cooldownReason}", got ${entry.cooldown_reason}`);
+    }
+    if (entry.base_mint_cooldown_reason !== scenario.cooldownReason) {
+      throw new Error(`Expected token cooldown reason "${scenario.cooldownReason}", got ${entry.base_mint_cooldown_reason}`);
+    }
+    if (!Number.isFinite(poolCooldownUntilMs) || poolCooldownUntilMs < minExpected || poolCooldownUntilMs > maxExpected) {
+      throw new Error(`Pool cooldown timestamp outside expected ${cooldownHours}h window for ${scenario.key}`);
+    }
+    if (!Number.isFinite(tokenCooldownUntilMs) || tokenCooldownUntilMs < minExpected || tokenCooldownUntilMs > maxExpected) {
+      throw new Error(`Token cooldown timestamp outside expected ${cooldownHours}h window for ${scenario.key}`);
+    }
+
+    results[scenario.key] = {
+      closeReasonMatched: entry.deploys?.[0]?.close_reason === scenario.closeReason,
+      poolCooldownReason: entry.cooldown_reason,
+      tokenCooldownReason: entry.base_mint_cooldown_reason,
+      poolCooldownUntil: entry.cooldown_until,
+      tokenCooldownUntil: entry.base_mint_cooldown_until,
+    };
   }
 
   proof = {
     success: true,
-    scenario: "legacy-prefixed early-dump close reason",
-    closeReasonMatched: entry.deploys?.[0]?.close_reason === closeReason,
+    scenario: "stop-loss-family cooldown classification",
     cooldownHours,
-    poolCooldownReason: entry.cooldown_reason,
-    tokenCooldownReason: entry.base_mint_cooldown_reason,
-    poolCooldownUntil: entry.cooldown_until,
-    tokenCooldownUntil: entry.base_mint_cooldown_until,
+    ...results,
     tempStateFileCreated: true,
   };
 } catch (error) {

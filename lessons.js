@@ -11,6 +11,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { log } from "./logger.js";
 import { getSharedLessonsForPrompt, pushHiveLesson, pushHivePerformanceEvent } from "./hivemind.js";
+import { classifyMaterialOutcome, summarizeMaterialPerformance } from "./performance-metrics.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
@@ -72,6 +73,12 @@ function save(data) {
  */
 export async function recordPerformance(perf) {
   const data = load();
+  let liveConfig = null;
+
+  try {
+    const { config } = await import("./config.js");
+    liveConfig = config;
+  } catch { /* material classification has defaults */ }
 
   // Guard against unit-mixed records where a SOL-sized final value is
   // accidentally written into a USD field (e.g. final_value_usd = 2 for a 2 SOL close).
@@ -109,11 +116,18 @@ export async function recordPerformance(perf) {
     return;
   }
 
+  const roundedPnlPct = Math.round(pnl_pct * 100) / 100;
+  const materialClassification = classifyMaterialOutcome({
+    ...perf,
+    pnl_pct: roundedPnlPct,
+  }, liveConfig ?? {});
+
   const entry = {
     ...perf,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
-    pnl_pct: Math.round(pnl_pct * 100) / 100,
+    pnl_pct: roundedPnlPct,
     range_efficiency: Math.round(range_efficiency * 10) / 10,
+    ...materialClassification,
     recorded_at: new Date().toISOString(),
   };
 
@@ -147,12 +161,16 @@ export async function recordPerformance(perf) {
       fees_earned_sol: perf.fees_earned_sol,
       fee_earned_pct: perf.initial_value_usd > 0 ? ((perf.fees_earned_usd || 0) / perf.initial_value_usd) * 100 : null,
       close_reason: perf.close_reason,
+      raw_win: entry.raw_win,
+      material_outcome: entry.material_outcome,
+      material_win: entry.material_win,
+      material_loss: entry.material_loss,
+      neutral_reason: entry.neutral_reason,
+      close_reason_bucket: entry.close_reason_bucket,
       strategy: perf.strategy,
       volatility: perf.volatility,
     });
   }
-
-  let liveConfig = null;
 
   // Evolve thresholds every 5 closed positions
   if (data.performance.length % MIN_EVOLVE_POSITIONS === 0) {
@@ -692,17 +710,28 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
       range_efficiency: r.range_efficiency,
       minutes_held: r.minutes_held,
       close_reason: r.close_reason,
+      raw_win: r.raw_win,
+      material_outcome: r.material_outcome,
+      material_win: r.material_win,
+      material_loss: r.material_loss,
+      neutral_reason: r.neutral_reason,
+      close_reason_bucket: r.close_reason_bucket,
       closed_at: r.recorded_at,
     }));
 
   const totalPnl = filtered.reduce((s, r) => s + (r.pnl_usd ?? 0), 0);
   const wins = filtered.filter((r) => r.pnl_usd > 0).length;
+  const material = summarizeMaterialPerformance(filtered);
 
   return {
     hours,
     count: filtered.length,
     total_pnl_usd: Math.round(totalPnl * 100) / 100,
     win_rate_pct: filtered.length > 0 ? Math.round((wins / filtered.length) * 100) : null,
+    raw_win_rate_pct: material.raw_win_rate_pct,
+    material_win_rate_pct: material.material_decision_win_rate_pct,
+    material_sample_count: material.material_sample_count,
+    neutral_count: material.neutral_count,
     positions: filtered,
   };
 }
@@ -720,6 +749,7 @@ export function getPerformanceSummary() {
   const avgPnlPct = p.reduce((s, x) => s + x.pnl_pct, 0) / p.length;
   const avgRangeEfficiency = p.reduce((s, x) => s + x.range_efficiency, 0) / p.length;
   const wins = p.filter((x) => x.pnl_usd > 0).length;
+  const material = summarizeMaterialPerformance(p);
 
   return {
     total_positions_closed: p.length,
@@ -727,6 +757,12 @@ export function getPerformanceSummary() {
     avg_pnl_pct: Math.round(avgPnlPct * 100) / 100,
     avg_range_efficiency_pct: Math.round(avgRangeEfficiency * 10) / 10,
     win_rate_pct: Math.round((wins / p.length) * 100),
+    raw_win_rate_pct: material.raw_win_rate_pct,
+    material_win_rate_pct: material.material_decision_win_rate_pct,
+    material_sample_count: material.material_sample_count,
+    neutral_count: material.neutral_count,
+    low_yield_neutral_count: material.low_yield_neutral_count,
+    dust_neutral_count: material.dust_neutral_count,
     total_lessons: data.lessons.length,
   };
 }

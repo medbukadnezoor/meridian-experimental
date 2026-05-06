@@ -271,6 +271,18 @@ export const config = {
     meanReversionRate:     u.darwinMeanReversionRate     ?? 0.02,
   },
 
+  // ─── Performance Classification ───────
+  performance: {
+    materialWinPct: u.materialWinPct ?? 1.0,
+    materialLossPct: u.materialLossPct ?? -1.0,
+    dustNeutralAbsPct: u.dustNeutralAbsPct ?? 1.0,
+    neutralCloseReasonBuckets: Array.isArray(u.neutralCloseReasonBuckets)
+      ? u.neutralCloseReasonBuckets
+      : ["low_yield", "operator"],
+    darwinUseMaterialOutcomes: u.darwinUseMaterialOutcomes ?? true,
+    darwinExcludeNeutralOutcomes: u.darwinExcludeNeutralOutcomes ?? true,
+  },
+
   // ─── Shadow Autoresearch ───────────────
   autoresearch: {
     enabled:                    u.autoresearchEnabled                    ?? true,
