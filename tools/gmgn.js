@@ -38,11 +38,29 @@ const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const GMGN_BASE = "https://openapi.gmgn.ai/v1";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "3h", "6h", "24h"]);
+const MIN_VOLATILITY_TIMEFRAME = "30m";
+const TIMEFRAME_MINUTES = Object.freeze({
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "12h": 720,
+  "24h": 1440,
+});
 let lastGmgnRequestAt = 0;
 let gmgnRequestQueue = Promise.resolve();
 
 // Tags indicating smart-money tool activity (positive context)
 const SMART_TOOL_TAGS = new Set(["photon", "padre", "gmgn", "axiom", "bullx", "trojan", "gmgnkol"]);
+
+function getVolatilityTimeframe(sourceTimeframe) {
+  const source = String(sourceTimeframe || "").trim();
+  const sourceMinutes = TIMEFRAME_MINUTES[source];
+  const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
+  return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
+}
 
 /**
  * Fetch top traders for a token from GMGN and compute risk signals.
@@ -437,7 +455,7 @@ async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
 }
 
 async function fetchPoolDetailDirect(poolAddress) {
-  const timeframe = encodeURIComponent(config.screening?.timeframe || "5m");
+  const timeframe = encodeURIComponent(getVolatilityTimeframe(config.screening?.timeframe || "5m"));
   const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${timeframe}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
   if (!res.ok) return null;
@@ -500,7 +518,8 @@ function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, ho
     fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
     active_tvl: round(activeTvl),
     fee_active_tvl_ratio: feeActiveTvlRatio,
-    volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(2)) : null,
+    volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(4)) : null,
+    volatility_timeframe: getVolatilityTimeframe(config.screening?.timeframe || "5m"),
     holders: num(token.holder_count || info.holder_count),
     mcap: round(num(token.market_cap || (num(info.price) * num(info.circulating_supply)))),
     organic_score: optionalNum(poolDetail?.token_x?.organic_score ?? pool.token_x?.organic_score),
