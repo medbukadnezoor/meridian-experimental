@@ -526,6 +526,25 @@ export async function deployPosition({
   let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
   let activeBinsAbove = bins_above ?? 0;
 
+  if (volatility != null && (!Number.isFinite(Number(volatility)) || Number(volatility) <= 0)) {
+    log("deploy_reject", `Invalid pool volatility for ${pool_address.slice(0, 8)}: ${volatility}`);
+    appendDecision({
+      type: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      pool_name: pool_name || pool_address,
+      summary: "Invalid pool volatility",
+      reason: `Invalid pool volatility: ${volatility}`,
+      risks: ["No on-chain deploy attempt was made"],
+      metrics: {
+        source: "dlmm.deploy.invalid_volatility",
+        volatility,
+      },
+      rejected: ["invalid_volatility"],
+    });
+    return { success: false, error: `Invalid pool volatility: ${volatility}` };
+  }
+
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
