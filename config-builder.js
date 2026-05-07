@@ -12,6 +12,7 @@ export function normalizeOptionalString(value) {
 }
 
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
+const SCREENING_SOURCES = new Set(["meteora", "gmgn"]);
 
 export function normalizeScreeningReasoningEffort(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
@@ -32,6 +33,11 @@ export function normalizePositiveInteger(value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+}
+
+export function normalizeScreeningSource(value) {
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
 }
 
 export function firstNonEmptyString(...values) {
@@ -88,8 +94,19 @@ export function loadUserConfig(userConfigPath) {
     : {};
 }
 
+function configValue(configObject, key, legacyObject, legacyKey, fallback) {
+  return configObject?.[key] ?? legacyObject?.[legacyKey] ?? fallback;
+}
+
+function configArray(configObject, key, legacyObject, legacyKey, fallback) {
+  if (Array.isArray(configObject?.[key])) return configObject[key];
+  if (Array.isArray(legacyObject?.[legacyKey])) return legacyObject[legacyKey];
+  return fallback;
+}
+
 export function applyUserConfigToEnv(userConfig, env = process.env) {
   const u = userConfig ?? {};
+  const g = u.gmgn ?? {};
   if (u.rpcUrl) env.RPC_URL ||= u.rpcUrl;
   if (u.walletKey) env.WALLET_PRIVATE_KEY ||= u.walletKey;
   if (u.llmModel) env.LLM_MODEL ||= u.llmModel;
@@ -101,10 +118,15 @@ export function applyUserConfigToEnv(userConfig, env = process.env) {
   if (u.dryRun !== undefined) env.DRY_RUN ||= String(u.dryRun);
   if (u.publicApiKey) env.PUBLIC_API_KEY ||= u.publicApiKey;
   if (u.agentMeridianApiUrl) env.AGENT_MERIDIAN_API_URL ||= u.agentMeridianApiUrl;
+  {
+    const gmgnApiKey = resolveEnvReference(g.apiKey ?? u.gmgnApiKey, env);
+    if (gmgnApiKey) env.GMGN_API_KEY ||= gmgnApiKey;
+  }
 }
 
 export function buildConfig(userConfig = {}, env = process.env) {
   const u = userConfig ?? {};
+  const g = u.gmgn ?? {};
   const indicatorUserConfig = u.chartIndicators ?? {};
   const performanceUserConfig = u.performance ?? {};
   const fallbackModel = normalizeOptionalString(u.fallbackModel);
@@ -127,6 +149,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
     },
 
     screening: {
+      source: normalizeScreeningSource(u.screening?.source ?? u.screeningSource),
       excludeHighSupplyConcentration: u.excludeHighSupplyConcentration ?? true,
       minFeeActiveTvlRatio: u.minFeeActiveTvlRatio ?? 0.05,
       minTvl: u.minTvl ?? 10_000,
@@ -167,6 +190,44 @@ export function buildConfig(userConfig = {}, env = process.env) {
       suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
       suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
       suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
+    },
+
+    gmgn: {
+      apiKey: firstNonEmptyString(resolveEnvReference(g.apiKey, env), resolveEnvReference(u.gmgnApiKey, env), env.GMGN_API_KEY) ?? null,
+      baseUrl: firstNonEmptyString(g.baseUrl, u.gmgnBaseUrl, "https://openapi.gmgn.ai") ?? "https://openapi.gmgn.ai",
+      interval: configValue(g, "interval", u, "gmgnInterval", "1h"),
+      orderBy: configValue(g, "orderBy", u, "gmgnOrderBy", "volume"),
+      direction: configValue(g, "direction", u, "gmgnDirection", "desc"),
+      limit: configValue(g, "limit", u, "gmgnLimit", 100),
+      enrichLimit: configValue(g, "enrichLimit", u, "gmgnEnrichLimit", 20),
+      requestDelayMs: configValue(g, "requestDelayMs", u, "gmgnRequestDelayMs", 2500),
+      maxRetries: configValue(g, "maxRetries", u, "gmgnMaxRetries", 0),
+      holdersLimit: configValue(g, "holdersLimit", u, "gmgnHoldersLimit", 100),
+      filters: configArray(g, "filters", u, "gmgnFilters", ["renounced", "frozen", "not_wash_trading"]),
+      platforms: configArray(g, "platforms", u, "gmgnPlatforms", ["Pump.fun", "meteora_virtual_curve", "pool_meteora"]),
+      minMcap: configValue(g, "minMcap", u, "gmgnMinMcap", u.minMcap ?? 150_000),
+      maxMcap: configValue(g, "maxMcap", u, "gmgnMaxMcap", u.maxMcap ?? 10_000_000),
+      minTvl: configValue(g, "minTvl", u, "gmgnMinTvl", u.minTvl ?? 10_000),
+      minVolume: configValue(g, "minVolume", u, "gmgnMinVolume", u.minVolume ?? 500),
+      minHolders: configValue(g, "minHolders", u, "gmgnMinHolders", u.minHolders ?? 500),
+      minTokenAgeHours: configValue(g, "minTokenAgeHours", u, "gmgnMinTokenAgeHours", u.minTokenAgeHours ?? null),
+      maxTokenAgeHours: configValue(g, "maxTokenAgeHours", u, "gmgnMaxTokenAgeHours", u.maxTokenAgeHours ?? null),
+      minSmartDegenCount: configValue(g, "minSmartDegenCount", u, "gmgnMinSmartDegenCount", 0),
+      requireKol: configValue(g, "requireKol", u, "gmgnRequireKol", false),
+      minKolCount: configValue(g, "minKolCount", u, "gmgnMinKolCount", 1),
+      minTotalFeeSol: configValue(g, "minTotalFeeSol", u, "gmgnMinTotalFeeSol", u.minTokenFeesSol ?? 30),
+      athFilterPct: configValue(g, "athFilterPct", u, "gmgnAthFilterPct", u.athFilterPct ?? null),
+      maxTop10HolderRate: configValue(g, "maxTop10HolderRate", u, "gmgnMaxTop10HolderRate", (u.maxTop10Pct ?? 60) / 100),
+      maxBundlerRate: configValue(g, "maxBundlerRate", u, "gmgnMaxBundlerRate", (u.maxBundlePct ?? 30) / 100),
+      maxRatTraderRate: configValue(g, "maxRatTraderRate", u, "gmgnMaxRatTraderRate", 0.2),
+      maxFreshWalletRate: configValue(g, "maxFreshWalletRate", u, "gmgnMaxFreshWalletRate", 0.2),
+      maxDevTeamHoldRate: configValue(g, "maxDevTeamHoldRate", u, "gmgnMaxDevTeamHoldRate", 0.02),
+      maxBotDegenRate: configValue(g, "maxBotDegenRate", u, "gmgnMaxBotDegenRate", (u.maxBotHoldersPct ?? 30) / 100),
+      maxSniperHoldRate: configValue(g, "maxSniperHoldRate", u, "gmgnMaxSniperHoldRate", 0.3),
+      preferredKolNames: configArray(g, "preferredKolNames", u, "gmgnPreferredKolNames", []),
+      preferredKolMinHoldPct: configValue(g, "preferredKolMinHoldPct", u, "gmgnPreferredKolMinHoldPct", 1),
+      dumpKolNames: configArray(g, "dumpKolNames", u, "gmgnDumpKolNames", []),
+      dumpKolMinHoldPct: configValue(g, "dumpKolMinHoldPct", u, "gmgnDumpKolMinHoldPct", 0.5),
     },
 
     management: {

@@ -13,6 +13,7 @@ export {
   firstNonEmptyString,
   isDeepSeekBaseUrl,
   isDeepSeekModel,
+  normalizeScreeningSource,
   resolveEnvReference,
   resolveRoleApiKey,
   INTERNAL_FALLBACK_MODEL,
@@ -62,6 +63,9 @@ export function reloadScreeningThresholds() {
   try {
     const fresh = loadUserConfig(USER_CONFIG_PATH);
     const s = config.screening;
+    if (fresh.screening?.source != null || fresh.screeningSource != null) {
+      s.source = normalizeScreeningSource(fresh.screening?.source ?? fresh.screeningSource);
+    }
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
