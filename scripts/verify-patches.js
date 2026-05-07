@@ -40,6 +40,7 @@ const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-
 const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-bollinger-canary.js");
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
+const NANOCAP_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-nanocap-gmgn-first-discovery.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -379,6 +380,27 @@ function runSupertrendUrgentRuntimeProof() {
   return JSON.parse(result.stdout);
 }
 
+function runNanocapGmgnFirstDiscoveryProof() {
+  const result = spawnSync(process.execPath, [NANOCAP_GMGN_FIRST_DISCOVERY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      LOG_LEVEL: "error",
+      GMGN_API_KEY: "synthetic-gmgn-key",
+      DEEPSEEK_API_KEY: "synthetic-llm-key",
+    },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-nanocap-gmgn-first-discovery failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -404,6 +426,7 @@ function buildChecks() {
   const nanocapBollingerCanaryProof = runNanocapBollingerCanaryProof();
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
+  const nanocapGmgnFirstDiscoveryProof = runNanocapGmgnFirstDiscoveryProof();
 
   return [
     {
@@ -1300,6 +1323,57 @@ function buildChecks() {
         nanocapBollingerCanaryProof?.shadowGate?.strictPass === true &&
         nanocapBollingerCanaryProof?.decisionContext?.shadowQualityGatesSummarized === true &&
         nanocapBollingerCanaryProof?.sourceSafety?.noBirdeyeInLiveRuntime === true,
+    },
+    {
+      file: "user-config.example.json",
+      label: "[GMGN first discovery] nanocap example selects GMGN while default source remains Meteora",
+      test: () =>
+        nanocapGmgnFirstDiscoveryProof?.success === true &&
+        nanocapGmgnFirstDiscoveryProof?.defaults?.screeningSource === "meteora" &&
+        nanocapGmgnFirstDiscoveryProof?.nanocapExample?.screeningSource === "gmgn" &&
+        nanocapGmgnFirstDiscoveryProof?.nanocapExample?.gmgnKeyIsEnvReferenced === true,
+    },
+    {
+      file: "tools/gmgn.js",
+      label: "[GMGN first discovery] source scan proves rank/info/holders/traders endpoints and Meteora SOL-DLMM mapping",
+      test: (src) =>
+        src.includes("export async function discoverGmgnPools") &&
+        src.includes('"/v1/market/rank"') &&
+        src.includes('"/v1/token/info"') &&
+        src.includes('"/v1/market/token_top_holders"') &&
+        src.includes('"/v1/market/token_top_traders"') &&
+        src.includes("fetchTopMeteoraDlmmPoolsForMint") &&
+        src.includes("quoteIsSol") &&
+        src.includes('discovery_source: "gmgn"'),
+    },
+    {
+      file: "tools/screening.js",
+      label: "[GMGN first discovery] getTopCandidates branches by source and preserves threshold gates before Darwin ranking",
+      test: (src) =>
+        nanocapGmgnFirstDiscoveryProof?.gateOrder?.postDiscoveryGatesBeforeDarwin === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.validMeteoraCandidatePasses === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.lowFeeRatioBlocked === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.outOfRangeBinStepBlocked === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.overMaxTvlBlocked === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.belowMinTvlBlocked === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.missingOrganicBlocked === true &&
+        nanocapGmgnFirstDiscoveryProof?.thresholdProof?.lowOrganicBlocked === true &&
+        src.includes('String(config.screening.source || "meteora")') &&
+        src.includes('source === "gmgn"') &&
+        src.includes("getConfiguredPoolThresholdVetoReason") &&
+        src.includes("filterConfiguredPoolThresholds") &&
+        src.includes("configured_threshold_reject") &&
+        src.includes("quote_organic_score: Math.round(p.token_y?.organic_score || 0)") &&
+        src.includes("stage_counts") &&
+        src.includes("all_filtered"),
+    },
+    {
+      file: "scripts/verify-nanocap-gmgn-first-discovery.js",
+      label: "[GMGN first discovery] verifier is synthetic/source-only and avoids live APIs/runtime",
+      test: () =>
+        nanocapGmgnFirstDiscoveryProof?.sourceSafety?.importsBotRuntime === false &&
+        nanocapGmgnFirstDiscoveryProof?.sourceSafety?.callsLiveApis === false &&
+        nanocapGmgnFirstDiscoveryProof?.sourceSafety?.exposesSecrets === false,
     },
     {
       file: "user-config.example.json",

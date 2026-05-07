@@ -22,6 +22,7 @@
   "minSingleSidedSolDownsidePct": 1,
 
   "timeframe": "4h",
+  "screeningSource": "gmgn",
   "category": "trending",
   "discoveryPageSize": 100,
   "discoveryExtraCategories": ["new"],
@@ -49,6 +50,22 @@
   "maxBundlePct": 45,
   "maxBotHoldersPct": 55,
   "maxTop10Pct": 80,
+
+  "gmgn": {
+    "apiKey": "env:GMGN_API_KEY",
+    "interval": "1h",
+    "orderBy": "volume",
+    "direction": "desc",
+    "limit": 100,
+    "enrichLimit": 20,
+    "requestDelayMs": 2500,
+    "maxRetries": 0,
+    "holdersLimit": 100,
+    "filters": ["renounced", "frozen", "not_wash_trading"],
+    "platforms": ["Pump.fun", "meteora_virtual_curve", "pool_meteora"],
+    "minSmartDegenCount": 0,
+    "requireKol": false
+  },
 
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],
