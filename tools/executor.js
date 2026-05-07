@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, validateDeployCandidateLease } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, getVolatilityTimeframe, validateDeployCandidateLease } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -23,6 +23,7 @@ import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, computeDeployAmount, reloadScreeningThresholds } from "../config.js";
 import { getActiveStrategy } from "../strategy-library.js";
 import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-guard.js";
+import { makeDeployThresholdsUnavailableBlock } from "./deploy-threshold-guard.js";
 import { appendDecision, getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -38,6 +39,101 @@ const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
   "Telegram slash command /setcfg",
 ]);
+
+function numberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function poolDetailTvl(pool) {
+  return numberOrNull(pool?.active_tvl ?? pool?.tvl);
+}
+
+function poolDetailBinStep(pool) {
+  return numberOrNull(pool?.dlmm_params?.bin_step ?? pool?.bin_step);
+}
+
+function poolDetailFeeActiveTvlRatio(pool) {
+  const direct = numberOrNull(pool?.fee_active_tvl_ratio ?? pool?.fee_tvl_ratio);
+  if (direct != null) return direct;
+  const fee = numberOrNull(pool?.fee);
+  const activeTvl = poolDetailTvl(pool);
+  return fee != null && activeTvl != null && activeTvl > 0 ? (fee / activeTvl) * 100 : null;
+}
+
+function poolDetailVolatility(pool) {
+  return numberOrNull(pool?.volatility);
+}
+
+async function validateDeployPoolThresholds(args = {}) {
+  const poolAddress = args.pool_address || args.pool;
+  if (!poolAddress) {
+    return { pass: false, reason: "pool_address is required for deploy threshold validation" };
+  }
+
+  const screening = config.screening;
+  const sourceTimeframe = screening.timeframe || "5m";
+  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
+  let detail;
+  try {
+    detail = await getPoolDetail({ pool_address: poolAddress, timeframe: sourceTimeframe });
+    if (!detail) throw new Error(`Pool ${poolAddress} not found`);
+  } catch (error) {
+    return makeDeployThresholdsUnavailableBlock(error, poolAddress);
+  }
+  const failures = [];
+
+  const tvl = poolDetailTvl(detail);
+  const minTvl = numberOrNull(screening.minTvl);
+  const maxTvl = numberOrNull(screening.maxTvl);
+  if (minTvl != null && (tvl == null || tvl < minTvl)) {
+    failures.push(`Pool TVL ${tvl ?? "missing"} < minTvl ${minTvl}`);
+  }
+  if (maxTvl != null && tvl != null && tvl > maxTvl) {
+    failures.push(`Pool TVL ${tvl} > maxTvl ${maxTvl}`);
+  }
+
+  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  const minFeeActiveTvlRatio = numberOrNull(screening.minFeeActiveTvlRatio);
+  if (minFeeActiveTvlRatio != null && (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
+    failures.push(`Pool fee_active_tvl_ratio ${feeActiveTvlRatio ?? "missing"} < minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
+  }
+
+  const binStep = poolDetailBinStep(detail);
+  const minBinStep = numberOrNull(screening.minBinStep);
+  const maxBinStep = numberOrNull(screening.maxBinStep);
+  if (minBinStep != null && (binStep == null || binStep < minBinStep)) {
+    failures.push(`Pool bin_step ${binStep ?? "missing"} < minBinStep ${minBinStep}`);
+  }
+  if (maxBinStep != null && (binStep == null || binStep > maxBinStep)) {
+    failures.push(`Pool bin_step ${binStep ?? "missing"} > maxBinStep ${maxBinStep}`);
+  }
+
+  let volatilityDetail = detail;
+  if (sourceTimeframe !== volatilityTimeframe) {
+    try {
+      volatilityDetail = await getPoolDetail({ pool_address: poolAddress, timeframe: volatilityTimeframe });
+    } catch (error) {
+      return makeDeployThresholdsUnavailableBlock(error, poolAddress, `pool ${volatilityTimeframe} volatility`);
+    }
+  }
+  const volatility = poolDetailVolatility(volatilityDetail);
+  if (volatility == null || volatility <= 0) {
+    failures.push(`Pool ${volatilityTimeframe} volatility ${volatility ?? "missing"} must be > 0`);
+  }
+
+  if (failures.length > 0) {
+    return {
+      pass: false,
+      reason: `deploy threshold validation rejected ${poolAddress}: ${failures.join("; ")}`,
+      guard: "deploy_thresholds",
+      failures: failures.map((message) => ({ code: "deploy_threshold_recheck_failed", message })),
+    };
+  }
+
+  return { pass: true };
+}
 
 function shouldForceSingleSidedSolBidAsk() {
   if (config.strategy.forceSingleSidedSolBidAsk === false) return false;
@@ -405,8 +501,19 @@ export async function executeTool(name, args) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
-      if (name === "deploy_position" && safetyCheck.guard === "deploy_guard") {
+      if (name === "deploy_position" && ["deploy_guard", "deploy_thresholds"].includes(safetyCheck.guard)) {
         const duration = Date.now() - startTime;
+        const rejectedCodes = (safetyCheck.failures || []).map((failure) => failure.code);
+        const risks = (safetyCheck.failures || []).map((failure) => failure.message);
+        const metrics = safetyCheck.audit || {
+          guard: safetyCheck.guard,
+          failures: safetyCheck.failures || [],
+          attempted: {
+            pool_address: args.pool_address ?? args.pool ?? null,
+            pool_name: args.pool_name ?? null,
+            deploy_args: { ...args },
+          },
+        };
         logAction({
           tool: name,
           args,
@@ -425,11 +532,13 @@ export async function executeTool(name, args) {
           actor: "SCREENER",
           pool: args.pool_address || safetyCheck.audit?.attempted?.pool_address,
           pool_name: args.pool_name || safetyCheck.audit?.attempted?.pool_name,
-          summary: "Blocked deploy_position before execution",
+          summary: safetyCheck.guard === "deploy_thresholds"
+            ? "Blocked deploy_position by fresh threshold recheck"
+            : "Blocked deploy_position before execution",
           reason: safetyCheck.reason,
-          risks: (safetyCheck.failures || []).map((failure) => failure.message),
-          metrics: safetyCheck.audit || {},
-          rejected: (safetyCheck.failures || []).map((failure) => failure.code),
+          risks,
+          metrics,
+          rejected: rejectedCodes,
         });
       }
       return {
@@ -534,6 +643,9 @@ async function runSafetyChecks(name, args) {
           audit: deployGuard.audit,
         };
       }
+
+      const poolThresholds = await validateDeployPoolThresholds(args);
+      if (!poolThresholds.pass) return poolThresholds;
 
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;

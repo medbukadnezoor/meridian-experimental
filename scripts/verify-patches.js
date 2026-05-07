@@ -33,6 +33,8 @@ const MAIN_DEPLOY_GUARD_VERIFIER_PATH = join(__dirname, "verify-main-deploy-guar
 const SUPERTREND_URGENT_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-exit.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const MAIN_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-main-single-side-bidask.js");
+const MAIN_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH = join(__dirname, "verify-main-meteora-direct-volatility.js");
+const GHOST_POSITION_RECONCILIATION_VERIFIER_PATH = join(__dirname, "verify-ghost-position-reconciliation.js");
 
 function runEarlyDumpCooldownProof() {
   const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'verify-early-dump-cooldown.js')], {
@@ -226,6 +228,38 @@ function runMainSingleSideBidAskProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMainMeteoraDirectVolatilityProof() {
+  const result = spawnSync(process.execPath, [MAIN_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-main-meteora-direct-volatility failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runGhostPositionReconciliationProof() {
+  const result = spawnSync(process.execPath, [GHOST_POSITION_RECONCILIATION_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, LOG_LEVEL: 'error' },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || '(no stderr)';
+    const stdout = result.stdout?.trim() || '(no stdout)';
+    throw new Error(`verify-ghost-position-reconciliation failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 const earlyDumpProof = runEarlyDumpCooldownProof();
 const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
 const narrowRangeGuardProof = runNarrowRangeGuardProof();
@@ -238,6 +272,8 @@ const mainDeployGuardProof = runMainDeployGuardProof();
 const supertrendUrgentExitProof = runSupertrendUrgentExitProof();
 const materialWinMetricsProof = runMaterialWinMetricsProof();
 const mainSingleSideBidAskProof = runMainSingleSideBidAskProof();
+const mainMeteoraDirectVolatilityProof = runMainMeteoraDirectVolatilityProof();
+const ghostPositionReconciliationProof = runGhostPositionReconciliationProof();
 
 function loadSource(file) {
   return readFileSync(join(ROOT, file), 'utf8');
@@ -340,6 +376,45 @@ const checks = [
       mainSingleSideBidAskProof?.repairs_and_rejections?.upsideReject?.ok === false &&
       mainSingleSideBidAskProof?.source_markers?.executor_active_strategy_gate === true &&
       mainSingleSideBidAskProof?.source_markers?.agent_retryable_arg_rejection === true,
+  },
+
+  {
+    file: 'scripts/verify-main-meteora-direct-volatility.js',
+    label: '[Runtime] main Meteora discovery/detail bypass Agent Meridian while Discord signals keep Agent Meridian',
+    test: () =>
+      mainMeteoraDirectVolatilityProof?.success === true &&
+      mainMeteoraDirectVolatilityProof?.meteora_direct_pool_discovery === true &&
+      mainMeteoraDirectVolatilityProof?.agent_meridian_discord_only === true &&
+      mainMeteoraDirectVolatilityProof?.volatility_min_timeframe === '30m',
+  },
+
+  {
+    file: 'scripts/verify-main-meteora-direct-volatility.js',
+    label: '[Runtime] main deploy validation fresh-rechecks direct Pool Discovery thresholds',
+    test: () =>
+      mainMeteoraDirectVolatilityProof?.success === true &&
+      mainMeteoraDirectVolatilityProof?.deploy_threshold_recheck === true &&
+      mainMeteoraDirectVolatilityProof?.deploy_threshold_unavailable_fail_closed === true &&
+      mainMeteoraDirectVolatilityProof?.deploy_threshold_audit_logged === true &&
+      mainMeteoraDirectVolatilityProof?.main_deploy_lease_guard_preserved === true,
+  },
+
+  {
+    file: 'scripts/verify-main-meteora-direct-volatility.js',
+    label: '[Runtime] main 30m volatility guard adopted without hardcoded 35-bin floor',
+    test: () =>
+      mainMeteoraDirectVolatilityProof?.success === true &&
+      mainMeteoraDirectVolatilityProof?.volatility_min_timeframe === '30m' &&
+      mainMeteoraDirectVolatilityProof?.hardcoded_35_bin_floor_introduced === false,
+  },
+
+  {
+    file: 'scripts/verify-ghost-position-reconciliation.js',
+    label: '[Runtime] untracked empty ghost positions suppress without fresh-deploy grace',
+    test: () =>
+      ghostPositionReconciliationProof?.success === true &&
+      ghostPositionReconciliationProof?.untracked_empty_position_suppressed_after_observations === true &&
+      ghostPositionReconciliationProof?.fresh_tracked_position_grace_preserved === true,
   },
 
   // Patch 6 — Stop-loss 6h cooldown on pool + base mint (pool-memory.js)

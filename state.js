@@ -133,12 +133,11 @@ function isGhostLikeLivePosition(position) {
 }
 
 function getGhostObservationAgeMs(tracked, livePosition) {
+  if (!tracked?.deployed_at) return Number.POSITIVE_INFINITY;
   const candidates = [];
-  if (tracked?.deployed_at) {
-    const deployedAt = new Date(tracked.deployed_at).getTime();
-    if (Number.isFinite(deployedAt) && deployedAt > 0) {
-      candidates.push(Date.now() - deployedAt);
-    }
+  const deployedAt = new Date(tracked.deployed_at).getTime();
+  if (Number.isFinite(deployedAt) && deployedAt > 0) {
+    candidates.push(Date.now() - deployedAt);
   }
   const liveAgeMinutes = toFiniteNumber(livePosition?.age_minutes, Number.NaN);
   if (Number.isFinite(liveAgeMinutes) && liveAgeMinutes >= 0) {

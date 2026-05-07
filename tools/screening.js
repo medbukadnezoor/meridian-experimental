@@ -9,6 +9,19 @@ import { scoreSignalSnapshot } from "../signal-weights.js";
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const MIN_VOLATILITY_TIMEFRAME = "30m";
+const TIMEFRAME_MINUTES = Object.freeze({
+  "1m": 1,
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "6h": 360,
+  "12h": 720,
+  "24h": 1440,
+});
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -21,6 +34,75 @@ function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+export function getVolatilityTimeframe(sourceTimeframe) {
+  const source = String(sourceTimeframe || "").trim();
+  const sourceMinutes = TIMEFRAME_MINUTES[source];
+  const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
+  return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
+}
+
+async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=${page_size}` +
+    `&filter_by=${encodeURIComponent(filters)}` +
+    `&timeframe=${encodeURIComponent(timeframe)}` +
+    `&category=${encodeURIComponent(category)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=1` +
+    `&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}` +
+    `&timeframe=${encodeURIComponent(timeframe)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
+  }
+  const data = await res.json();
+  return (data.data || [])[0] ?? null;
+}
+
+async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
+  if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
+  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
+  if (sourceTimeframe === volatilityTimeframe) {
+    for (const pool of rawPools) {
+      if (pool) pool.volatility_timeframe = volatilityTimeframe;
+    }
+    return rawPools;
+  }
+
+  const uniquePoolAddresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
+  const volatilityResults = await Promise.allSettled(
+    uniquePoolAddresses.map((poolAddress) =>
+      fetchPoolDiscoveryDetail({ poolAddress, timeframe: volatilityTimeframe })
+        .then((pool) => ({ poolAddress, volatility: finiteNumberOrNull(pool?.volatility) }))
+    )
+  );
+
+  const volatilityByPool = new Map();
+  for (const result of volatilityResults) {
+    if (result.status !== "fulfilled") continue;
+    if (result.value.volatility == null) continue;
+    volatilityByPool.set(result.value.poolAddress, result.value.volatility);
+  }
+
+  for (const pool of rawPools) {
+    if (!pool?.pool_address) continue;
+    pool.volatility = volatilityByPool.has(pool.pool_address)
+      ? volatilityByPool.get(pool.pool_address)
+      : null;
+    pool.volatility_timeframe = volatilityTimeframe;
+  }
+
+  return rawPools;
 }
 
 function getPoolAddress(value = {}) {
@@ -578,35 +660,14 @@ export async function discoverPools({
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
     s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-    Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
-      ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
-      : null,
   ].filter(Boolean).join("&&");
 
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${s.category}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
+  const data = await fetchPoolDiscoveryPage({
+    page_size,
+    filters,
+    timeframe: s.timeframe,
+    category: s.category,
   });
-
-  if (!res.ok) {
-    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
 
   let rawPools = Array.isArray(data.data) ? data.data : [];
 
@@ -652,10 +713,26 @@ export async function discoverPools({
     }
   }
 
+  rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
   const condensed = rawPools.map(condensePool);
 
-  // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
   let pools = condensed.filter((p) => {
+    const volatility = finiteNumberOrNull(p.volatility);
+    if (volatility == null || volatility <= 0) {
+      const timeframe = p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe);
+      log("screening", `Configured threshold filter: dropped ${p.name} — configured threshold veto: volatility_${timeframe} ${volatility ?? "missing"} must be > 0`);
+      return false;
+    }
+    return true;
+  });
+
+  const volatilityFiltered = condensed.length - pools.length;
+  if (volatilityFiltered > 0) {
+    log("screening", `Filtered ${volatilityFiltered} pool(s) with missing/invalid volatility`);
+  }
+
+  // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
+  pools = pools.filter((p) => {
     if (isBlacklisted(p.base?.mint)) {
       log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in pool ${p.name}`);
       return false;
@@ -667,7 +744,7 @@ export async function discoverPools({
     return true;
   });
 
-  const filtered = condensed.length - pools.length;
+  const filtered = condensed.length - volatilityFiltered - pools.length;
   if (filtered > 0) log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens/devs`);
 
   // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
@@ -935,26 +1012,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
  * Returns the full unfiltered API object (all fields, not condensed).
  */
 export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools/${pool_address}?timeframe=${encodeURIComponent(timeframe)}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=1` +
-      `&filter_by=${encodeURIComponent(`pool_address=${pool_address}`)}` +
-      `&timeframe=${timeframe}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
-  });
-
-  if (!res.ok) {
-    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
-  const pool = useServerDiscovery ? data : (data.data || [])[0];
+  const pool = await fetchPoolDiscoveryDetail({ poolAddress: pool_address, timeframe });
 
   if (!pool) {
     throw new Error(`Pool ${pool_address} not found`);
@@ -993,7 +1051,8 @@ function condensePool(p) {
     fee_active_tvl_ratio: p.fee_active_tvl_ratio > 0
       ? fix(p.fee_active_tvl_ratio, 4)
       : (p.active_tvl > 0 ? fix((p.fee / p.active_tvl) * 100, 4) : 0),
-    volatility: fix(p.volatility, 2),
+    volatility: fix(p.volatility, 4),
+    volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
 
     // Token health
