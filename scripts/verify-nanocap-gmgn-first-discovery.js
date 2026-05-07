@@ -101,6 +101,7 @@ const goodCandidate = {
   volume_window: 10_000,
   mcap: 120_000,
   holders: 300,
+  volatility: 0.01,
   organic_score: 70,
   quote_organic_score: 80,
 };
@@ -113,6 +114,7 @@ const validMeteoraCandidate = {
   volume_window: 10_000,
   mcap: 120_000,
   holders: 300,
+  volatility: 0.01,
   organic_score: 70,
   quote: {
     symbol: "SOL",

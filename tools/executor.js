@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates, getVolatilityTimeframe } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -38,6 +38,109 @@ const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
   "Telegram slash command /setcfg",
 ]);
+
+function numberOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function poolDetailTvl(pool) {
+  return numberOrNull(pool?.tvl ?? pool?.active_tvl ?? pool?.liquidity);
+}
+
+function poolDetailBinStep(pool) {
+  return numberOrNull(pool?.dlmm_params?.bin_step ?? pool?.pool_config?.bin_step ?? pool?.bin_step);
+}
+
+function poolDetailFeeActiveTvlRatio(pool) {
+  const ratio = numberOrNull(pool?.fee_active_tvl_ratio);
+  if (ratio != null && ratio > 0) return ratio;
+  const fee = numberOrNull(pool?.fee);
+  const tvl = poolDetailTvl(pool);
+  return fee != null && tvl != null && tvl > 0 ? (fee / tvl) * 100 : null;
+}
+
+function poolDetailVolatility(pool) {
+  return numberOrNull(pool?.volatility);
+}
+
+async function validateDeployPoolThresholds(args = {}) {
+  let detail;
+  try {
+    detail = await getPoolDetail({
+      pool_address: args.pool_address,
+      timeframe: config.screening.timeframe || "5m",
+    });
+    if (!detail) throw new Error(`Pool ${args.pool_address} not found`);
+  } catch (error) {
+    return {
+      pass: false,
+      reason: `Could not verify pool screening thresholds before deploy: ${error.message}`,
+    };
+  }
+
+  const tvl = poolDetailTvl(detail);
+  const minTvl = numberOrNull(config.screening.minTvl);
+  const maxTvl = numberOrNull(config.screening.maxTvl);
+  if (tvl == null) {
+    return { pass: false, reason: "Could not verify pool TVL before deploy." };
+  }
+  if (minTvl != null && minTvl > 0 && tvl < minTvl) {
+    return { pass: false, reason: `Pool TVL $${tvl} is below configured minTvl $${minTvl}.` };
+  }
+  if (maxTvl != null && maxTvl > 0 && tvl > maxTvl) {
+    return { pass: false, reason: `Pool TVL $${tvl} is above configured maxTvl $${maxTvl}.` };
+  }
+
+  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
+  const minFeeActiveTvlRatio = numberOrNull(config.screening.minFeeActiveTvlRatio);
+  if (
+    minFeeActiveTvlRatio != null &&
+    minFeeActiveTvlRatio > 0 &&
+    (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)
+  ) {
+    return {
+      pass: false,
+      reason: `Pool fee/active-TVL ${feeActiveTvlRatio ?? "unknown"}% is below configured minFeeActiveTvlRatio ${minFeeActiveTvlRatio}%.`,
+    };
+  }
+
+  const actualBinStep = poolDetailBinStep(detail);
+  const minStep = numberOrNull(config.screening.minBinStep);
+  const maxStep = numberOrNull(config.screening.maxBinStep);
+  if (minStep != null && (actualBinStep == null || actualBinStep < minStep)) {
+    return { pass: false, reason: `Pool bin_step ${actualBinStep ?? "unknown"} is below configured minBinStep ${minStep}.` };
+  }
+  if (maxStep != null && (actualBinStep == null || actualBinStep > maxStep)) {
+    return { pass: false, reason: `Pool bin_step ${actualBinStep ?? "unknown"} is above configured maxBinStep ${maxStep}.` };
+  }
+
+  const volatilityTimeframe = getVolatilityTimeframe(config.screening.timeframe || "5m");
+  let volatilityDetail = detail;
+  if ((config.screening.timeframe || "5m") !== volatilityTimeframe) {
+    try {
+      volatilityDetail = await getPoolDetail({
+        pool_address: args.pool_address,
+        timeframe: volatilityTimeframe,
+      });
+    } catch (error) {
+      return {
+        pass: false,
+        reason: `Could not verify pool ${volatilityTimeframe} volatility before deploy: ${error.message}`,
+      };
+    }
+  }
+
+  const volatility = poolDetailVolatility(volatilityDetail);
+  if (volatility == null || volatility <= 0) {
+    return {
+      pass: false,
+      reason: `Pool ${volatilityTimeframe} volatility ${volatility ?? "unknown"} is unusable. Refusing deploy.`,
+    };
+  }
+
+  return { pass: true };
+}
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
@@ -494,6 +597,9 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      const poolThresholds = await validateDeployPoolThresholds(args);
+      if (!poolThresholds.pass) return poolThresholds;
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;

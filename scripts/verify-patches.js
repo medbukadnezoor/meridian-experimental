@@ -41,6 +41,7 @@ const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-b
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
 const NANOCAP_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-nanocap-gmgn-first-discovery.js");
+const UPSTREAM_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH = join(__dirname, "verify-upstream-meteora-direct-volatility.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -401,6 +402,22 @@ function runNanocapGmgnFirstDiscoveryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runUpstreamMeteoraDirectVolatilityProof() {
+  const result = spawnSync(process.execPath, [UPSTREAM_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-upstream-meteora-direct-volatility failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -427,6 +444,7 @@ function buildChecks() {
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
   const nanocapGmgnFirstDiscoveryProof = runNanocapGmgnFirstDiscoveryProof();
+  const upstreamMeteoraDirectVolatilityProof = runUpstreamMeteoraDirectVolatilityProof();
 
   return [
     {
@@ -1374,6 +1392,38 @@ function buildChecks() {
         nanocapGmgnFirstDiscoveryProof?.sourceSafety?.importsBotRuntime === false &&
         nanocapGmgnFirstDiscoveryProof?.sourceSafety?.callsLiveApis === false &&
         nanocapGmgnFirstDiscoveryProof?.sourceSafety?.exposesSecrets === false,
+    },
+    {
+      file: "tools/screening.js",
+      label: "[Upstream Meteora direct volatility] Meteora discovery/detail bypass Agent Meridian while Discord signals keep Agent Meridian",
+      test: (src) =>
+        upstreamMeteoraDirectVolatilityProof?.success === true &&
+        upstreamMeteoraDirectVolatilityProof?.meteora_direct_pool_discovery === true &&
+        upstreamMeteoraDirectVolatilityProof?.agent_meridian_discord_only === true &&
+        src.includes("fetchPoolDiscoveryPage") &&
+        src.includes("fetchPoolDiscoveryDetail") &&
+        src.includes("fetchDiscordSignalCandidates") &&
+        !src.includes("const useServerDiscovery = !!config.api.publicApiKey") &&
+        !src.includes("${config.api.url}/discovery/pools"),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[Upstream Meteora direct volatility] deploy validation rechecks direct Pool Discovery thresholds",
+      test: (src) =>
+        upstreamMeteoraDirectVolatilityProof?.deploy_threshold_recheck === true &&
+        src.includes("async function validateDeployPoolThresholds") &&
+        src.includes("const poolThresholds = await validateDeployPoolThresholds(args);") &&
+        src.includes("poolDetailFeeActiveTvlRatio") &&
+        src.includes("poolDetailBinStep") &&
+        src.includes("Pool ${volatilityTimeframe} volatility"),
+    },
+    {
+      file: "tools/deploy-range-guard.js",
+      label: "[Upstream Meteora direct volatility] 30m volatility guard adopted without hardcoded 35-bin floor",
+      test: (src) =>
+        upstreamMeteoraDirectVolatilityProof?.volatility_min_timeframe === "30m" &&
+        upstreamMeteoraDirectVolatilityProof?.hardcoded_35_bin_floor_introduced === false &&
+        src.includes("ABSOLUTE_MIN_SINGLE_SIDED_SOL_BINS = 5"),
     },
     {
       file: "user-config.example.json",
