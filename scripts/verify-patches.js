@@ -42,6 +42,7 @@ const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-lo
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
 const NANOCAP_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-nanocap-gmgn-first-discovery.js");
 const UPSTREAM_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH = join(__dirname, "verify-upstream-meteora-direct-volatility.js");
+const GHOST_POSITION_RECONCILIATION_VERIFIER_PATH = join(__dirname, "verify-ghost-position-reconciliation.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -418,6 +419,22 @@ function runUpstreamMeteoraDirectVolatilityProof() {
   return JSON.parse(result.stdout);
 }
 
+function runGhostPositionReconciliationProof() {
+  const result = spawnSync(process.execPath, [GHOST_POSITION_RECONCILIATION_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-ghost-position-reconciliation failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -445,6 +462,7 @@ function buildChecks() {
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
   const nanocapGmgnFirstDiscoveryProof = runNanocapGmgnFirstDiscoveryProof();
   const upstreamMeteoraDirectVolatilityProof = runUpstreamMeteoraDirectVolatilityProof();
+  const ghostPositionReconciliationProof = runGhostPositionReconciliationProof();
 
   return [
     {
@@ -1424,6 +1442,15 @@ function buildChecks() {
         upstreamMeteoraDirectVolatilityProof?.volatility_min_timeframe === "30m" &&
         upstreamMeteoraDirectVolatilityProof?.hardcoded_35_bin_floor_introduced === false &&
         src.includes("ABSOLUTE_MIN_SINGLE_SIDED_SOL_BINS = 5"),
+    },
+    {
+      file: "state.js",
+      label: "[Ghost positions] untracked empty wide-range create-only positions suppress without fresh-deploy grace",
+      test: (src) =>
+        ghostPositionReconciliationProof?.success === true &&
+        ghostPositionReconciliationProof?.untracked_empty_position_suppressed_after_observations === true &&
+        ghostPositionReconciliationProof?.fresh_tracked_position_grace_preserved === true &&
+        src.includes("if (!tracked?.deployed_at) return Number.POSITIVE_INFINITY;"),
     },
     {
       file: "user-config.example.json",
