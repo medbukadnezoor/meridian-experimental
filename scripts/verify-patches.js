@@ -44,6 +44,7 @@ const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracl
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
+const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-gmgn-first-discovery.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -447,6 +448,22 @@ function runScoutStrategyLibraryConfigProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutGmgnFirstDiscoveryProof() {
+  const result = spawnSync(process.execPath, [SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-gmgn-first-discovery failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -476,8 +493,22 @@ function buildChecks() {
   const oorRepositionProof = runOorRepositionProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
+  const scoutGmgnFirstDiscoveryProof = runScoutGmgnFirstDiscoveryProof();
 
   return [
+    {
+      file: "scripts/verify-scout-gmgn-first-discovery.js",
+      label: "[Scout GMGN-first] GMGN discovery can feed existing scout safety gates before Darwin ranking",
+      test: () =>
+        scoutGmgnFirstDiscoveryProof?.success === true &&
+        scoutGmgnFirstDiscoveryProof?.defaults?.screeningSource === "meteora" &&
+        scoutGmgnFirstDiscoveryProof?.scoutSyntheticConfig?.screeningSource === "gmgn" &&
+        scoutGmgnFirstDiscoveryProof?.scoutSyntheticConfig?.gmgnKeyIsEnvReferenced === true &&
+        scoutGmgnFirstDiscoveryProof?.sourceSafety?.callsLiveApis === false &&
+        scoutGmgnFirstDiscoveryProof?.gateOrder?.postDiscoveryGatesBeforeDarwin === true &&
+        scoutGmgnFirstDiscoveryProof?.thresholdProof?.validMeteoraCandidatePasses === true &&
+        scoutGmgnFirstDiscoveryProof?.thresholdProof?.lowFeeRatioBlocked === true,
+    },
     {
       file: "scripts/verify-scout-strategy-library-config.js",
       label: "[Scout strategy library] tight-bin range is strategy/config-driven and clamps deploy args",

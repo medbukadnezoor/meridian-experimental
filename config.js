@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import {
   loadUserConfig,
+  normalizeScreeningSource,
   resolveConfigFromPath,
 } from "./config-builder.js";
 
@@ -17,6 +18,7 @@ export {
   resolveRoleApiKey,
   INTERNAL_FALLBACK_MODEL,
   resolveFallbackModel,
+  normalizeScreeningSource,
 } from "./config-builder.js";
 
 export const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
@@ -62,6 +64,7 @@ export function reloadScreeningThresholds() {
   try {
     const fresh = loadUserConfig(USER_CONFIG_PATH);
     const s = config.screening;
+    s.source = normalizeScreeningSource(fresh.screening?.source ?? fresh.screeningSource ?? s.source);
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
     if (fresh.discordSignalMode != null) s.discordSignalMode = fresh.discordSignalMode;
