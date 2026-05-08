@@ -12,7 +12,7 @@ export function normalizeOptionalString(value) {
 }
 
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
-const SCREENING_SOURCES = new Set(["meteora", "gmgn"]);
+const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"]);
 
 export function normalizeScreeningReasoningEffort(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();

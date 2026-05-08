@@ -25,6 +25,25 @@ export const WHALE_ESCAPE_NULL_FIELDS = Object.freeze({
   whale_escape_data_source: null,
 });
 
+export const LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS = Object.freeze({
+  quote_reserves_in_active_bin_usd: null,
+  quote_reserves_within_5_bins_below_usd: null,
+  token_reserves_in_active_bin_usd: null,
+  adjacent_bin_liquidity_cliff_pct: null,
+  your_share_of_active_bin_tvl_pct: null,
+  lptele2_liquidity_shape_data_source: null,
+});
+
+export const LPTELE4_SWAP_PRESSURE_NULL_FIELDS = Object.freeze({
+  swap_buy_usd_5m: null,
+  swap_sell_usd_5m: null,
+  sell_buy_ratio_5m: null,
+  largest_single_sell_usd_5m: null,
+  n_sells_over_threshold_5m: null,
+  swap_slippage_p95_5m: null,
+  lptele4_swap_pressure_data_source: null,
+});
+
 export const WHALE_ESCAPE_SHADOW_THRESHOLDS = Object.freeze({
   watch: {
     maxNetDepUsd15m: -2_500,
@@ -105,6 +124,61 @@ export function normalizeWhaleEscapeFlow(flow = {}) {
     pool_lp_remove_count_5m: normalizeCount(flow.pool_lp_remove_count_5m ?? flow.removeCount5m),
     pool_lp_largest_remove_usd_5m: roundNumber(asNumber(flow.pool_lp_largest_remove_usd_5m) ?? asNumber(flow.largestRemoveUsd5m)),
     whale_escape_data_source: normalizeWhaleEscapeDataSource(flow.whale_escape_data_source ?? flow.dataSource),
+  };
+}
+
+export function normalizeLptele2LiquidityShape(shape = {}) {
+  if (!shape || typeof shape !== "object") return { ...LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS };
+  return {
+    quote_reserves_in_active_bin_usd: roundNumber(
+      asNumber(shape.quote_reserves_in_active_bin_usd)
+        ?? asNumber(shape.quoteReservesInActiveBinUsd)
+        ?? asNumber(shape.quoteReservesActiveBinUsd)
+        ?? asNumber(shape.activeBinQuoteUsd),
+    ),
+    quote_reserves_within_5_bins_below_usd: roundNumber(
+      asNumber(shape.quote_reserves_within_5_bins_below_usd)
+        ?? asNumber(shape.quoteReservesWithin5BinsBelowUsd)
+        ?? asNumber(shape.quoteBelow5BinsUsd),
+    ),
+    token_reserves_in_active_bin_usd: roundNumber(
+      asNumber(shape.token_reserves_in_active_bin_usd)
+        ?? asNumber(shape.tokenReservesInActiveBinUsd)
+        ?? asNumber(shape.activeBinTokenUsd),
+    ),
+    adjacent_bin_liquidity_cliff_pct: roundNumber(
+      asNumber(shape.adjacent_bin_liquidity_cliff_pct)
+        ?? asNumber(shape.adjacentBinLiquidityCliffPct),
+    ),
+    your_share_of_active_bin_tvl_pct: roundNumber(
+      asNumber(shape.your_share_of_active_bin_tvl_pct)
+        ?? asNumber(shape.yourShareOfActiveBinTvlPct)
+        ?? asNumber(shape.positionShareOfActiveBinTvlPct),
+    ),
+    lptele2_liquidity_shape_data_source: normalizeWhaleEscapeDataSource(
+      shape.lptele2_liquidity_shape_data_source ?? shape.dataSource,
+    ),
+  };
+}
+
+export function normalizeLptele4SwapPressure(pressure = {}) {
+  if (!pressure || typeof pressure !== "object") return { ...LPTELE4_SWAP_PRESSURE_NULL_FIELDS };
+  return {
+    swap_buy_usd_5m: roundNumber(asNumber(pressure.swap_buy_usd_5m) ?? asNumber(pressure.swapBuyUsd5m)),
+    swap_sell_usd_5m: roundNumber(asNumber(pressure.swap_sell_usd_5m) ?? asNumber(pressure.swapSellUsd5m)),
+    sell_buy_ratio_5m: roundNumber(asNumber(pressure.sell_buy_ratio_5m) ?? asNumber(pressure.sellBuyRatio5m)),
+    largest_single_sell_usd_5m: roundNumber(
+      asNumber(pressure.largest_single_sell_usd_5m) ?? asNumber(pressure.largestSingleSellUsd5m),
+    ),
+    n_sells_over_threshold_5m: normalizeCount(
+      pressure.n_sells_over_threshold_5m ?? pressure.nSellsOverThreshold5m,
+    ),
+    swap_slippage_p95_5m: roundNumber(
+      asNumber(pressure.swap_slippage_p95_5m) ?? asNumber(pressure.swapSlippageP95_5m),
+    ),
+    lptele4_swap_pressure_data_source: normalizeWhaleEscapeDataSource(
+      pressure.lptele4_swap_pressure_data_source ?? pressure.dataSource,
+    ),
   };
 }
 
@@ -519,6 +593,8 @@ export class ActiveBinOracleRecorder {
     liveEmergencyExitEnabled = false,
     liveEmergencyExitMaxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
     getPoolLiquidityFlowFn = null,
+    getLptele2LiquidityShapeFn = null,
+    getLptele4SwapPressureFn = null,
   } = {}) {
     this.connection = connection;
     this.rpcUrl = rpcUrl;
@@ -533,6 +609,8 @@ export class ActiveBinOracleRecorder {
     this.liveEmergencyExitEnabled = liveEmergencyExitEnabled;
     this.liveEmergencyExitMaxPnlPct = liveEmergencyExitMaxPnlPct;
     this.getPoolLiquidityFlowFn = typeof getPoolLiquidityFlowFn === "function" ? getPoolLiquidityFlowFn : null;
+    this.getLptele2LiquidityShapeFn = typeof getLptele2LiquidityShapeFn === "function" ? getLptele2LiquidityShapeFn : null;
+    this.getLptele4SwapPressureFn = typeof getLptele4SwapPressureFn === "function" ? getLptele4SwapPressureFn : null;
     this.positionsByPool = new Map();
     this.subscriptions = new Map();
     this.pendingSubscriptions = new Set();
@@ -678,21 +756,38 @@ export class ActiveBinOracleRecorder {
     const history = trimHistory(previous.history || [], observedAtMs, this.historyRetentionMs, this.maxHistoryPoints);
     const velocityFeatures = computeVelocityWindows(activeBin, observedAtMs, history);
     const priceFeatures = computePriceWindows(activePrice, observedAtMs, history);
+    const telemetryContext = {
+      pool,
+      activeBin,
+      activePrice,
+      activePricePerLamport,
+      observedAt,
+      observedAtMs,
+      positions,
+      history,
+    };
     let whaleEscapeFlow = { ...WHALE_ESCAPE_NULL_FIELDS };
     if (this.getPoolLiquidityFlowFn) {
       try {
-        whaleEscapeFlow = normalizeWhaleEscapeFlow(await this.getPoolLiquidityFlowFn({
-          pool,
-          activeBin,
-          activePrice,
-          activePricePerLamport,
-          observedAt,
-          observedAtMs,
-          positions,
-          history,
-        }));
+        whaleEscapeFlow = normalizeWhaleEscapeFlow(await this.getPoolLiquidityFlowFn(telemetryContext));
       } catch (error) {
         this.logger("active_bin_oracle_warn", `Whale Escape flow unavailable for ${pool.slice(0, 8)}: ${error.message}`);
+      }
+    }
+    let lptele2LiquidityShape = { ...LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS };
+    if (this.getLptele2LiquidityShapeFn) {
+      try {
+        lptele2LiquidityShape = normalizeLptele2LiquidityShape(await this.getLptele2LiquidityShapeFn(telemetryContext));
+      } catch (error) {
+        this.logger("active_bin_oracle_warn", `LPTELE-2 liquidity shape unavailable for ${pool.slice(0, 8)}: ${error.message}`);
+      }
+    }
+    let lptele4SwapPressure = { ...LPTELE4_SWAP_PRESSURE_NULL_FIELDS };
+    if (this.getLptele4SwapPressureFn) {
+      try {
+        lptele4SwapPressure = normalizeLptele4SwapPressure(await this.getLptele4SwapPressureFn(telemetryContext));
+      } catch (error) {
+        this.logger("active_bin_oracle_warn", `LPTELE-4 swap pressure unavailable for ${pool.slice(0, 8)}: ${error.message}`);
       }
     }
     const rows = positions.map((position) => {
@@ -738,6 +833,8 @@ export class ActiveBinOracleRecorder {
         active_price_per_lamport: activePricePerLamport,
         ...classification,
         ...whaleEscapeFlow,
+        ...lptele2LiquidityShape,
+        ...lptele4SwapPressure,
         ...rangeProximityLogFields,
         ...whaleEscapeSignal,
         pnl_pct: position.pnl_pct ?? null,

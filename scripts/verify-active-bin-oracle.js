@@ -50,6 +50,8 @@ try {
     computeRangeProximityFields,
     computePriceWindows,
     computeVelocityWindows,
+    normalizeLptele2LiquidityShape,
+    normalizeLptele4SwapPressure,
     normalizeWhaleEscapeFlow,
     shouldTriggerActiveBinEmergencyExit,
   } = await import(join(ROOT, "active-bin-oracle.js"));
@@ -181,6 +183,55 @@ try {
   assert.strictEqual(normalizedWhaleFlow.pool_lp_largest_remove_usd_5m, 1750.123457);
   assert.strictEqual(normalizedWhaleFlow.whale_escape_data_source, "reserve_delta_poll");
 
+  const unavailableLiquidityShape = normalizeLptele2LiquidityShape(null);
+  assert.strictEqual(unavailableLiquidityShape.quote_reserves_in_active_bin_usd, null);
+  assert.strictEqual(unavailableLiquidityShape.quote_reserves_within_5_bins_below_usd, null);
+  assert.strictEqual(unavailableLiquidityShape.token_reserves_in_active_bin_usd, null);
+  assert.strictEqual(unavailableLiquidityShape.adjacent_bin_liquidity_cliff_pct, null);
+  assert.strictEqual(unavailableLiquidityShape.your_share_of_active_bin_tvl_pct, null);
+  assert.strictEqual(unavailableLiquidityShape.lptele2_liquidity_shape_data_source, null);
+
+  const normalizedLiquidityShape = normalizeLptele2LiquidityShape({
+    activeBinQuoteUsd: "1200.1234567",
+    quoteReservesWithin5BinsBelowUsd: "5500.5",
+    activeBinTokenUsd: 720,
+    adjacentBinLiquidityCliffPct: "42.25",
+    positionShareOfActiveBinTvlPct: "3.5",
+    dataSource: "bin_reserve_poll",
+  });
+  assert.strictEqual(normalizedLiquidityShape.quote_reserves_in_active_bin_usd, 1200.123457);
+  assert.strictEqual(normalizedLiquidityShape.quote_reserves_within_5_bins_below_usd, 5500.5);
+  assert.strictEqual(normalizedLiquidityShape.token_reserves_in_active_bin_usd, 720);
+  assert.strictEqual(normalizedLiquidityShape.adjacent_bin_liquidity_cliff_pct, 42.25);
+  assert.strictEqual(normalizedLiquidityShape.your_share_of_active_bin_tvl_pct, 3.5);
+  assert.strictEqual(normalizedLiquidityShape.lptele2_liquidity_shape_data_source, "bin_reserve_poll");
+
+  const unavailableSwapPressure = normalizeLptele4SwapPressure(null);
+  assert.strictEqual(unavailableSwapPressure.swap_buy_usd_5m, null);
+  assert.strictEqual(unavailableSwapPressure.swap_sell_usd_5m, null);
+  assert.strictEqual(unavailableSwapPressure.sell_buy_ratio_5m, null);
+  assert.strictEqual(unavailableSwapPressure.largest_single_sell_usd_5m, null);
+  assert.strictEqual(unavailableSwapPressure.n_sells_over_threshold_5m, null);
+  assert.strictEqual(unavailableSwapPressure.swap_slippage_p95_5m, null);
+  assert.strictEqual(unavailableSwapPressure.lptele4_swap_pressure_data_source, null);
+
+  const normalizedSwapPressure = normalizeLptele4SwapPressure({
+    swapBuyUsd5m: "800.12",
+    swapSellUsd5m: "3200.5",
+    sellBuyRatio5m: "4.0",
+    largestSingleSellUsd5m: "1500.777777",
+    nSellsOverThreshold5m: "3.9",
+    swapSlippageP95_5m: "2.125",
+    dataSource: "swap_event_poll",
+  });
+  assert.strictEqual(normalizedSwapPressure.swap_buy_usd_5m, 800.12);
+  assert.strictEqual(normalizedSwapPressure.swap_sell_usd_5m, 3200.5);
+  assert.strictEqual(normalizedSwapPressure.sell_buy_ratio_5m, 4);
+  assert.strictEqual(normalizedSwapPressure.largest_single_sell_usd_5m, 1500.777777);
+  assert.strictEqual(normalizedSwapPressure.n_sells_over_threshold_5m, 3);
+  assert.strictEqual(normalizedSwapPressure.swap_slippage_p95_5m, 2.125);
+  assert.strictEqual(normalizedSwapPressure.lptele4_swap_pressure_data_source, "swap_event_poll");
+
   const whaleWatch = classifyWhaleEscapeShadow({
     flow: normalizedWhaleFlow,
     binDistanceToLower: 6,
@@ -297,6 +348,19 @@ try {
   assert.strictEqual(rows[0].pool_lp_add_count_5m, null);
   assert.strictEqual(rows[0].pool_lp_remove_count_5m, null);
   assert.strictEqual(rows[0].pool_lp_largest_remove_usd_5m, null);
+  assert.strictEqual(rows[0].quote_reserves_in_active_bin_usd, null);
+  assert.strictEqual(rows[0].quote_reserves_within_5_bins_below_usd, null);
+  assert.strictEqual(rows[0].token_reserves_in_active_bin_usd, null);
+  assert.strictEqual(rows[0].adjacent_bin_liquidity_cliff_pct, null);
+  assert.strictEqual(rows[0].your_share_of_active_bin_tvl_pct, null);
+  assert.strictEqual(rows[0].lptele2_liquidity_shape_data_source, null);
+  assert.strictEqual(rows[0].swap_buy_usd_5m, null);
+  assert.strictEqual(rows[0].swap_sell_usd_5m, null);
+  assert.strictEqual(rows[0].sell_buy_ratio_5m, null);
+  assert.strictEqual(rows[0].largest_single_sell_usd_5m, null);
+  assert.strictEqual(rows[0].n_sells_over_threshold_5m, null);
+  assert.strictEqual(rows[0].swap_slippage_p95_5m, null);
+  assert.strictEqual(rows[0].lptele4_swap_pressure_data_source, null);
   assert.strictEqual(rows[0].bin_distance_to_lower, 48);
   assert.strictEqual(rows[0].bin_distance_to_upper, -18);
   assert.strictEqual(rows[0].range_width_bins, 30);
@@ -319,6 +383,8 @@ try {
   const whaleTempDir = mkdtempSync(join(tmpdir(), "meridian-whale-escape-"));
   const whaleConnection = new FakeConnection();
   const whaleRowsSeen = [];
+  const lptele2RowsSeen = [];
+  const lptele4RowsSeen = [];
   const whaleRecorder = new ActiveBinOracleRecorder({
     connection: whaleConnection,
     debounceMs: 10,
@@ -334,6 +400,29 @@ try {
         pool_lp_remove_count_5m: 4,
         pool_lp_largest_remove_usd_5m: 3250.25,
         whale_escape_data_source: "reserve_delta_poll",
+      };
+    },
+    getLptele2LiquidityShapeFn: async (context) => {
+      lptele2RowsSeen.push(context.pool);
+      return {
+        quote_reserves_in_active_bin_usd: 1_250.5,
+        quote_reserves_within_5_bins_below_usd: 5_600,
+        token_reserves_in_active_bin_usd: 725.25,
+        adjacent_bin_liquidity_cliff_pct: 41.5,
+        your_share_of_active_bin_tvl_pct: 3.75,
+        lptele2_liquidity_shape_data_source: "bin_reserve_poll",
+      };
+    },
+    getLptele4SwapPressureFn: async (context) => {
+      lptele4RowsSeen.push(context.pool);
+      return {
+        swap_buy_usd_5m: 800,
+        swap_sell_usd_5m: 3_400,
+        sell_buy_ratio_5m: 4.25,
+        largest_single_sell_usd_5m: 1_700,
+        n_sells_over_threshold_5m: 4,
+        swap_slippage_p95_5m: 2.4,
+        lptele4_swap_pressure_data_source: "swap_event_poll",
       };
     },
     logger: () => {},
@@ -356,12 +445,27 @@ try {
     .split("\n")
     .map((line) => JSON.parse(line));
   assert.strictEqual(whaleRowsSeen.length, 1);
+  assert.strictEqual(lptele2RowsSeen.length, 1);
+  assert.strictEqual(lptele4RowsSeen.length, 1);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_5m, -1200);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_15m, -5500);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_30m, -8000);
   assert.strictEqual(whaleRows[0].pool_lp_add_count_5m, 1);
   assert.strictEqual(whaleRows[0].pool_lp_remove_count_5m, 4);
   assert.strictEqual(whaleRows[0].pool_lp_largest_remove_usd_5m, 3250.25);
+  assert.strictEqual(whaleRows[0].quote_reserves_in_active_bin_usd, 1250.5);
+  assert.strictEqual(whaleRows[0].quote_reserves_within_5_bins_below_usd, 5600);
+  assert.strictEqual(whaleRows[0].token_reserves_in_active_bin_usd, 725.25);
+  assert.strictEqual(whaleRows[0].adjacent_bin_liquidity_cliff_pct, 41.5);
+  assert.strictEqual(whaleRows[0].your_share_of_active_bin_tvl_pct, 3.75);
+  assert.strictEqual(whaleRows[0].lptele2_liquidity_shape_data_source, "bin_reserve_poll");
+  assert.strictEqual(whaleRows[0].swap_buy_usd_5m, 800);
+  assert.strictEqual(whaleRows[0].swap_sell_usd_5m, 3400);
+  assert.strictEqual(whaleRows[0].sell_buy_ratio_5m, 4.25);
+  assert.strictEqual(whaleRows[0].largest_single_sell_usd_5m, 1700);
+  assert.strictEqual(whaleRows[0].n_sells_over_threshold_5m, 4);
+  assert.strictEqual(whaleRows[0].swap_slippage_p95_5m, 2.4);
+  assert.strictEqual(whaleRows[0].lptele4_swap_pressure_data_source, "swap_event_poll");
   assert.strictEqual(whaleRows[0].bin_distance_to_lower, 4);
   assert.strictEqual(whaleRows[0].bin_distance_to_upper, 26);
   assert.strictEqual(whaleRows[0].range_width_bins, 30);
@@ -518,6 +622,11 @@ try {
     assert.ok(!consumerSource.includes("range_edge_zone"), `${file} must not consume LPTELE-1 range edge fields`);
     assert.ok(!consumerSource.includes("rolling_near_edge_sec_60s"), `${file} must not consume LPTELE-1 rolling edge fields`);
     assert.ok(!consumerSource.includes("rolling_lower_half_sec_60s"), `${file} must not consume LPTELE-1 rolling half fields`);
+    assert.ok(!consumerSource.includes("quote_reserves_in_active_bin_usd"), `${file} must not consume LPTELE-2 liquidity shape fields`);
+    assert.ok(!consumerSource.includes("adjacent_bin_liquidity_cliff_pct"), `${file} must not consume LPTELE-2 liquidity cliff fields`);
+    assert.ok(!consumerSource.includes("swap_sell_usd_5m"), `${file} must not consume LPTELE-4 swap pressure fields`);
+    assert.ok(!consumerSource.includes("sell_buy_ratio_5m"), `${file} must not consume LPTELE-4 sell pressure fields`);
+    assert.ok(!consumerSource.includes("largest_single_sell_usd_5m"), `${file} must not consume LPTELE-4 large sell fields`);
   }
 
   recorder.updatePositions([]);
@@ -541,9 +650,15 @@ try {
       rollingRangeDwellFields: true,
       whaleEscapeNullFields: true,
       whaleEscapeNormalization: true,
+      lptele2NullFields: true,
+      lptele2Normalization: true,
+      lptele4NullFields: true,
+      lptele4Normalization: true,
       whaleEscapeWatchSignal: true,
       whaleEscapeCandidateSignal: true,
       whaleEscapeFieldsPreservedInRows: true,
+      lptele2FieldsPreservedInRows: true,
+      lptele4FieldsPreservedInRows: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
       liveEmergencyTriggersExtremeOnly: true,
@@ -555,6 +670,8 @@ try {
       noCloseOrExecuteImports: true,
       noWhaleEscapeExecutionConsumers: true,
       noRangeProximityExecutionConsumers: true,
+      noLptele2ExecutionConsumers: true,
+      noLptele4ExecutionConsumers: true,
       unsubscribeRemovedPools: true,
     },
     sampleLogFile: logFile,

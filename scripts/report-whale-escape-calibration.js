@@ -71,6 +71,8 @@ function summarize(rows) {
   const timeInZoneRows = rows.filter((row) => asNumber(row.time_in_current_range_zone_minutes) != null);
   const rangeEdgeRows = rows.filter((row) => typeof row.range_edge_zone === "string" && row.range_edge_zone);
   const rollingDwellRows = rows.filter((row) => asNumber(row.rolling_lower_half_sec_60s) != null);
+  const lptele2ShapeRows = rows.filter((row) => asNumber(row.quote_reserves_in_active_bin_usd) != null);
+  const lptele4PressureRows = rows.filter((row) => asNumber(row.swap_sell_usd_5m) != null);
   const negativePnlRows = rows.filter((row) => asNumber(row.pnl_pct) != null && asNumber(row.pnl_pct) < 0);
   const signalNegativePnlRows = signalRows.filter((row) => asNumber(row.pnl_pct) != null && asNumber(row.pnl_pct) < 0);
 
@@ -87,6 +89,10 @@ function summarize(rows) {
     range_edge_count: rangeEdgeRows.length,
     rolling_dwell_coverage_count: rollingDwellRows.length,
     rolling_dwell_coverage_pct: pct(rollingDwellRows.length, rows.length),
+    lptele2_liquidity_shape_count: lptele2ShapeRows.length,
+    lptele2_liquidity_shape_pct: pct(lptele2ShapeRows.length, rows.length),
+    lptele4_swap_pressure_count: lptele4PressureRows.length,
+    lptele4_swap_pressure_pct: pct(lptele4PressureRows.length, rows.length),
     whale_escape_watch_count: watchRows.length,
     whale_escape_candidate_count: candidateRows.length,
     whale_escape_signal_count: signalRows.length,
@@ -94,6 +100,8 @@ function summarize(rows) {
     signal_negative_pnl_count: signalNegativePnlRows.length,
     signal_negative_pnl_pct: pct(signalNegativePnlRows.length, signalRows.length),
     data_sources: groupBy(rows, "whale_escape_data_source"),
+    lptele2_data_sources: groupBy(rows, "lptele2_liquidity_shape_data_source"),
+    lptele4_data_sources: groupBy(rows, "lptele4_swap_pressure_data_source"),
     range_proximity_zones: groupBy(rows, "range_proximity_zone"),
     range_edges: groupBy(rows, "range_edge_zone"),
     signal_pairs: groupBy(signalRows, "pair"),
@@ -116,6 +124,10 @@ function summarize(rows) {
       rolling_near_edge_sec_60s: row.rolling_near_edge_sec_60s ?? null,
       time_in_current_range_zone_minutes: row.time_in_current_range_zone_minutes ?? null,
       pool_lp_net_dep_usd_15m: row.pool_lp_net_dep_usd_15m ?? null,
+      quote_reserves_in_active_bin_usd: row.quote_reserves_in_active_bin_usd ?? null,
+      adjacent_bin_liquidity_cliff_pct: row.adjacent_bin_liquidity_cliff_pct ?? null,
+      swap_sell_usd_5m: row.swap_sell_usd_5m ?? null,
+      sell_buy_ratio_5m: row.sell_buy_ratio_5m ?? null,
     })),
   };
 }
@@ -136,6 +148,8 @@ function renderMarkdown(inputPath, summary) {
   lines.push(`- Time-in-zone coverage: ${summary.time_in_current_range_zone_count} (${summary.time_in_current_range_zone_pct}%)`);
   lines.push(`- Near-edge rows: ${summary.range_edge_count}`);
   lines.push(`- Rolling dwell coverage: ${summary.rolling_dwell_coverage_count} (${summary.rolling_dwell_coverage_pct}%)`);
+  lines.push(`- LPTELE-2 liquidity-shape coverage: ${summary.lptele2_liquidity_shape_count} (${summary.lptele2_liquidity_shape_pct}%)`);
+  lines.push(`- LPTELE-4 swap-pressure coverage: ${summary.lptele4_swap_pressure_count} (${summary.lptele4_swap_pressure_pct}%)`);
   lines.push(`- Watch signals: ${summary.whale_escape_watch_count}`);
   lines.push(`- Candidate signals: ${summary.whale_escape_candidate_count}`);
   lines.push(`- Signal rows with negative API PnL: ${summary.signal_negative_pnl_count} (${summary.signal_negative_pnl_pct}%)`);
@@ -144,6 +158,16 @@ function renderMarkdown(inputPath, summary) {
   lines.push("");
   for (const source of summary.data_sources) lines.push(`- ${source.value}: ${source.count}`);
   if (!summary.data_sources.length) lines.push("- none");
+  lines.push("");
+  lines.push("## LPTELE-2 Data Sources");
+  lines.push("");
+  for (const source of summary.lptele2_data_sources) lines.push(`- ${source.value}: ${source.count}`);
+  if (!summary.lptele2_data_sources.length) lines.push("- none");
+  lines.push("");
+  lines.push("## LPTELE-4 Data Sources");
+  lines.push("");
+  for (const source of summary.lptele4_data_sources) lines.push(`- ${source.value}: ${source.count}`);
+  if (!summary.lptele4_data_sources.length) lines.push("- none");
   lines.push("");
   lines.push("## Range Proximity Zones");
   lines.push("");
@@ -165,10 +189,10 @@ function renderMarkdown(inputPath, summary) {
   if (!summary.examples.length) {
     lines.push("No Whale Escape signal rows found.");
   } else {
-    lines.push("| Time | Pair | Signal | PnL % | Zone | Edge | Lower 60s | Upper 60s | Edge 60s | Dist Lower | Net Dep 15m | Reason |");
-    lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
+    lines.push("| Time | Pair | Signal | PnL % | Zone | Edge | Lower 60s | Upper 60s | Edge 60s | Dist Lower | Net Dep 15m | Active Quote USD | Cliff % | Sell 5m | S/B 5m | Reason |");
+    lines.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
     for (const row of summary.examples) {
-      lines.push(`| ${row.timestamp} | ${row.pair || ""} | ${row.signal || ""} | ${row.pnl_pct ?? ""} | ${row.range_proximity_zone ?? ""} | ${row.range_edge_zone ?? ""} | ${row.rolling_lower_half_sec_60s ?? ""} | ${row.rolling_upper_half_sec_60s ?? ""} | ${row.rolling_near_edge_sec_60s ?? ""} | ${row.bin_distance_to_lower ?? ""} | ${row.pool_lp_net_dep_usd_15m ?? ""} | ${String(row.reason || "").replaceAll("|", "/")} |`);
+      lines.push(`| ${row.timestamp} | ${row.pair || ""} | ${row.signal || ""} | ${row.pnl_pct ?? ""} | ${row.range_proximity_zone ?? ""} | ${row.range_edge_zone ?? ""} | ${row.rolling_lower_half_sec_60s ?? ""} | ${row.rolling_upper_half_sec_60s ?? ""} | ${row.rolling_near_edge_sec_60s ?? ""} | ${row.bin_distance_to_lower ?? ""} | ${row.pool_lp_net_dep_usd_15m ?? ""} | ${row.quote_reserves_in_active_bin_usd ?? ""} | ${row.adjacent_bin_liquidity_cliff_pct ?? ""} | ${row.swap_sell_usd_5m ?? ""} | ${row.sell_buy_ratio_5m ?? ""} | ${String(row.reason || "").replaceAll("|", "/")} |`);
     }
   }
   lines.push("");

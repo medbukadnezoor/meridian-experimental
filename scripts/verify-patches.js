@@ -45,6 +45,8 @@ const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js")
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
 const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-gmgn-first-discovery.js");
+const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-discovery-shadow.js");
+const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -464,6 +466,38 @@ function runScoutGmgnFirstDiscoveryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutDiscoveryShadowProof() {
+  const result = spawnSync(process.execPath, [SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-discovery-shadow failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runScoutDualSourceDiscoveryProof() {
+  const result = spawnSync(process.execPath, [SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-dual-source-discovery failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -494,8 +528,35 @@ function buildChecks() {
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
   const scoutGmgnFirstDiscoveryProof = runScoutGmgnFirstDiscoveryProof();
+  const scoutDiscoveryShadowProof = runScoutDiscoveryShadowProof();
+  const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
 
   return [
+    {
+      file: "scripts/verify-scout-dual-source-discovery.js",
+      label: "[Scout dual-source discovery] both mode resolves GMGN and Meteora before shared gates",
+      test: () =>
+        scoutDualSourceDiscoveryProof?.success === true &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("config accepts screeningSource=both") &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("same-pool overlap prefers Meteora metrics and preserves GMGN intelligence") &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("GMGN-only requires direct Meteora validation") &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("GMGN-only without validation rejects fail-closed") &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("same-mint alternatives are dropped and logged") &&
+        scoutDualSourceDiscoveryProof?.checks?.includes("source scan shows both branch before shared gates and no deploy/close verifier behavior") &&
+        scoutDualSourceDiscoveryProof?.sourceFailureProof?.gmgnFailureAllowsMeteora === true &&
+        scoutDualSourceDiscoveryProof?.sourceFailureProof?.meteoraFailureBlocksUnvalidatedGmgn === true,
+    },
+    {
+      file: "scripts/verify-scout-discovery-shadow.js",
+      label: "[Scout discovery shadow] runner compares GMGN and Meteora without deploy/close/cooldown/ranking mutation",
+      test: () =>
+        scoutDiscoveryShadowProof?.success === true &&
+        scoutDiscoveryShadowProof?.checks?.includes("runs synthetic scout GMGN/Meteora comparison") &&
+        scoutDiscoveryShadowProof?.checks?.includes("writes scout-named append-only JSONL and latest Markdown") &&
+        scoutDiscoveryShadowProof?.checks?.includes("marks evidence read-only/no-deploy/no-close/no-cooldown/no-ranking-mutation") &&
+        scoutDiscoveryShadowProof?.checks?.includes("restores source after GMGN and Meteora failures") &&
+        scoutDiscoveryShadowProof?.checks?.includes("source scan finds no deploy/close/PM2/agent-loop calls"),
+    },
     {
       file: "scripts/verify-scout-gmgn-first-discovery.js",
       label: "[Scout GMGN-first] GMGN discovery can feed existing scout safety gates before Darwin ranking",
