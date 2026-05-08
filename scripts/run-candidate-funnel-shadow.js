@@ -235,6 +235,7 @@ async function runSource({ source, limit, config, getTopCandidates }) {
 
 export async function runCandidateFunnelShadow(options = {}) {
   process.env.MERIDIAN_SHADOW_DISABLE_DECISION_CONTEXT ||= "true";
+  await loadModule("../envcrypt.js");
   const [{ config }, { getTopCandidates }] = await Promise.all([
     loadModule("../config.js"),
     loadModule("../tools/screening.js"),

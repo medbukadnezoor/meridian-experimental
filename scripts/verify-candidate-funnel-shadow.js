@@ -37,6 +37,9 @@ async function main() {
 
   const originalImport = globalThis.__MERIDIAN_CANDIDATE_SHADOW_TEST_IMPORT__;
   globalThis.__MERIDIAN_CANDIDATE_SHADOW_TEST_IMPORT__ = async (specifier) => {
+    if (specifier === "../envcrypt.js") {
+      return {};
+    }
     if (specifier === "../config.js") {
       return {
         config: {
@@ -113,6 +116,7 @@ async function main() {
   assert(scriptSource.includes("getTopCandidates"), "runner should reuse normal candidate gates");
   assert(scriptSource.includes('SOURCES = Object.freeze(["gmgn", "meteora"])'), "runner should compare GMGN and Meteora");
   assert(scriptSource.includes("candidate-funnel-shadow-${todayKey(row.ts)}.jsonl"), "runner should write candidate-funnel JSONL");
+  assert(scriptSource.includes('loadModule("../envcrypt.js")'), "runner should load local .env before config");
   assert(scriptSource.includes("noDeploy: true"), "runner should label noDeploy evidence");
   assert(scriptSource.includes("noClose: true"), "runner should label noClose evidence");
   assert(!scriptSource.includes("deploy_position"), "runner must not call deploy_position");
