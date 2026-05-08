@@ -901,6 +901,7 @@ function buildChecks() {
       test: (src) =>
         candidateFunnelShadowProof?.success === true &&
         src.includes('SOURCES = Object.freeze(["gmgn", "meteora"])') &&
+        src.includes('loadModule("../envcrypt.js")') &&
         src.includes("getTopCandidates") &&
         src.includes("candidate-funnel-shadow-${todayKey(row.ts)}.jsonl") &&
         src.includes("noDeploy: true") &&
