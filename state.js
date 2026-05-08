@@ -559,20 +559,55 @@ function buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlP
 }
 
 function getProfitProtectionShadowRules(mgmtConfig = {}) {
-  return [
+  const rules = [
     {
       ruleId: "primary_peak_5_drop_3",
+      ruleType: "profit_giveback",
       peakPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowPrimaryPeakPct ?? 5),
       minDropFromPeakPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowPrimaryDropPct ?? 3),
       currentPnlPct: null,
     },
     {
       ruleId: "secondary_peak_2_current_lte_0",
+      ruleType: "green_to_red",
       peakPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowSecondaryPeakPct ?? 2),
       minDropFromPeakPct: null,
       currentPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowSecondaryCurrentPnlPct ?? 0),
     },
   ];
+
+  for (const threshold of mgmtConfig.profitProtectionShadowHardTakeProfitPcts || []) {
+    const takeProfitPct = toFiniteNumberOrNull(threshold);
+    if (takeProfitPct == null) continue;
+    const label = String(takeProfitPct).replace(/\./g, "_");
+    rules.push({
+      ruleId: `hard_tp_${label}`,
+      ruleType: "hard_take_profit",
+      peakPnlPct: null,
+      minDropFromPeakPct: null,
+      currentPnlPct: takeProfitPct,
+      currentComparator: ">=",
+    });
+  }
+
+  for (const variant of mgmtConfig.profitProtectionShadowTrailingVariants || []) {
+    const triggerPct = toFiniteNumberOrNull(variant?.triggerPct);
+    const dropPct = toFiniteNumberOrNull(variant?.dropPct);
+    if (triggerPct == null || dropPct == null) continue;
+    const triggerLabel = String(triggerPct).replace(/\./g, "_");
+    const dropLabel = String(dropPct).replace(/\./g, "_");
+    rules.push({
+      ruleId: `trailing_${triggerLabel}_drop_${dropLabel}`,
+      ruleType: "trailing_variant",
+      peakPnlPct: triggerPct,
+      minDropFromPeakPct: dropPct,
+      currentPnlPct: null,
+      trailingTriggerPct: triggerPct,
+      trailingDropPct: dropPct,
+    });
+  }
+
+  return rules;
 }
 
 export function getProfitProtectionShadowTriggers(position_address, positionData = {}, mgmtConfig = {}) {
@@ -595,9 +630,14 @@ export function getProfitProtectionShadowTriggers(position_address, positionData
 
   for (const rule of getProfitProtectionShadowRules(mgmtConfig)) {
     if (logged[rule.ruleId]) continue;
-    if (rule.peakPnlPct == null || peakPnlPct < rule.peakPnlPct) continue;
+    if (rule.peakPnlPct != null && peakPnlPct < rule.peakPnlPct) continue;
     if (rule.minDropFromPeakPct != null && dropFromPeakPct < rule.minDropFromPeakPct) continue;
-    if (rule.currentPnlPct != null && currentPnlPct > rule.currentPnlPct) continue;
+    if (
+      rule.currentPnlPct != null &&
+      (rule.currentComparator === ">="
+        ? currentPnlPct < rule.currentPnlPct
+        : currentPnlPct > rule.currentPnlPct)
+    ) continue;
 
     triggered.push({
       ts: new Date().toISOString(),
@@ -614,10 +654,14 @@ export function getProfitProtectionShadowTriggers(position_address, positionData
       peakPnlPct,
       dropFromPeakPct,
       ruleId: rule.ruleId,
+      ruleType: rule.ruleType,
       rule: {
         peakPnlPct: rule.peakPnlPct,
         minDropFromPeakPct: rule.minDropFromPeakPct,
         currentPnlPct: rule.currentPnlPct,
+        currentComparator: rule.currentComparator ?? "<=",
+        trailingTriggerPct: rule.trailingTriggerPct ?? null,
+        trailingDropPct: rule.trailingDropPct ?? null,
       },
       source: "updatePnlAndCheckExits",
       shadowOnly: true,

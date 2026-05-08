@@ -317,6 +317,8 @@ const toolMap = {
       profitProtectionShadowPrimaryDropPct: ["management", "profitProtectionShadowPrimaryDropPct"],
       profitProtectionShadowSecondaryPeakPct: ["management", "profitProtectionShadowSecondaryPeakPct"],
       profitProtectionShadowSecondaryCurrentPnlPct: ["management", "profitProtectionShadowSecondaryCurrentPnlPct"],
+      profitProtectionShadowHardTakeProfitPcts: ["management", "profitProtectionShadowHardTakeProfitPcts"],
+      profitProtectionShadowTrailingVariants: ["management", "profitProtectionShadowTrailingVariants"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       earlyDumpPct: ["management", "earlyDumpPct"],
       earlyDumpMaxAgeMin: ["management", "earlyDumpMaxAgeMin"],

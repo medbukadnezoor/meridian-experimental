@@ -35,6 +35,23 @@ export function normalizePositiveInteger(value, fallback) {
   return Math.floor(parsed);
 }
 
+function normalizeNumberArray(value, fallback = []) {
+  const source = Array.isArray(value) ? value : fallback;
+  return source
+    .map((entry) => Number(entry))
+    .filter((entry) => Number.isFinite(entry));
+}
+
+function normalizeTrailingVariantArray(value, fallback = []) {
+  const source = Array.isArray(value) ? value : fallback;
+  return source
+    .map((entry) => ({
+      triggerPct: Number(entry?.triggerPct),
+      dropPct: Number(entry?.dropPct),
+    }))
+    .filter((entry) => Number.isFinite(entry.triggerPct) && Number.isFinite(entry.dropPct));
+}
+
 export function normalizeScreeningSource(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
@@ -280,6 +297,17 @@ export function buildConfig(userConfig = {}, env = process.env) {
       profitProtectionShadowPrimaryDropPct: u.profitProtectionShadowPrimaryDropPct ?? 3,
       profitProtectionShadowSecondaryPeakPct: u.profitProtectionShadowSecondaryPeakPct ?? 2,
       profitProtectionShadowSecondaryCurrentPnlPct: u.profitProtectionShadowSecondaryCurrentPnlPct ?? 0,
+      profitProtectionShadowHardTakeProfitPcts: normalizeNumberArray(
+        u.profitProtectionShadowHardTakeProfitPcts,
+        isNanocapPreset ? [6, 7] : [],
+      ),
+      profitProtectionShadowTrailingVariants: normalizeTrailingVariantArray(
+        u.profitProtectionShadowTrailingVariants,
+        isNanocapPreset ? [
+          { triggerPct: 6, dropPct: 2 },
+          { triggerPct: 6, dropPct: 1.5 },
+        ] : [],
+      ),
       supertrendLossExitEnabled: u.supertrendLossExitEnabled ?? isNanocapPreset,
       supertrendLossExitPnlPct: u.supertrendLossExitPnlPct ?? (isNanocapPreset || u.supertrendLossExitEnabled ? -4 : null),
       supertrendLossExitInterval: u.supertrendLossExitInterval ?? "15_MINUTE",

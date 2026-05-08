@@ -95,6 +95,8 @@ function buildProof(imported, requestedUserConfigPath) {
       profitProtectionShadowPrimaryDropPct: imported.config.management.profitProtectionShadowPrimaryDropPct,
       profitProtectionShadowSecondaryPeakPct: imported.config.management.profitProtectionShadowSecondaryPeakPct,
       profitProtectionShadowSecondaryCurrentPnlPct: imported.config.management.profitProtectionShadowSecondaryCurrentPnlPct,
+      profitProtectionShadowHardTakeProfitPcts: imported.config.management.profitProtectionShadowHardTakeProfitPcts,
+      profitProtectionShadowTrailingVariants: imported.config.management.profitProtectionShadowTrailingVariants,
       supertrendLossExitEnabled: imported.config.management.supertrendLossExitEnabled,
       supertrendLossExitPnlPct: imported.config.management.supertrendLossExitPnlPct,
       supertrendLossExitInterval: imported.config.management.supertrendLossExitInterval,

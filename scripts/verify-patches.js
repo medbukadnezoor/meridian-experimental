@@ -28,6 +28,7 @@ const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss
 const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
 const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
 const PROFIT_PROTECTION_SHADOW_VERIFIER_PATH = join(__dirname, "verify-profit-protection-shadow.js");
+const CANDIDATE_FUNNEL_SHADOW_VERIFIER_PATH = join(__dirname, "verify-candidate-funnel-shadow.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap-single-side-bidask.js");
@@ -186,6 +187,22 @@ function runProfitProtectionShadowProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-profit-protection-shadow failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runCandidateFunnelShadowProof() {
+  const result = spawnSync(process.execPath, [CANDIDATE_FUNNEL_SHADOW_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-candidate-funnel-shadow failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -465,6 +482,7 @@ function buildChecks() {
   const emergencyStopProof = runEmergencyStopPolicyProof();
   const rollingDrawdownExitProof = runRollingDrawdownExitPolicyProof();
   const profitProtectionShadowProof = runProfitProtectionShadowProof();
+  const candidateFunnelShadowProof = runCandidateFunnelShadowProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
   const nanocapSingleSideBidAskProof = runNanocapSingleSideBidAskProof();
@@ -787,7 +805,12 @@ function buildChecks() {
         src.includes("profitProtectionShadowPrimaryPeakPct: u.profitProtectionShadowPrimaryPeakPct ?? 5") &&
         src.includes("profitProtectionShadowPrimaryDropPct: u.profitProtectionShadowPrimaryDropPct ?? 3") &&
         src.includes("profitProtectionShadowSecondaryPeakPct: u.profitProtectionShadowSecondaryPeakPct ?? 2") &&
-        src.includes("profitProtectionShadowSecondaryCurrentPnlPct: u.profitProtectionShadowSecondaryCurrentPnlPct ?? 0"),
+        src.includes("profitProtectionShadowSecondaryCurrentPnlPct: u.profitProtectionShadowSecondaryCurrentPnlPct ?? 0") &&
+        src.includes("profitProtectionShadowHardTakeProfitPcts") &&
+        src.includes("profitProtectionShadowTrailingVariants") &&
+        src.includes("isNanocapPreset ? [6, 7] : []") &&
+        src.includes("{ triggerPct: 6, dropPct: 2 }") &&
+        src.includes("{ triggerPct: 6, dropPct: 1.5 }"),
     },
     {
       file: "tools/executor.js",
@@ -809,6 +832,8 @@ function buildChecks() {
         src.includes('profitProtectionShadowPrimaryDropPct: ["management", "profitProtectionShadowPrimaryDropPct"]') &&
         src.includes('profitProtectionShadowSecondaryPeakPct: ["management", "profitProtectionShadowSecondaryPeakPct"]') &&
         src.includes('profitProtectionShadowSecondaryCurrentPnlPct: ["management", "profitProtectionShadowSecondaryCurrentPnlPct"]') &&
+        src.includes('profitProtectionShadowHardTakeProfitPcts: ["management", "profitProtectionShadowHardTakeProfitPcts"]') &&
+        src.includes('profitProtectionShadowTrailingVariants: ["management", "profitProtectionShadowTrailingVariants"]') &&
         !src.includes("profitProtectionShadowCloseEnabled"),
     },
     {
@@ -824,6 +849,14 @@ function buildChecks() {
         profitProtectionShadowProof?.secondary?.firstRows === 1 &&
         profitProtectionShadowProof?.secondary?.repeatRows === 0 &&
         profitProtectionShadowProof?.secondary?.ruleId === "secondary_peak_2_current_lte_0" &&
+        profitProtectionShadowProof?.hardTakeProfit?.firstRows === 2 &&
+        profitProtectionShadowProof?.hardTakeProfit?.repeatRows === 0 &&
+        profitProtectionShadowProof?.hardTakeProfit?.ruleIds?.includes("hard_tp_6") &&
+        profitProtectionShadowProof?.hardTakeProfit?.ruleIds?.includes("hard_tp_7") &&
+        profitProtectionShadowProof?.tightTrailing?.firstRows === 2 &&
+        profitProtectionShadowProof?.tightTrailing?.repeatRows === 0 &&
+        profitProtectionShadowProof?.tightTrailing?.ruleIds?.includes("trailing_6_drop_2") &&
+        profitProtectionShadowProof?.tightTrailing?.ruleIds?.includes("trailing_6_drop_1_5") &&
         profitProtectionShadowProof?.disabledRows === 0 &&
         profitProtectionShadowProof?.appendFailureRetry?.initialRows === 1 &&
         profitProtectionShadowProof?.appendFailureRetry?.failureCaught === true &&
@@ -831,13 +864,15 @@ function buildChecks() {
         profitProtectionShadowProof?.appendFailureRetry?.rowsAfterRetry === 0 &&
         profitProtectionShadowProof?.appendFailureRetry?.retryMarked === true &&
         profitProtectionShadowProof?.stopLossSelection?.action === "STOP_LOSS_CANDIDATE" &&
-        profitProtectionShadowProof?.stopLossSelection?.shadowRows === 2 &&
-        profitProtectionShadowProof?.logRows === 3 &&
+        profitProtectionShadowProof?.stopLossSelection?.shadowRows === 4 &&
+        profitProtectionShadowProof?.logRows === 7 &&
         profitProtectionShadowProof?.tempStateFileCreated === true &&
         profitProtectionShadowProof?.tempDirRemoved === true &&
         src.includes("getProfitProtectionShadowTriggers") &&
         src.includes("markProfitProtectionShadowTriggersLogged") &&
         src.includes("profit_protection_shadow_logged") &&
+        src.includes("ruleType: \"hard_take_profit\"") &&
+        src.includes("ruleType: \"trailing_variant\"") &&
         src.includes("shadowOnly: true") &&
         !src.includes("action: \"PROFIT_PROTECTION\""),
     },
@@ -859,6 +894,27 @@ function buildChecks() {
         src.includes("profit-protection-shadow-${dateStr}.jsonl") &&
         src.includes("appendFileSync") &&
         src.includes("shadowOnly: true"),
+    },
+    {
+      file: "scripts/run-candidate-funnel-shadow.js",
+      label: "[Candidate funnel shadow] runner compares GMGN and Meteora without deploy or close calls",
+      test: (src) =>
+        candidateFunnelShadowProof?.success === true &&
+        src.includes('SOURCES = Object.freeze(["gmgn", "meteora"])') &&
+        src.includes("getTopCandidates") &&
+        src.includes("candidate-funnel-shadow-${todayKey(row.ts)}.jsonl") &&
+        src.includes("noDeploy: true") &&
+        src.includes("noClose: true") &&
+        !src.includes("deploy_position") &&
+        !src.includes("close_position"),
+    },
+    {
+      file: "decision-context-log.js",
+      label: "[Candidate funnel shadow] shadow process can suppress decision-context side writes",
+      test: (src) =>
+        candidateFunnelShadowProof?.checks?.includes("decision-context writes are suppressible for shadow process") &&
+        src.includes("MERIDIAN_SHADOW_DISABLE_DECISION_CONTEXT") &&
+        src.includes("return null;"),
     },
     {
       file: "config-builder.js",
