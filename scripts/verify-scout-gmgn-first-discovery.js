@@ -152,7 +152,7 @@ const gmgnSource = src("tools/gmgn.js");
 const screeningSource = src("tools/screening.js");
 const verifierSource = src("scripts/verify-scout-gmgn-first-discovery.js");
 
-assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn"])'), "supported screening source set is explicit");
+assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"])'), "supported screening source set is explicit");
 assert.ok(configBuilderSource.includes("normalizeScreeningSource"), "screening source normalizer exists");
 assert.ok(configBuilderSource.includes("resolveEnvReference(g.apiKey ?? u.gmgnApiKey"), "GMGN key can resolve from env reference without committing secrets");
 

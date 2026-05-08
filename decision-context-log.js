@@ -110,6 +110,10 @@ export function buildCandidateDecisionContext(candidate = {}) {
 }
 
 export function appendDecisionContext(entry = {}) {
+  if (String(process.env.MERIDIAN_SHADOW_DISABLE_DECISION_CONTEXT || "").toLowerCase() === "true") {
+    return null;
+  }
+
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
     const now = new Date();

@@ -50,6 +50,104 @@ function scoreCandidate(pool) {
   return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
 }
 
+function candidatePoolAddress(candidate = {}) {
+  return candidate.pool ?? candidate.pool_address ?? candidate.address ?? null;
+}
+
+function candidateBaseMint(candidate = {}) {
+  return candidate.base?.mint ?? candidate.base_mint ?? candidate.token_x?.address ?? candidate.token_x_mint ?? null;
+}
+
+function buildSourceEvidence(candidate = {}) {
+  return {
+    source: candidate.source ?? candidate.discovery_source ?? null,
+    pool: candidatePoolAddress(candidate),
+    base_mint: candidateBaseMint(candidate),
+    name: candidate.name ?? null,
+    active_tvl: candidate.active_tvl ?? candidate.tvl ?? null,
+    volume_window: candidate.volume_window ?? candidate.volume ?? null,
+    fee_active_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio ?? null,
+    bin_step: candidate.bin_step ?? candidate.dlmm_params?.bin_step ?? null,
+    volatility: candidate.volatility ?? null,
+    volatility_timeframe: candidate.volatility_timeframe ?? null,
+    mcap: candidate.mcap ?? null,
+    holders: candidate.holders ?? candidate.holder_count ?? null,
+    gmgn_score: candidate.gmgn_score ?? null,
+    gmgn_total_fee_sol: candidate.gmgn_total_fee_sol ?? null,
+  };
+}
+
+function isMeteoraSolDlmmCandidate(candidate = {}, runtimeConfig = config) {
+  const quoteMint = candidate.quote?.mint ?? candidate.token_y?.address ?? candidate.token_y_mint ?? null;
+  const quoteSymbol = normalizeSymbol(candidate.quote?.symbol ?? candidate.token_y?.symbol);
+  const poolType = String(candidate.pool_type ?? "").toLowerCase();
+  const activeTvl = candidateThresholdNumber(candidate, "active_tvl", "tvl");
+  const volume = candidateThresholdNumber(candidate, "volume_window", "volume");
+  const feeActiveTvlRatio = candidateThresholdNumber(candidate, "fee_active_tvl_ratio", "fee_tvl_ratio");
+  const binStep = candidateThresholdNumber(candidate, "bin_step", "dlmm_params.bin_step");
+  const volatility = candidateThresholdNumber(candidate, "volatility");
+  return Boolean(
+    candidatePoolAddress(candidate) &&
+    candidateBaseMint(candidate) &&
+    (poolType === "dlmm" || poolType === "") &&
+    (quoteMint === runtimeConfig.tokens?.SOL || quoteSymbol === "SOL") &&
+    activeTvl != null && activeTvl > 0 &&
+    volume != null && volume >= 0 &&
+    feeActiveTvlRatio != null && feeActiveTvlRatio > 0 &&
+    binStep != null && binStep > 0 &&
+    volatility != null && volatility > 0
+  );
+}
+
+function mergeCandidateSources(gmgnCandidate, meteoraCandidate, {
+  sourceResolution,
+  discoverySources,
+  sourceMode = "both",
+  sameMintAlternatives = [],
+} = {}) {
+  const preferredMetrics = meteoraCandidate || {};
+  const gmgnEvidence = gmgnCandidate ? buildSourceEvidence(gmgnCandidate) : null;
+  const meteoraEvidence = meteoraCandidate ? buildSourceEvidence(meteoraCandidate) : null;
+  const merged = {
+    ...(gmgnCandidate || {}),
+    ...(meteoraCandidate || {}),
+    source: sourceMode,
+    source_mode: sourceMode,
+    discovery_source: sourceMode,
+    discovery_sources: discoverySources,
+    source_resolution: sourceResolution,
+    source_evidence: {
+      gmgn: gmgnEvidence,
+      meteora: meteoraEvidence,
+      same_mint_alternatives: sameMintAlternatives,
+    },
+  };
+
+  for (const key of [
+    "active_tvl",
+    "volume_window",
+    "fee_active_tvl_ratio",
+    "bin_step",
+    "volatility",
+    "volatility_timeframe",
+    "organic_score",
+    "quote_organic_score",
+  ]) {
+    if (preferredMetrics[key] != null) merged[key] = preferredMetrics[key];
+  }
+
+  if (preferredMetrics.base?.organic != null) merged.base = { ...(merged.base || {}), organic: preferredMetrics.base.organic };
+  if (preferredMetrics.quote?.organic != null) merged.quote = { ...(merged.quote || {}), organic: preferredMetrics.quote.organic };
+  if (gmgnCandidate) {
+    for (const [key, value] of Object.entries(gmgnCandidate)) {
+      if (key.startsWith("gmgn_") && value != null) merged[key] = value;
+    }
+    if (gmgnCandidate.gmgn != null) merged.gmgn = gmgnCandidate.gmgn;
+  }
+
+  return merged;
+}
+
 export function getVolatilityTimeframe(sourceTimeframe) {
   const source = String(sourceTimeframe || "").trim();
   const sourceMinutes = TIMEFRAME_MINUTES[source];
@@ -673,6 +771,176 @@ async function discoverMeteoraCandidateUniverse(runtimeConfig) {
   };
 }
 
+async function validateGmgnOnlyCandidatesWithMeteora(candidates, runtimeConfig) {
+  const validations = new Map();
+  await Promise.all((candidates || []).map(async (candidate) => {
+    const poolAddress = candidatePoolAddress(candidate);
+    if (!poolAddress) return;
+    try {
+      const detail = await fetchPoolDiscoveryDetail({
+        poolAddress,
+        timeframe: getVolatilityTimeframe(runtimeConfig.screening?.timeframe || "5m"),
+      });
+      if (!detail) return;
+      const [withVolatility] = await applyVolatilityTimeframe([detail], runtimeConfig.screening?.timeframe || "5m");
+      const condensed = condensePool(withVolatility || detail);
+      if (isMeteoraSolDlmmCandidate(condensed, runtimeConfig)) {
+        validations.set(poolAddress, condensed);
+      }
+    } catch (error) {
+      log("screening", `GMGN-only Meteora validation failed for ${poolAddress.slice(0, 8)}: ${error.message}`);
+    }
+  }));
+  return validations;
+}
+
+export function resolveDualSourceDiscovery({
+  gmgnDiscovery = {},
+  meteoraDiscovery = {},
+  gmgnValidationByPool = new Map(),
+  sourceErrors = {},
+  runtimeConfig = config,
+} = {}) {
+  const gmgnPools = Array.isArray(gmgnDiscovery.pools) ? gmgnDiscovery.pools : [];
+  const meteoraPools = Array.isArray(meteoraDiscovery.pools) ? meteoraDiscovery.pools : [];
+  const filtered = [
+    ...(Array.isArray(gmgnDiscovery.filtered_examples) ? gmgnDiscovery.filtered_examples : []),
+    ...(Array.isArray(meteoraDiscovery.filtered_examples) ? meteoraDiscovery.filtered_examples : []),
+  ];
+  const counts = {
+    pool_overlap: 0,
+    mint_overlap: 0,
+    gmgn_only_accepted: 0,
+    gmgn_only_rejected: 0,
+    meteora_only_accepted: 0,
+    meteora_only_rejected: 0,
+    same_mint_alternatives_dropped: 0,
+    source_validation_reject: 0,
+  };
+
+  const gmgnByPool = new Map();
+  const meteoraByPool = new Map();
+  for (const pool of gmgnPools) {
+    const address = candidatePoolAddress(pool);
+    if (address && !gmgnByPool.has(address)) gmgnByPool.set(address, pool);
+  }
+  for (const pool of meteoraPools) {
+    const address = candidatePoolAddress(pool);
+    if (address && !meteoraByPool.has(address)) meteoraByPool.set(address, pool);
+  }
+
+  const candidates = [];
+  const allPools = new Set([...gmgnByPool.keys(), ...meteoraByPool.keys()]);
+  for (const poolAddress of allPools) {
+    const gmgnPool = gmgnByPool.get(poolAddress);
+    const meteoraPool = meteoraByPool.get(poolAddress);
+    if (gmgnPool && meteoraPool) {
+      counts.pool_overlap += 1;
+      candidates.push(mergeCandidateSources(gmgnPool, meteoraPool, {
+        sourceResolution: "overlap_same_pool",
+        discoverySources: ["gmgn", "meteora"],
+      }));
+      continue;
+    }
+    if (gmgnPool) {
+      const validated = gmgnValidationByPool.get(poolAddress);
+      if (!validated || !isMeteoraSolDlmmCandidate(validated, runtimeConfig)) {
+        counts.gmgn_only_rejected += 1;
+        counts.source_validation_reject += 1;
+        filtered.push({
+          stage: "source_validation_reject",
+          name: gmgnPool.name || gmgnPool.base?.symbol || poolAddress,
+          pool: poolAddress,
+          reason: "GMGN-only candidate lacks valid direct Meteora SOL DLMM validation",
+          source: "gmgn",
+        });
+        continue;
+      }
+      counts.gmgn_only_accepted += 1;
+      candidates.push(mergeCandidateSources(gmgnPool, validated, {
+        sourceResolution: "gmgn_only_validated",
+        discoverySources: ["gmgn"],
+      }));
+      continue;
+    }
+    if (meteoraPool) {
+      if (!isMeteoraSolDlmmCandidate(meteoraPool, runtimeConfig)) {
+        counts.meteora_only_rejected += 1;
+        filtered.push({
+          stage: "source_validation_reject",
+          name: meteoraPool.name || poolAddress,
+          pool: poolAddress,
+          reason: "Meteora-only candidate is not a valid SOL DLMM pool",
+          source: "meteora",
+        });
+        continue;
+      }
+      counts.meteora_only_accepted += 1;
+      candidates.push(mergeCandidateSources(null, meteoraPool, {
+        sourceResolution: "meteora_only",
+        discoverySources: ["meteora"],
+      }));
+    }
+  }
+
+  const byMint = new Map();
+  for (const candidate of candidates) {
+    const mint = candidateBaseMint(candidate);
+    if (!mint) continue;
+    const list = byMint.get(mint) || [];
+    list.push(candidate);
+    byMint.set(mint, list);
+  }
+
+  const resolved = [];
+  for (const list of byMint.values()) {
+    if (list.length === 1) {
+      resolved.push(list[0]);
+      continue;
+    }
+    counts.mint_overlap += list.length;
+    const sorted = [...list].sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+    const [winner, ...dropped] = sorted;
+    const alternatives = dropped.map(buildSourceEvidence);
+    winner.source_evidence = {
+      ...(winner.source_evidence || {}),
+      same_mint_alternatives: alternatives,
+    };
+    for (const candidate of dropped) {
+      counts.same_mint_alternatives_dropped += 1;
+      filtered.push({
+        stage: "same_mint_alternative_dropped",
+        name: candidate.name || candidate.base?.symbol || candidate.pool,
+        pool: candidate.pool,
+        base_mint: candidateBaseMint(candidate),
+        reason: "same base mint already represented by a higher-scored resolved pool",
+        source: Array.isArray(candidate.discovery_sources) ? candidate.discovery_sources.join("+") : candidate.source,
+      });
+    }
+    resolved.push(winner);
+  }
+
+  return {
+    total: (gmgnDiscovery.total ?? gmgnPools.length) + (meteoraDiscovery.total ?? meteoraPools.length),
+    pools: resolved.sort((a, b) => scoreCandidate(b) - scoreCandidate(a)),
+    filtered_examples: filtered,
+    source_errors: sourceErrors,
+    stage_counts: {
+      source: "both",
+      source_mode: "both",
+      gmgn_stage_counts: gmgnDiscovery.stage_counts || {},
+      meteora_stage_counts: meteoraDiscovery.stage_counts || {},
+      union_stage_counts: {
+        gmgn_candidates: gmgnPools.length,
+        meteora_candidates: meteoraPools.length,
+        resolved_candidates: resolved.length,
+        ...counts,
+      },
+      ...counts,
+    },
+  };
+}
+
 /**
  * Returns eligible pools for the agent to evaluate and pick from.
  * Hard filters applied in code, agent decides which to deploy into.
@@ -680,13 +948,40 @@ async function discoverMeteoraCandidateUniverse(runtimeConfig) {
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
   const source = String(config.screening.source || "meteora").toLowerCase();
-  if (!["meteora", "gmgn"].includes(source)) {
-    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  if (!["meteora", "gmgn", "both"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora, gmgn, or both.`);
   }
 
-  const discovery = source === "gmgn"
-    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
-    : await discoverMeteoraCandidateUniverse(config);
+  let discovery;
+  if (source === "gmgn") {
+    discovery = await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) });
+  } else if (source === "both") {
+    const [gmgnResult, meteoraResult] = await Promise.allSettled([
+      discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) }),
+      discoverMeteoraCandidateUniverse(config),
+    ]);
+    const gmgnDiscovery = gmgnResult.status === "fulfilled"
+      ? gmgnResult.value
+      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
+    const meteoraDiscovery = meteoraResult.status === "fulfilled"
+      ? meteoraResult.value
+      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
+    const meteoraPools = new Set((meteoraDiscovery.pools || []).map(candidatePoolAddress).filter(Boolean));
+    const gmgnOnlyPools = (gmgnDiscovery.pools || []).filter((pool) => !meteoraPools.has(candidatePoolAddress(pool)));
+    const gmgnValidationByPool = await validateGmgnOnlyCandidatesWithMeteora(gmgnOnlyPools, config);
+    discovery = resolveDualSourceDiscovery({
+      gmgnDiscovery,
+      meteoraDiscovery,
+      gmgnValidationByPool,
+      sourceErrors: {
+        gmgn: gmgnResult.status === "rejected" ? gmgnResult.reason?.message || String(gmgnResult.reason) : null,
+        meteora: meteoraResult.status === "rejected" ? meteoraResult.reason?.message || String(meteoraResult.reason) : null,
+      },
+      runtimeConfig: config,
+    });
+  } else {
+    discovery = await discoverMeteoraCandidateUniverse(config);
+  }
   let pools = discovery.pools || [];
   const totalScreened = discovery.total ?? pools.length;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
@@ -980,6 +1275,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       ...(discovery.stage_counts || {}),
       ...postDiscoveryStageCounts,
     },
+    source_errors: discovery.source_errors || {},
     filtered_examples: filteredOut.slice(0, 3),
     all_filtered: filteredOut,
   };
