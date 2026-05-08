@@ -44,6 +44,11 @@ function baseConfig(overrides = {}) {
     profitProtectionShadowPrimaryDropPct: 3,
     profitProtectionShadowSecondaryPeakPct: 2,
     profitProtectionShadowSecondaryCurrentPnlPct: 0,
+    profitProtectionShadowHardTakeProfitPcts: [6, 7],
+    profitProtectionShadowTrailingVariants: [
+      { triggerPct: 6, dropPct: 2 },
+      { triggerPct: 6, dropPct: 1.5 },
+    ],
     ...overrides,
   };
 }
@@ -132,6 +137,22 @@ async function main() {
     const secondaryMarked = markProfitProtectionShadowTriggersLogged("secondary", secondaryRows);
     const secondaryRepeatRows = getProfitProtectionShadowTriggers("secondary", secondaryPosition, baseConfig());
 
+    track("hard-tp");
+    setPeakPnl(tempDir, "hard-tp", 7.2);
+    const hardTpPosition = makePosition("hard-tp", { pnl_pct: 7.2 });
+    const hardTpRows = getProfitProtectionShadowTriggers("hard-tp", hardTpPosition, baseConfig());
+    appendProfitProtectionShadowRows(hardTpRows, { wallet: "wallet-proof" });
+    const hardTpMarked = markProfitProtectionShadowTriggersLogged("hard-tp", hardTpRows);
+    const hardTpRepeatRows = getProfitProtectionShadowTriggers("hard-tp", hardTpPosition, baseConfig());
+
+    track("tight-trailing");
+    setPeakPnl(tempDir, "tight-trailing", 6.4);
+    const tightTrailingPosition = makePosition("tight-trailing", { pnl_pct: 4.2 });
+    const tightTrailingRows = getProfitProtectionShadowTriggers("tight-trailing", tightTrailingPosition, baseConfig());
+    appendProfitProtectionShadowRows(tightTrailingRows, { wallet: "wallet-proof" });
+    const tightTrailingMarked = markProfitProtectionShadowTriggersLogged("tight-trailing", tightTrailingRows);
+    const tightTrailingRepeatRows = getProfitProtectionShadowTriggers("tight-trailing", tightTrailingPosition, baseConfig());
+
     track("disabled");
     setPeakPnl(tempDir, "disabled", 9);
     const disabledRows = getProfitProtectionShadowTriggers(
@@ -190,16 +211,26 @@ async function main() {
     assert(secondaryMarked === true, "secondary rule should mark only after append succeeds");
     assert(secondaryRows[0].ruleId === "secondary_peak_2_current_lte_0", "secondary rule id mismatch");
     assert(secondaryRepeatRows.length === 0, "secondary rule should dedupe after first trigger");
+    assert(hardTpRows.length === 2, "hard TP sample should log TP6 and TP7 once");
+    assert(hardTpMarked === true, "hard TP rows should mark after append succeeds");
+    assert(hardTpRows.map((row) => row.ruleId).join(",") === "hard_tp_6,hard_tp_7", "hard TP rule ids mismatch");
+    assert(hardTpRows.every((row) => row.ruleType === "hard_take_profit"), "hard TP rows should carry hard_take_profit type");
+    assert(hardTpRepeatRows.length === 0, "hard TP rules should dedupe after first trigger");
+    assert(tightTrailingRows.length === 2, "tight trailing sample should log both trailing variants");
+    assert(tightTrailingMarked === true, "tight trailing rows should mark after append succeeds");
+    assert(tightTrailingRows.map((row) => row.ruleId).join(",") === "trailing_6_drop_2,trailing_6_drop_1_5", "tight trailing rule ids mismatch");
+    assert(tightTrailingRows.every((row) => row.ruleType === "trailing_variant"), "tight trailing rows should carry trailing_variant type");
+    assert(tightTrailingRepeatRows.length === 0, "tight trailing rules should dedupe after first trigger");
     assert(disabledRows.length === 0, "disabled shadow logging should not emit rows");
     assert(stopLossExit?.action === "STOP_LOSS_CANDIDATE", "shadow code must not change stop-loss candidate selection");
-    assert(stopLossShadowRows.length === 2, "stop-loss sample should still record both shadow evidence rules");
+    assert(stopLossShadowRows.length === 4, "stop-loss sample should still record shadow evidence rules without changing exit");
     assert(appendFailureRows.length === 1, "append-failure setup should produce a shadow row");
     assert(appendFailureCaught === true, "append failure should be observable");
     assert(retryRowsAfterAppendFailure.length === 1, "failed append must not dedupe the event");
     assert(retryMarked === true, "retry should mark after successful append");
     assert(rowsAfterSuccessfulRetry.length === 0, "successful retry should dedupe subsequent polls");
     assert(Boolean(getLoggedRules(tempDir, "append-failure").primary_peak_5_drop_3), "retry logged state should persist after successful append");
-    assert(rows.length === 3, "append-only log should contain primary, secondary, and retry shadow rows");
+    assert(rows.length === 7, "append-only log should contain primary, secondary, hard TP, tight trailing, and retry rows");
     assert(rows.every((row) => row.event === "profit_protection_shadow"), "log rows should use profit_protection_shadow event");
     assert(rows.every((row) => row.bot === "nanocap"), "log rows should identify nanocap bot");
     assert(rows.every((row) => row.wallet === "wallet-proof"), "log rows should include wallet");
@@ -219,6 +250,18 @@ async function main() {
         firstRows: secondaryRows.length,
         repeatRows: secondaryRepeatRows.length,
         ruleId: secondaryRows[0].ruleId,
+      },
+      hardTakeProfit: {
+        firstRows: hardTpRows.length,
+        repeatRows: hardTpRepeatRows.length,
+        ruleIds: hardTpRows.map((row) => row.ruleId),
+        marked: hardTpMarked,
+      },
+      tightTrailing: {
+        firstRows: tightTrailingRows.length,
+        repeatRows: tightTrailingRepeatRows.length,
+        ruleIds: tightTrailingRows.map((row) => row.ruleId),
+        marked: tightTrailingMarked,
       },
       disabledRows: disabledRows.length,
       appendFailureRetry: {

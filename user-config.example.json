@@ -135,6 +135,11 @@
   "profitProtectionShadowPrimaryDropPct": 3,
   "profitProtectionShadowSecondaryPeakPct": 2,
   "profitProtectionShadowSecondaryCurrentPnlPct": 0,
+  "profitProtectionShadowHardTakeProfitPcts": [6, 7],
+  "profitProtectionShadowTrailingVariants": [
+    { "triggerPct": 6, "dropPct": 2 },
+    { "triggerPct": 6, "dropPct": 1.5 }
+  ],
   "supertrendLossExitEnabled": true,
   "supertrendLossExitPnlPct": -4,
   "supertrendLossExitInterval": "15_MINUTE",
