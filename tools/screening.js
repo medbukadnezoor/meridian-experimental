@@ -4,6 +4,7 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
+import { discoverGmgnPools } from "./gmgn.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
 import {
   appendDecisionContext,
@@ -14,6 +15,17 @@ import {
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
+const MIN_VOLATILITY_TIMEFRAME = "30m";
+const TIMEFRAME_MINUTES = Object.freeze({
+  "5m": 5,
+  "15m": 15,
+  "30m": 30,
+  "1h": 60,
+  "2h": 120,
+  "4h": 240,
+  "12h": 720,
+  "24h": 1440,
+});
 const PVP_SHORTLIST_LIMIT = 2;
 const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
@@ -36,6 +48,75 @@ function scoreCandidate(pool) {
   const volume = Number(pool.volume_window || 0);
   const holders = Number(pool.holders || 0);
   return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+export function getVolatilityTimeframe(sourceTimeframe) {
+  const source = String(sourceTimeframe || "").trim();
+  const sourceMinutes = TIMEFRAME_MINUTES[source];
+  const minMinutes = TIMEFRAME_MINUTES[MIN_VOLATILITY_TIMEFRAME];
+  return sourceMinutes != null && sourceMinutes >= minMinutes ? source : MIN_VOLATILITY_TIMEFRAME;
+}
+
+async function fetchPoolDiscoveryPage({ page_size, filters, timeframe, category }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=${page_size}` +
+    `&filter_by=${encodeURIComponent(filters)}` +
+    `&timeframe=${encodeURIComponent(timeframe)}` +
+    `&category=${encodeURIComponent(category)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+async function fetchPoolDiscoveryDetail({ poolAddress, timeframe }) {
+  const url = `${POOL_DISCOVERY_BASE}/pools?` +
+    `page_size=1` +
+    `&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}` +
+    `&timeframe=${encodeURIComponent(timeframe)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
+  }
+  const data = await res.json();
+  return (data.data || [])[0] ?? null;
+}
+
+async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
+  if (!Array.isArray(rawPools) || rawPools.length === 0) return rawPools;
+  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
+  if (sourceTimeframe === volatilityTimeframe) {
+    for (const pool of rawPools) {
+      if (pool) pool.volatility_timeframe = volatilityTimeframe;
+    }
+    return rawPools;
+  }
+
+  const uniquePoolAddresses = [...new Set(rawPools.map((pool) => pool?.pool_address).filter(Boolean))];
+  const volatilityResults = await Promise.allSettled(
+    uniquePoolAddresses.map((poolAddress) =>
+      fetchPoolDiscoveryDetail({ poolAddress, timeframe: volatilityTimeframe })
+        .then((pool) => ({ poolAddress, volatility: finiteNumberOrNull(pool?.volatility) }))
+    )
+  );
+
+  const volatilityByPool = new Map();
+  for (const result of volatilityResults) {
+    if (result.status !== "fulfilled") continue;
+    if (result.value.volatility == null) continue;
+    volatilityByPool.set(result.value.poolAddress, result.value.volatility);
+  }
+
+  for (const pool of rawPools) {
+    if (!pool?.pool_address) continue;
+    pool.volatility = volatilityByPool.has(pool.pool_address)
+      ? volatilityByPool.get(pool.pool_address)
+      : null;
+    pool.volatility_timeframe = volatilityTimeframe;
+  }
+
+  return rawPools;
 }
 
 async function fetchDiscordSignalCandidates() {
@@ -245,6 +326,110 @@ function getIndicatorDecisionStage(confirmation = {}) {
   return confirmation.confirmed ? "indicator_accept" : "indicator_reject";
 }
 
+function configuredNumber(value) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? null : num;
+}
+
+function candidateThresholdNumber(candidate = {}, ...paths) {
+  for (const path of paths) {
+    const value = path.split(".").reduce((current, key) => current?.[key], candidate);
+    const num = finiteNumberOrNull(value);
+    if (num != null) return num;
+  }
+  return null;
+}
+
+function formatThresholdValue(value) {
+  return value == null ? "missing" : String(value);
+}
+
+export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningConfig = {}) {
+  const feeActiveTvlRatio = candidateThresholdNumber(candidate, "fee_active_tvl_ratio", "fee_tvl_ratio");
+  const minFeeActiveTvlRatio = configuredNumber(screeningConfig.minFeeActiveTvlRatio);
+  if (minFeeActiveTvlRatio != null && (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
+    return `configured threshold veto: fee_active_tvl_ratio ${formatThresholdValue(feeActiveTvlRatio)} < ${minFeeActiveTvlRatio}`;
+  }
+
+  const volatility = candidateThresholdNumber(candidate, "volatility");
+  if (volatility == null || volatility <= 0) {
+    const timeframe = candidate.volatility_timeframe || getVolatilityTimeframe(screeningConfig.timeframe);
+    return `configured threshold veto: volatility_${timeframe} ${formatThresholdValue(volatility)} must be > 0`;
+  }
+
+  const binStep = candidateThresholdNumber(candidate, "bin_step", "dlmm_params.bin_step");
+  const minBinStep = configuredNumber(screeningConfig.minBinStep);
+  if (minBinStep != null && (binStep == null || binStep < minBinStep)) {
+    return `configured threshold veto: bin_step ${formatThresholdValue(binStep)} < ${minBinStep}`;
+  }
+  const maxBinStep = configuredNumber(screeningConfig.maxBinStep);
+  if (maxBinStep != null && (binStep == null || binStep > maxBinStep)) {
+    return `configured threshold veto: bin_step ${formatThresholdValue(binStep)} > ${maxBinStep}`;
+  }
+
+  const tvl = candidateThresholdNumber(candidate, "active_tvl", "tvl");
+  const minTvl = configuredNumber(screeningConfig.minTvl);
+  if (minTvl != null && (tvl == null || tvl < minTvl)) {
+    return `configured threshold veto: tvl ${formatThresholdValue(tvl)} < ${minTvl}`;
+  }
+  const maxTvl = configuredNumber(screeningConfig.maxTvl);
+  if (maxTvl != null && (tvl == null || tvl > maxTvl)) {
+    return `configured threshold veto: tvl ${formatThresholdValue(tvl)} > ${maxTvl}`;
+  }
+
+  const volume = candidateThresholdNumber(candidate, "volume_window", "volume");
+  const minVolume = configuredNumber(screeningConfig.minVolume);
+  if (minVolume != null && (volume == null || volume < minVolume)) {
+    return `configured threshold veto: volume ${formatThresholdValue(volume)} < ${minVolume}`;
+  }
+
+  const mcap = candidateThresholdNumber(candidate, "mcap", "token_info.mcap");
+  const minMcap = configuredNumber(screeningConfig.minMcap);
+  if (minMcap != null && (mcap == null || mcap < minMcap)) {
+    return `configured threshold veto: mcap ${formatThresholdValue(mcap)} < ${minMcap}`;
+  }
+  const maxMcap = configuredNumber(screeningConfig.maxMcap);
+  if (maxMcap != null && (mcap == null || mcap > maxMcap)) {
+    return `configured threshold veto: mcap ${formatThresholdValue(mcap)} > ${maxMcap}`;
+  }
+
+  const holders = candidateThresholdNumber(candidate, "holders", "holder_count", "base_token_holders");
+  const minHolders = configuredNumber(screeningConfig.minHolders);
+  if (minHolders != null && (holders == null || holders < minHolders)) {
+    return `configured threshold veto: holders ${formatThresholdValue(holders)} < ${minHolders}`;
+  }
+
+  const organicScore = candidateThresholdNumber(candidate, "organic_score", "base.organic", "token_x.organic_score");
+  const minOrganic = configuredNumber(screeningConfig.minOrganic);
+  if (minOrganic != null && (organicScore == null || organicScore < minOrganic)) {
+    return `configured threshold veto: organic_score ${formatThresholdValue(organicScore)} < ${minOrganic}`;
+  }
+
+  const quoteOrganic = candidateThresholdNumber(candidate, "quote.organic", "quote_organic_score", "token_y.organic_score");
+  const minQuoteOrganic = configuredNumber(screeningConfig.minQuoteOrganic);
+  if (minQuoteOrganic != null && (quoteOrganic == null || quoteOrganic < minQuoteOrganic)) {
+    return `configured threshold veto: quote_organic_score ${formatThresholdValue(quoteOrganic)} < ${minQuoteOrganic}`;
+  }
+
+  return null;
+}
+
+function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
+  const accepted = [];
+  for (const pool of pools) {
+    const vetoReason = getConfiguredPoolThresholdVetoReason(pool, screeningConfig);
+    if (vetoReason) {
+      log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
+      pushFilteredReason(filteredOut, pool, vetoReason, { priority: true });
+      stageCounts.configured_threshold_reject = (stageCounts.configured_threshold_reject || 0) + 1;
+    } else {
+      accepted.push(pool);
+    }
+  }
+  stageCounts.configured_threshold_accept = accepted.length;
+  return accepted;
+}
+
 export function formatDeterministicVetoAuditLine(candidate = {}, reason = "deterministic veto") {
   const name = candidate.name || `${candidate.base?.symbol || "?"}-${candidate.quote?.symbol || "?"}`;
   const snapshot = getDeterministicVetoAuditSnapshot(candidate);
@@ -340,35 +525,14 @@ export async function discoverPools({
     `quote_token_organic_score>=${s.minQuoteOrganic}`,
     s.minTokenAgeHours != null ? `base_token_created_at<=${Date.now() - s.minTokenAgeHours * 3_600_000}` : null,
     s.maxTokenAgeHours != null ? `base_token_created_at>=${Date.now() - s.maxTokenAgeHours * 3_600_000}` : null,
-    Array.isArray(s.allowedLaunchpads) && s.allowedLaunchpads.length > 0
-      ? `base_token_launchpad=[${s.allowedLaunchpads.join(",")}]`
-      : null,
   ].filter(Boolean).join("&&");
 
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${discoveryCategory}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=${page_size}` +
-      `&filter_by=${encodeURIComponent(filters)}` +
-      `&timeframe=${s.timeframe}` +
-      `&category=${discoveryCategory}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
+  const data = await fetchPoolDiscoveryPage({
+    page_size,
+    filters,
+    timeframe: s.timeframe,
+    category: discoveryCategory,
   });
-
-  if (!res.ok) {
-    throw new Error(`Pool Discovery API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
 
   let rawPools = Array.isArray(data.data) ? data.data : [];
 
@@ -413,6 +577,8 @@ export async function discoverPools({
       rawPools = Array.from(byPool.values());
     }
   }
+
+  rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
 
   const condensed = rawPools.map(condensePool);
 
@@ -471,18 +637,13 @@ export async function discoverPools({
   };
 }
 
-/**
- * Returns eligible pools for the agent to evaluate and pick from.
- * Hard filters applied in code, agent decides which to deploy into.
- */
-export async function getTopCandidates({ limit = 10 } = {}) {
-  const { config } = await import("../config.js");
-  const primaryCategory = config.screening.category || "trending";
-  const categories = [primaryCategory, ...(config.screening.discoveryExtraCategories || [])]
+async function discoverMeteoraCandidateUniverse(runtimeConfig) {
+  const primaryCategory = runtimeConfig.screening.category || "trending";
+  const categories = [primaryCategory, ...(runtimeConfig.screening.discoveryExtraCategories || [])]
     .map((category) => String(category || "").trim())
     .filter(Boolean)
     .filter((category, index, list) => list.indexOf(category) === index);
-  const pageSize = config.screening.discoveryPageSize || 50;
+  const pageSize = runtimeConfig.screening.discoveryPageSize || 50;
   const discoveries = await Promise.all(categories.map((category) =>
     discoverPools({ page_size: pageSize, category })
       .catch((error) => {
@@ -493,12 +654,68 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const poolsByAddress = new Map();
   for (const discovery of discoveries) {
     for (const pool of discovery.pools || []) {
-      if (!poolsByAddress.has(pool.pool)) poolsByAddress.set(pool.pool, pool);
+      if (!poolsByAddress.has(pool.pool)) {
+        poolsByAddress.set(pool.pool, {
+          ...pool,
+          source: pool.source || "meteora",
+          discovery_source: pool.discovery_source || "meteora",
+        });
+      }
     }
   }
-  const pools = [...poolsByAddress.values()];
-  const totalScreened = discoveries.reduce((sum, discovery) => sum + (discovery.total ?? discovery.pools?.length ?? 0), 0);
-  const filteredOut = [];
+  return {
+    total: discoveries.reduce((sum, discovery) => sum + (discovery.total ?? discovery.pools?.length ?? 0), 0),
+    pools: [...poolsByAddress.values()],
+    stage_counts: {
+      categories: discoveries.length,
+      deduped_pools: poolsByAddress.size,
+    },
+  };
+}
+
+/**
+ * Returns eligible pools for the agent to evaluate and pick from.
+ * Hard filters applied in code, agent decides which to deploy into.
+ */
+export async function getTopCandidates({ limit = 10 } = {}) {
+  const { config } = await import("../config.js");
+  const source = String(config.screening.source || "meteora").toLowerCase();
+  if (!["meteora", "gmgn"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora or gmgn.`);
+  }
+
+  const discovery = source === "gmgn"
+    ? await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) })
+    : await discoverMeteoraCandidateUniverse(config);
+  let pools = discovery.pools || [];
+  const totalScreened = discovery.total ?? pools.length;
+  const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+  const postDiscoveryStageCounts = {};
+
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in GMGN pool ${p.name}`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol} in GMGN pool ${p.name}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
+  pools = filterConfiguredPoolThresholds(
+    pools,
+    config.screening,
+    filteredOut,
+    postDiscoveryStageCounts,
+  );
 
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
@@ -756,7 +973,15 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     candidates: ranked,
     total_eligible: ranked.length,
     total_screened: totalScreened || pools.length,
+    source,
+    stage_counts: {
+      source,
+      ranked: totalScreened || pools.length,
+      ...(discovery.stage_counts || {}),
+      ...postDiscoveryStageCounts,
+    },
     filtered_examples: filteredOut.slice(0, 3),
+    all_filtered: filteredOut,
   };
 }
 
@@ -766,26 +991,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
  * Returns the full unfiltered API object (all fields, not condensed).
  */
 export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
-  const useServerDiscovery = !!config.api.publicApiKey;
-  const url = useServerDiscovery
-    ? `${config.api.url}/discovery/pools/${pool_address}?timeframe=${encodeURIComponent(timeframe)}`
-    : `${POOL_DISCOVERY_BASE}/pools?` +
-      `page_size=1` +
-      `&filter_by=${encodeURIComponent(`pool_address=${pool_address}`)}` +
-      `&timeframe=${timeframe}`;
-
-  const res = await fetch(url, {
-    headers: useServerDiscovery && config.api.publicApiKey
-      ? { "x-api-key": config.api.publicApiKey }
-      : {},
-  });
-
-  if (!res.ok) {
-    throw new Error(`Pool detail API error: ${res.status} ${res.statusText}`);
-  }
-
-  const data = await res.json();
-  const pool = useServerDiscovery ? data : (data.data || [])[0];
+  const pool = await fetchPoolDiscoveryDetail({ poolAddress: pool_address, timeframe });
 
   if (!pool) {
     throw new Error(`Pool ${pool_address} not found`);
@@ -811,6 +1017,7 @@ function condensePool(p) {
     quote: {
       symbol: p.token_y?.symbol,
       mint: p.token_y?.address,
+      organic: Math.round(p.token_y?.organic_score || 0),
     },
     pool_type: p.pool_type,
     bin_step: p.dlmm_params?.bin_step || null,
@@ -824,13 +1031,15 @@ function condensePool(p) {
     fee_active_tvl_ratio: p.fee_active_tvl_ratio > 0
       ? fix(p.fee_active_tvl_ratio, 4)
       : (p.active_tvl > 0 ? fix((p.fee / p.active_tvl) * 100, 4) : 0),
-    volatility: fix(p.volatility, 2),
+    volatility: fix(p.volatility, 4),
+    volatility_timeframe: p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe),
 
 
     // Token health
     holders: p.base_token_holders,
     mcap: round(p.token_x?.market_cap),
     organic_score: Math.round(p.token_x?.organic_score || 0),
+    quote_organic_score: Math.round(p.token_y?.organic_score || 0),
     token_age_hours: p.token_x?.created_at
       ? Math.floor((Date.now() - p.token_x.created_at) / 3_600_000)
       : null,
