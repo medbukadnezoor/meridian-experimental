@@ -27,6 +27,7 @@ const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-coo
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
 const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
+const PROFIT_PROTECTION_SHADOW_VERIFIER_PATH = join(__dirname, "verify-profit-protection-shadow.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap-single-side-bidask.js");
@@ -169,6 +170,22 @@ function runRollingDrawdownExitPolicyProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-rolling-drawdown-exit-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runProfitProtectionShadowProof() {
+  const result = spawnSync(process.execPath, [PROFIT_PROTECTION_SHADOW_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-profit-protection-shadow failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -447,6 +464,7 @@ function buildChecks() {
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const emergencyStopProof = runEmergencyStopPolicyProof();
   const rollingDrawdownExitProof = runRollingDrawdownExitPolicyProof();
+  const profitProtectionShadowProof = runProfitProtectionShadowProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
   const nanocapSingleSideBidAskProof = runNanocapSingleSideBidAskProof();
@@ -761,6 +779,17 @@ function buildChecks() {
         src.includes("rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 4"),
     },
     {
+      file: "config-builder.js",
+      label: "[Profit protection shadow] nanocap-only shadow logging config maps into runtime config",
+      test: (src) =>
+        src.includes("profitProtectionShadowLoggingEnabled: u.profitProtectionShadowLoggingEnabled ?? isNanocapPreset") &&
+        src.includes("profitProtectionShadowBotName") &&
+        src.includes("profitProtectionShadowPrimaryPeakPct: u.profitProtectionShadowPrimaryPeakPct ?? 5") &&
+        src.includes("profitProtectionShadowPrimaryDropPct: u.profitProtectionShadowPrimaryDropPct ?? 3") &&
+        src.includes("profitProtectionShadowSecondaryPeakPct: u.profitProtectionShadowSecondaryPeakPct ?? 2") &&
+        src.includes("profitProtectionShadowSecondaryCurrentPnlPct: u.profitProtectionShadowSecondaryCurrentPnlPct ?? 0"),
+    },
+    {
       file: "tools/executor.js",
       label: "[Rolling drawdown] update_config maps operator-tunable rolling drawdown fields",
       test: (src) =>
@@ -769,6 +798,67 @@ function buildChecks() {
         src.includes('rollingDrawdownMinPeakPct: ["management", "rollingDrawdownMinPeakPct"]') &&
         src.includes('rollingDrawdownCurrentPnlPct: ["management", "rollingDrawdownCurrentPnlPct"]') &&
         src.includes('rollingDrawdownMinDropPct: ["management", "rollingDrawdownMinDropPct"]'),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[Profit protection shadow] update_config maps shadow logging fields only",
+      test: (src) =>
+        src.includes('profitProtectionShadowLoggingEnabled: ["management", "profitProtectionShadowLoggingEnabled"]') &&
+        src.includes('profitProtectionShadowBotName: ["management", "profitProtectionShadowBotName"]') &&
+        src.includes('profitProtectionShadowPrimaryPeakPct: ["management", "profitProtectionShadowPrimaryPeakPct"]') &&
+        src.includes('profitProtectionShadowPrimaryDropPct: ["management", "profitProtectionShadowPrimaryDropPct"]') &&
+        src.includes('profitProtectionShadowSecondaryPeakPct: ["management", "profitProtectionShadowSecondaryPeakPct"]') &&
+        src.includes('profitProtectionShadowSecondaryCurrentPnlPct: ["management", "profitProtectionShadowSecondaryCurrentPnlPct"]') &&
+        !src.includes("profitProtectionShadowCloseEnabled"),
+    },
+    {
+      file: "state.js",
+      label: "[Profit protection shadow] state helper logs first trigger per position/rule without returning an exit",
+      test: (src) =>
+        profitProtectionShadowProof?.success === true &&
+        profitProtectionShadowProof?.primary?.exitAction === null &&
+        profitProtectionShadowProof?.primary?.firstRows === 1 &&
+        profitProtectionShadowProof?.primary?.repeatRows === 0 &&
+        profitProtectionShadowProof?.primary?.ruleId === "primary_peak_5_drop_3" &&
+        profitProtectionShadowProof?.secondary?.exitAction === null &&
+        profitProtectionShadowProof?.secondary?.firstRows === 1 &&
+        profitProtectionShadowProof?.secondary?.repeatRows === 0 &&
+        profitProtectionShadowProof?.secondary?.ruleId === "secondary_peak_2_current_lte_0" &&
+        profitProtectionShadowProof?.disabledRows === 0 &&
+        profitProtectionShadowProof?.appendFailureRetry?.initialRows === 1 &&
+        profitProtectionShadowProof?.appendFailureRetry?.failureCaught === true &&
+        profitProtectionShadowProof?.appendFailureRetry?.rowsAfterFailure === 1 &&
+        profitProtectionShadowProof?.appendFailureRetry?.rowsAfterRetry === 0 &&
+        profitProtectionShadowProof?.appendFailureRetry?.retryMarked === true &&
+        profitProtectionShadowProof?.stopLossSelection?.action === "STOP_LOSS_CANDIDATE" &&
+        profitProtectionShadowProof?.stopLossSelection?.shadowRows === 2 &&
+        profitProtectionShadowProof?.logRows === 3 &&
+        profitProtectionShadowProof?.tempStateFileCreated === true &&
+        profitProtectionShadowProof?.tempDirRemoved === true &&
+        src.includes("getProfitProtectionShadowTriggers") &&
+        src.includes("markProfitProtectionShadowTriggersLogged") &&
+        src.includes("profit_protection_shadow_logged") &&
+        src.includes("shadowOnly: true") &&
+        !src.includes("action: \"PROFIT_PROTECTION\""),
+    },
+    {
+      file: "index.js",
+      label: "[Profit protection shadow] PnL update paths append shadow JSONL without close_position wiring",
+      test: (src) =>
+        src.includes("appendProfitProtectionShadow") &&
+        src.includes("getProfitProtectionShadowTriggers(position.position, position, config.management)") &&
+        src.includes("appendProfitProtectionShadowRows(triggers") &&
+        src.includes("markProfitProtectionShadowTriggersLogged(position.position, triggers)") &&
+        src.includes("const exit = updatePnlAndCheckExits(p.position, p, config.management);") &&
+        !src.includes("PROFIT_PROTECTION"),
+    },
+    {
+      file: "profit-protection-shadow-log.js",
+      label: "[Profit protection shadow] append-only JSONL writer uses daily profit-protection-shadow logs",
+      test: (src) =>
+        src.includes("profit-protection-shadow-${dateStr}.jsonl") &&
+        src.includes("appendFileSync") &&
+        src.includes("shadowOnly: true"),
     },
     {
       file: "config-builder.js",
@@ -1215,6 +1305,12 @@ function buildChecks() {
         Number(defaultProof?.management?.rollingDrawdownMinPeakPct) === 1 &&
         Number(defaultProof?.management?.rollingDrawdownCurrentPnlPct) === -2 &&
         Number(defaultProof?.management?.rollingDrawdownMinDropPct) === 4 &&
+        defaultProof?.management?.profitProtectionShadowLoggingEnabled === false &&
+        defaultProof?.management?.profitProtectionShadowBotName === "meridian" &&
+        Number(defaultProof?.management?.profitProtectionShadowPrimaryPeakPct) === 5 &&
+        Number(defaultProof?.management?.profitProtectionShadowPrimaryDropPct) === 3 &&
+        Number(defaultProof?.management?.profitProtectionShadowSecondaryPeakPct) === 2 &&
+        Number(defaultProof?.management?.profitProtectionShadowSecondaryCurrentPnlPct) === 0 &&
         defaultProof?.management?.pnlSnapshotLoggingEnabled === false,
     },
     {
@@ -1250,6 +1346,12 @@ function buildChecks() {
         exampleProof?.management?.profitGivebackEmergencyEnabled === true &&
         Number(exampleProof?.management?.profitGivebackTriggerPct) === 6 &&
         Number(exampleProof?.management?.profitGivebackFloorPct) === 2 &&
+        exampleProof?.management?.profitProtectionShadowLoggingEnabled === true &&
+        exampleProof?.management?.profitProtectionShadowBotName === "nanocap" &&
+        Number(exampleProof?.management?.profitProtectionShadowPrimaryPeakPct) === 5 &&
+        Number(exampleProof?.management?.profitProtectionShadowPrimaryDropPct) === 3 &&
+        Number(exampleProof?.management?.profitProtectionShadowSecondaryPeakPct) === 2 &&
+        Number(exampleProof?.management?.profitProtectionShadowSecondaryCurrentPnlPct) === 0 &&
         exampleProof?.management?.supertrendLossExitEnabled === true &&
         Number(exampleProof?.management?.supertrendLossExitPnlPct) === -4 &&
         exampleProof?.management?.supertrendLossExitInterval === "15_MINUTE" &&

@@ -558,6 +558,97 @@ function buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlP
   };
 }
 
+function getProfitProtectionShadowRules(mgmtConfig = {}) {
+  return [
+    {
+      ruleId: "primary_peak_5_drop_3",
+      peakPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowPrimaryPeakPct ?? 5),
+      minDropFromPeakPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowPrimaryDropPct ?? 3),
+      currentPnlPct: null,
+    },
+    {
+      ruleId: "secondary_peak_2_current_lte_0",
+      peakPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowSecondaryPeakPct ?? 2),
+      minDropFromPeakPct: null,
+      currentPnlPct: toFiniteNumberOrNull(mgmtConfig.profitProtectionShadowSecondaryCurrentPnlPct ?? 0),
+    },
+  ];
+}
+
+export function getProfitProtectionShadowTriggers(position_address, positionData = {}, mgmtConfig = {}) {
+  if (!mgmtConfig.profitProtectionShadowLoggingEnabled) return [];
+  if (positionData?.pnl_pct_suspicious) return [];
+
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return [];
+
+  const currentPnlPct = toFiniteNumberOrNull(positionData.pnl_pct);
+  const peakPnlPct = toFiniteNumberOrNull(pos.peak_pnl_pct);
+  if (currentPnlPct == null || peakPnlPct == null) return [];
+
+  const dropFromPeakPct = peakPnlPct - currentPnlPct;
+  const logged = pos.profit_protection_shadow_logged && typeof pos.profit_protection_shadow_logged === "object"
+    ? pos.profit_protection_shadow_logged
+    : {};
+  const triggered = [];
+
+  for (const rule of getProfitProtectionShadowRules(mgmtConfig)) {
+    if (logged[rule.ruleId]) continue;
+    if (rule.peakPnlPct == null || peakPnlPct < rule.peakPnlPct) continue;
+    if (rule.minDropFromPeakPct != null && dropFromPeakPct < rule.minDropFromPeakPct) continue;
+    if (rule.currentPnlPct != null && currentPnlPct > rule.currentPnlPct) continue;
+
+    triggered.push({
+      ts: new Date().toISOString(),
+      event: "profit_protection_shadow",
+      bot: mgmtConfig.profitProtectionShadowBotName ?? mgmtConfig.pnlSnapshotBotName ?? "meridian",
+      wallet: null,
+      pool: positionData.pool ?? positionData.pool_address ?? pos.pool ?? null,
+      poolName: positionData.pair ?? positionData.pool_name ?? pos.pool_name ?? null,
+      position: position_address,
+      baseMint: positionData.base_mint ?? pos.base_mint ?? null,
+      ageMin: toFiniteNumberOrNull(positionData.age_minutes),
+      pnlPct: currentPnlPct,
+      currentPnlPct,
+      peakPnlPct,
+      dropFromPeakPct,
+      ruleId: rule.ruleId,
+      rule: {
+        peakPnlPct: rule.peakPnlPct,
+        minDropFromPeakPct: rule.minDropFromPeakPct,
+        currentPnlPct: rule.currentPnlPct,
+      },
+      source: "updatePnlAndCheckExits",
+      shadowOnly: true,
+    });
+  }
+
+  return triggered;
+}
+
+export function markProfitProtectionShadowTriggersLogged(position_address, triggers = []) {
+  if (!Array.isArray(triggers) || triggers.length === 0) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+
+  const logged = pos.profit_protection_shadow_logged && typeof pos.profit_protection_shadow_logged === "object"
+    ? pos.profit_protection_shadow_logged
+    : {};
+  let changed = false;
+  for (const trigger of triggers) {
+    if (!trigger?.ruleId || logged[trigger.ruleId]) continue;
+    logged[trigger.ruleId] = trigger.ts ?? new Date().toISOString();
+    changed = true;
+  }
+
+  if (!changed) return false;
+  pos.profit_protection_shadow_logged = logged;
+  save(state);
+  return true;
+}
+
 /**
  * Get all tracked positions (optionally filter open-only).
  */
