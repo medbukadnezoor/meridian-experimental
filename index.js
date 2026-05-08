@@ -13,7 +13,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, getProfitProtectionShadowTriggers, markProfitProtectionShadowTriggersLogged } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -29,6 +29,7 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
+import { appendProfitProtectionShadowRows } from "./profit-protection-shadow-log.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -85,6 +86,7 @@ const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 const PNL_SNAPSHOT_LOG_DIR = "./logs";
 let _pnlSnapshotWarningLogged = false;
+let _profitProtectionShadowWarningLogged = false;
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
@@ -157,6 +159,20 @@ function appendPnlSnapshot(wallet, position, exit = null) {
     if (!_pnlSnapshotWarningLogged) {
       _pnlSnapshotWarningLogged = true;
       log("state_warn", `PnL snapshot logging failed: ${error.message}`);
+    }
+  }
+}
+
+function appendProfitProtectionShadow(wallet, position) {
+  try {
+    const triggers = getProfitProtectionShadowTriggers(position.position, position, config.management);
+    if (!triggers.length) return;
+    appendProfitProtectionShadowRows(triggers, { wallet, logDir: PNL_SNAPSHOT_LOG_DIR });
+    markProfitProtectionShadowTriggersLogged(position.position, triggers);
+  } catch (error) {
+    if (!_profitProtectionShadowWarningLogged) {
+      _profitProtectionShadowWarningLogged = true;
+      log("state_warn", `Profit-protection shadow logging failed: ${error.message}`);
     }
   }
 }
@@ -444,6 +460,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         schedulePeakConfirmation(p.position);
       }
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
+      appendProfitProtectionShadow(livePositions?.wallet, p);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
           if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
@@ -1097,6 +1114,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           schedulePeakConfirmation(p.position);
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
+        appendProfitProtectionShadow(result.wallet, p);
         appendPnlSnapshot(result.wallet, p, exit);
         if (exit) {
           if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
