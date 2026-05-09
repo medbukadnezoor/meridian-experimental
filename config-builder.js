@@ -12,7 +12,7 @@ export function normalizeOptionalString(value) {
 }
 
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
-const SCREENING_SOURCES = new Set(["meteora", "gmgn"]);
+const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"]);
 
 export function normalizeScreeningReasoningEffort(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
@@ -278,6 +278,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       rollingDrawdownMinPeakPct: u.rollingDrawdownMinPeakPct ?? 1,
       rollingDrawdownCurrentPnlPct: u.rollingDrawdownCurrentPnlPct ?? -2,
       rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 4,
+      rollingDrawdownShadowMinPeakPct: u.rollingDrawdownShadowMinPeakPct ?? null,
+      rollingDrawdownShadowCurrentPnlPct: u.rollingDrawdownShadowCurrentPnlPct ?? null,
       takeProfitPct: u.takeProfitPct ?? u.takeProfitFeePct ?? 5,
       minFeePerTvl24h: u.minFeePerTvl24h ?? 7,
       minAgeBeforeYieldCheck: u.minAgeBeforeYieldCheck ?? 60,
