@@ -21,19 +21,30 @@ const runtimeStrategyPath = path.join(ROOT, "strategy-library.json");
 const runtimeStrategyExists = fs.existsSync(runtimeStrategyPath);
 const strategyDb = runtimeStrategyExists ? loadJson("strategy-library.json") : null;
 const exampleDb = loadJson("strategy-library.scout-tight.example.json");
+
+// Runtime strategy-library.json may be set to any known scout strategy.
+const KNOWN_SCOUT_STRATEGIES = ["scout_tight_bidask_retrace", "scout_fee_velocity_retrace_v1"];
 if (runtimeStrategyExists) {
-  assert.strictEqual(strategyDb.active, "scout_tight_bidask_retrace", "scout strategy-library active strategy");
+  assert.ok(
+    KNOWN_SCOUT_STRATEGIES.includes(strategyDb.active),
+    `scout strategy-library active strategy must be one of: ${KNOWN_SCOUT_STRATEGIES.join(", ")} (got: ${strategyDb.active})`
+  );
 }
+// The tracked example file always anchors to the original tight strategy.
 assert.strictEqual(exampleDb.active, "scout_tight_bidask_retrace", "tracked scout strategy example active strategy id");
 assert.ok(exampleDb.strategies.scout_tight_bidask_retrace, "tracked scout strategy example contains active strategy");
+// The example file must also contain the fee-velocity strategy definition.
+assert.ok(exampleDb.strategies.scout_fee_velocity_retrace_v1, "tracked scout strategy example contains fee-velocity strategy");
 
 const active = runtimeStrategyExists ? getActiveStrategy() : exampleDb.strategies.scout_tight_bidask_retrace;
 if (runtimeStrategyExists) assert.ok(active, "getActiveStrategy returns a strategy");
-assert.strictEqual(active.id, "scout_tight_bidask_retrace", "active strategy id");
+assert.ok(KNOWN_SCOUT_STRATEGIES.includes(active.id), `active strategy id must be a known scout strategy (got: ${active.id})`);
 assert.strictEqual(active.lp_strategy, "bid_ask", "active strategy is bid_ask");
 assert.strictEqual(active.entry?.single_side, "sol", "active strategy is single-sided SOL");
 
-const policy = resolveStrategyRangePolicy(active, { strategy: { strategy: "bid_ask", binsBelow: 85 } });
+// Range policy test uses the tight strategy from the example (always present) for deterministic assertions.
+const tightStrategy = exampleDb.strategies.scout_tight_bidask_retrace;
+const policy = resolveStrategyRangePolicy(tightStrategy, { strategy: { strategy: "bid_ask", binsBelow: 85 } });
 assert.deepStrictEqual(
   {
     lpStrategy: policy.lpStrategy,
@@ -51,7 +62,7 @@ assert.deepStrictEqual(
     binsBelowMax: 35,
     binsAbove: 0,
   },
-  "active strategy range policy resolves from JSON"
+  "tight strategy range policy resolves from JSON"
 );
 
 const low = normalizeForcedSingleSidedSolBidAskArgs(
@@ -140,6 +151,7 @@ console.log(JSON.stringify({
   success: true,
   runtime_strategy_library_present: runtimeStrategyExists,
   active_strategy_non_null: runtimeStrategyExists ? true : null,
+  active_strategy_is_known_scout_strategy: true,
   range_policy_from_json: true,
   clamps_low_bins_to_min: low.args.bins_below === 29,
   clamps_high_bins_to_max: high.args.bins_below === 35,
@@ -148,5 +160,6 @@ console.log(JSON.stringify({
   no_prompt_formula: true,
   no_index_formula: true,
   tracked_example_matches_runtime_shape: true,
+  tracked_example_contains_fee_velocity_strategy: true,
   no_executor_strategy_id: true,
 }, null, 2));
