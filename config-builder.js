@@ -162,6 +162,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       minTvl: u.minTvl ?? 10_000,
       maxTvl: u.maxTvl !== undefined ? u.maxTvl : 150_000,
       minVolume: u.minVolume ?? 500,
+      minVolumeActiveTvlMultiple: u.minVolumeActiveTvlMultiple ?? null,
+      preferredVolumeActiveTvlMultiple: u.preferredVolumeActiveTvlMultiple ?? null,
+      feeVelocityShadowDownsidePct: Array.isArray(u.feeVelocityShadowDownsidePct) ? u.feeVelocityShadowDownsidePct : [7, 10, 12, 15, 20, 25],
+      feeVelocityShadowTakeProfitPct: Array.isArray(u.feeVelocityShadowTakeProfitPct) ? u.feeVelocityShadowTakeProfitPct : [6, 7, 8],
+      feeVelocityShadowFeeTvlFloors: Array.isArray(u.feeVelocityShadowFeeTvlFloors) ? u.feeVelocityShadowFeeTvlFloors : [0.12, 0.15, 0.19],
+      sameTickerSurfEnabled: u.sameTickerSurfEnabled ?? false,
       minOrganic: u.minOrganic ?? 60,
       minQuoteOrganic: u.minQuoteOrganic ?? 60,
       minHolders: u.minHolders ?? 500,
@@ -311,6 +317,9 @@ export function buildConfig(userConfig = {}, env = process.env) {
     strategy: {
       strategy: u.strategy ?? "bid_ask",
       binsBelow: u.binsBelow ?? 69,
+      targetDownsidePct: u.targetDownsidePct ?? null,
+      targetDownsideMinPct: u.targetDownsideMinPct ?? null,
+      targetDownsideMaxPct: u.targetDownsideMaxPct ?? null,
       forceSingleSidedSolBidAsk: u.forceSingleSidedSolBidAsk ?? isNanocapPreset,
       // Nanocap prompt canon is 35-90 bins below; keep live guard deterministic.
       minSingleSidedSolBins: u.minSingleSidedSolBins ?? (isNanocapPreset ? 35 : 5),

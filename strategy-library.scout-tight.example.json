@@ -29,6 +29,43 @@
       "raw": "Owner-approved scout tight-bin strategy-library profile; strategy-specific numbers live in JSON/config, not generic deploy code.",
       "added_at": "2026-05-06T09:26:00.000Z",
       "updated_at": "2026-05-06T09:26:00.000Z"
+    },
+    "scout_fee_velocity_retrace_v1": {
+      "id": "scout_fee_velocity_retrace_v1",
+      "name": "Scout Fee-Velocity Retrace V1",
+      "author": "meridian-phase2a",
+      "lp_strategy": "bid_ask",
+      "token_criteria": {
+        "notes": "H2 conservative retrace profile for high flow per active TVL. Use direct Meteora validation and keep GMGN/Meteora source provenance in screening."
+      },
+      "entry": {
+        "condition": "SOL-only bid_ask range below active price after candidate passes fee-velocity and existing scout screening gates.",
+        "single_side": "sol",
+        "notes": "Use amount_y only, amount_x=0, bins_above=0. H1/H3/H4/H5 comparisons stay in shadow metadata."
+      },
+      "range": {
+        "type": "target_downside",
+        "target_downside_pct": 15,
+        "target_downside_min_pct": 12,
+        "target_downside_max_pct": 20,
+        "bins_above": 0,
+        "notes": "Compute approximate bins from target_downside_pct and bin_step for screening/reporting; SDK range guards remain authoritative at execution time."
+      },
+      "exit": {
+        "take_profit_pct": 7,
+        "notes": "H2 midpoint TP. Shadow metadata compares 6/7/8 without changing runtime behavior."
+      },
+      "shadow": {
+        "downside_pct_variants": [7, 10, 12, 15, 20, 25],
+        "take_profit_pct_variants": [6, 7, 8],
+        "fee_tvl_floor_variants": [0.12, 0.15, 0.19],
+        "same_ticker_surf_enabled": false,
+        "notes": "H1 sprint, H3 hybrid, H4 same-ticker surf, and H5 LP telemetry classifier are comparison-only until separately approved."
+      },
+      "best_for": "Scout H2 fee-velocity retrace canary with SOL-only bid_ask and target downside range 12-20%.",
+      "raw": "Code-only strategy-library scaffold for fee-velocity retrace screening metadata; active strategy remains unchanged.",
+      "added_at": "2026-05-09T14:20:00.000Z",
+      "updated_at": "2026-05-09T14:20:00.000Z"
     }
   }
 }

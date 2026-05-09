@@ -47,6 +47,7 @@ const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scou
 const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-gmgn-first-discovery.js");
 const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-discovery-shadow.js");
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
+const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -498,6 +499,22 @@ function runScoutDualSourceDiscoveryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutFeeVelocityLiveCanaryProof() {
+  const result = spawnSync(process.execPath, [SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-fee-velocity-live-canary failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -530,8 +547,31 @@ function buildChecks() {
   const scoutGmgnFirstDiscoveryProof = runScoutGmgnFirstDiscoveryProof();
   const scoutDiscoveryShadowProof = runScoutDiscoveryShadowProof();
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
+  const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
 
   return [
+    {
+      file: "scripts/verify-scout-fee-velocity-live-canary.js",
+      label: "[Scout fee-velocity canary] code-only H2 gate and H1/H3/H4/H5 shadow metadata are deterministic",
+      test: () =>
+        scoutFeeVelocityLiveCanaryProof?.success === true &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.minVolumeActiveTvlMultiple === null &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.preferredVolumeActiveTvlMultiple === null &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.sameTickerSurfEnabled === false &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.defaultDoesNotHardGate === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.belowThresholdRejected === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.aboveThresholdAccepted === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.filteredExamplesCarryReason === true &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.volume_active_tvl_multiple) === 5 &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.fee_velocity_usd_per_min) === 120 &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.target_downside_bins) === 17 &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.sameTickerSurfDefaultFalse === true &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.noShadowVelocitySignalPiggyback === true &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.percentPolicyDoesNotInjectBins === true &&
+        scoutFeeVelocityLiveCanaryProof?.strategyExample?.activeUnchanged === true &&
+        scoutFeeVelocityLiveCanaryProof?.strategyExample?.feeVelocityStrategyPresent === true &&
+        scoutFeeVelocityLiveCanaryProof?.guardedOperationalWordingAbsent === true,
+    },
     {
       file: "scripts/verify-scout-dual-source-discovery.js",
       label: "[Scout dual-source discovery] both mode resolves GMGN and Meteora before shared gates",
