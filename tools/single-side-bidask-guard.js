@@ -16,6 +16,7 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
   const binsBelowDefault = finiteNumber(options.binsBelow);
   const binsBelowMin = finiteNumber(options.binsBelowMin);
   const binsBelowMax = finiteNumber(options.binsBelowMax);
+  const targetDownsidePct = finiteNumber(options.targetDownsidePct);
   const targetStrategy = options.strategy || "bid_ask";
   const targetBinsAbove = finiteNumber(options.binsAbove) ?? 0;
   const normalized = { ...args };
@@ -80,19 +81,25 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
   }
 
   const suppliedBinsBelow = finiteNumber(normalized.bins_below);
-  let nextBinsBelow = suppliedBinsBelow;
-  if (nextBinsBelow == null || nextBinsBelow <= 0) {
-    nextBinsBelow = binsBelowDefault;
-  }
-  if (binsBelowMin != null && nextBinsBelow != null && nextBinsBelow < binsBelowMin) {
-    nextBinsBelow = binsBelowMin;
-  }
-  if (binsBelowMax != null && nextBinsBelow != null && nextBinsBelow > binsBelowMax) {
-    nextBinsBelow = binsBelowMax;
-  }
-  if (nextBinsBelow != null && nextBinsBelow > 0 && suppliedBinsBelow !== nextBinsBelow) {
-    withRepair(repairs, "bins_below", normalized.bins_below, nextBinsBelow, "forced single-sided deploy uses active strategy/config downside bins");
-    normalized.bins_below = nextBinsBelow;
+  const suppliedDownsidePct = finiteNumber(normalized.downside_pct);
+  if (suppliedBinsBelow == null && targetDownsidePct != null && (suppliedDownsidePct == null || suppliedDownsidePct <= 0)) {
+    withRepair(repairs, "downside_pct", normalized.downside_pct, targetDownsidePct, "forced single-sided deploy uses active strategy target downside percent");
+    normalized.downside_pct = targetDownsidePct;
+  } else {
+    let nextBinsBelow = suppliedBinsBelow;
+    if (nextBinsBelow == null || nextBinsBelow <= 0) {
+      nextBinsBelow = binsBelowDefault;
+    }
+    if (binsBelowMin != null && nextBinsBelow != null && nextBinsBelow < binsBelowMin) {
+      nextBinsBelow = binsBelowMin;
+    }
+    if (binsBelowMax != null && nextBinsBelow != null && nextBinsBelow > binsBelowMax) {
+      nextBinsBelow = binsBelowMax;
+    }
+    if (nextBinsBelow != null && nextBinsBelow > 0 && suppliedBinsBelow !== nextBinsBelow) {
+      withRepair(repairs, "bins_below", normalized.bins_below, nextBinsBelow, "forced single-sided deploy uses active strategy/config downside bins");
+      normalized.bins_below = nextBinsBelow;
+    }
   }
 
   return {

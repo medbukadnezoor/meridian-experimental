@@ -1058,10 +1058,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const darwinContext = Array.isArray(pool.darwin_top_signals) && pool.darwin_top_signals.length > 0
         ? `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}% | top drivers ${pool.darwin_top_signals.map((signal) => `${signal.signal}=${signal.value}`).join(", ")}`
         : `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}%`;
+      const feeVelocityContext = pool.volume_active_tvl_multiple != null || pool.fee_velocity_usd_per_min != null || pool.target_downside_profile
+        ? [
+            `vol/aTVL=${pool.volume_active_tvl_multiple ?? "?"}`,
+            `fee_velocity=$${pool.fee_velocity_usd_per_min ?? "?"}/min`,
+            pool.target_downside_profile?.target_downside_pct != null
+              ? `target_downside=${pool.target_downside_profile.target_downside_pct}% (${pool.target_downside_profile.target_downside_bins ?? "?"} bins)`
+              : null,
+            pool.target_downside_profile?.target_downside_min_pct != null || pool.target_downside_profile?.target_downside_max_pct != null
+              ? `target_range=${pool.target_downside_profile.target_downside_min_pct ?? "?"}-${pool.target_downside_profile.target_downside_max_pct ?? "?"}%`
+              : null,
+            pool.fee_velocity_shadow?.same_ticker_surf
+              ? `same_ticker_surf=${pool.fee_velocity_shadow.same_ticker_surf.enabled ? "enabled" : "shadow"}`
+              : null,
+          ].filter(Boolean).join(", ")
+        : null;
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+        feeVelocityContext ? `  fee_velocity: ${feeVelocityContext}` : null,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         darwinContext,
         pvpLine,

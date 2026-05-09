@@ -7,6 +7,13 @@ import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
 import {
+  computeVolumeActiveTvlMultiple,
+  enrichFeeVelocityCandidate,
+  estimateFeeVelocityUsdPerMin,
+  getActiveStrategy,
+  resolveStrategyRangePolicy,
+} from "../strategy-library.js";
+import {
   appendDecisionContext,
   buildCandidateDecisionContext,
   summarizeIndicatorConfirmation,
@@ -480,6 +487,13 @@ export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningCo
   if (minVolume != null && (volume == null || volume < minVolume)) {
     return `configured threshold veto: volume ${formatThresholdValue(volume)} < ${minVolume}`;
   }
+  const minVolumeActiveTvlMultiple = configuredNumber(screeningConfig.minVolumeActiveTvlMultiple);
+  if (minVolumeActiveTvlMultiple != null) {
+    const volumeActiveTvlMultiple = candidateThresholdNumber(candidate, "volume_active_tvl_multiple") ?? computeVolumeActiveTvlMultiple(candidate);
+    if (volumeActiveTvlMultiple == null || volumeActiveTvlMultiple < minVolumeActiveTvlMultiple) {
+      return `configured threshold veto: volume_active_tvl_multiple ${formatThresholdValue(volumeActiveTvlMultiple)} < ${minVolumeActiveTvlMultiple}`;
+    }
+  }
 
   const mcap = candidateThresholdNumber(candidate, "mcap", "token_info.mcap");
   const minMcap = configuredNumber(screeningConfig.minMcap);
@@ -512,16 +526,17 @@ export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningCo
   return null;
 }
 
-function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
+export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}, rangePolicy = {}) {
   const accepted = [];
   for (const pool of pools) {
-    const vetoReason = getConfiguredPoolThresholdVetoReason(pool, screeningConfig);
+    const enrichedPool = enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy });
+    const vetoReason = getConfiguredPoolThresholdVetoReason(enrichedPool, screeningConfig);
     if (vetoReason) {
       log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
-      pushFilteredReason(filteredOut, pool, vetoReason, { priority: true });
+      pushFilteredReason(filteredOut, enrichedPool, vetoReason, { priority: true });
       stageCounts.configured_threshold_reject = (stageCounts.configured_threshold_reject || 0) + 1;
     } else {
-      accepted.push(pool);
+      accepted.push(enrichedPool);
     }
   }
   stageCounts.configured_threshold_accept = accepted.length;
@@ -986,6 +1001,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const totalScreened = discovery.total ?? pools.length;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
   const postDiscoveryStageCounts = {};
+  const activeStrategy = getActiveStrategy();
+  const activeRangePolicy = resolveStrategyRangePolicy(activeStrategy, config);
 
   if (source === "gmgn") {
     const before = pools.length;
@@ -1010,6 +1027,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     config.screening,
     filteredOut,
     postDiscoveryStageCounts,
+    activeRangePolicy,
   );
 
   // Exclude pools where the wallet already has an open position
@@ -1301,7 +1319,7 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
  * Raw API returns ~100+ fields per pool. The LLM only needs ~20.
  */
 function condensePool(p) {
-  return {
+  const condensed = {
     pool: p.pool_address,
     name: p.name,
     base: {
@@ -1365,6 +1383,11 @@ function condensePool(p) {
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
+  };
+  return {
+    ...condensed,
+    volume_active_tvl_multiple: computeVolumeActiveTvlMultiple(condensed),
+    fee_velocity_usd_per_min: estimateFeeVelocityUsdPerMin(condensed, config.screening),
   };
 }
 

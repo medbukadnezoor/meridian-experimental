@@ -133,7 +133,7 @@ DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
 - Active strategy range: ${activeRangeGuidance}.
 - If the active strategy declares bins_below bounds, choose bins within those bounds. Do not invent a volatility-expanded range unless the strategy JSON explicitly defines that policy.
-- Bin steps must be [80-125].
+- Bin steps must stay inside the configured screening range: [${config.screening.minBinStep}-${config.screening.maxBinStep}].
 - Pick ONE pool. Deploy or explain why none qualify.
 
 ${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest attributes align with high-weight signals.\n\n` : ""}${lessons ? `LESSONS LEARNED:\n${lessons}\n` : ""}Timestamp: ${new Date().toISOString()}

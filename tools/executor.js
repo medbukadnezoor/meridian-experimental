@@ -354,10 +354,11 @@ export async function executeTool(name, args) {
       force: config.strategy.forceSingleSidedSolBidAsk || activeRangePolicy.singleSidedSol,
       deployAmountSol: Number.isFinite(forcedDeployAmountSol) ? forcedDeployAmountSol : config.management.deployAmountSol,
       strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
-      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsBelow: activeRangePolicy.binsBelowDefault ?? (activeRangePolicy.targetDownsidePct != null ? null : config.strategy.binsBelow),
       binsBelowMin: activeRangePolicy.binsBelowMin,
       binsBelowMax: activeRangePolicy.binsBelowMax,
       binsAbove: activeRangePolicy.binsAbove ?? 0,
+      targetDownsidePct: activeRangePolicy.targetDownsidePct,
     });
     if (!forcedDeploy.ok) {
       log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);

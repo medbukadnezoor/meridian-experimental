@@ -77,6 +77,12 @@ export function reloadScreeningThresholds() {
     if (fresh.minTvl         != null) s.minTvl         = fresh.minTvl;
     if (fresh.maxTvl         !== undefined) s.maxTvl   = fresh.maxTvl;
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
+    if (fresh.minVolumeActiveTvlMultiple !== undefined) s.minVolumeActiveTvlMultiple = fresh.minVolumeActiveTvlMultiple;
+    if (fresh.preferredVolumeActiveTvlMultiple !== undefined) s.preferredVolumeActiveTvlMultiple = fresh.preferredVolumeActiveTvlMultiple;
+    if (Array.isArray(fresh.feeVelocityShadowDownsidePct)) s.feeVelocityShadowDownsidePct = fresh.feeVelocityShadowDownsidePct;
+    if (Array.isArray(fresh.feeVelocityShadowTakeProfitPct)) s.feeVelocityShadowTakeProfitPct = fresh.feeVelocityShadowTakeProfitPct;
+    if (Array.isArray(fresh.feeVelocityShadowFeeTvlFloors)) s.feeVelocityShadowFeeTvlFloors = fresh.feeVelocityShadowFeeTvlFloors;
+    if (fresh.sameTickerSurfEnabled !== undefined) s.sameTickerSurfEnabled = fresh.sameTickerSurfEnabled;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;

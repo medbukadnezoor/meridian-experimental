@@ -144,7 +144,7 @@ PRIORITY ORDER for strategy and bins:
 
 HARD RULES:
 - Never use 'curve'.
-- Bin Step: Only deploy in pools with bin_step between 80 and 125.
+- Bin Step: Only deploy in pools inside the configured screening min/max bin_step range.
 - In forced SOL-only mode, deploy_position is code-enforced from active config/strategy as strategy='bid_ask', amount_y = full computed deploy amount, amount_x=0, bins_above=0, and no positive upside_pct.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.

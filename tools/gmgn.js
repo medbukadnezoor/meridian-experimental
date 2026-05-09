@@ -31,6 +31,10 @@ import { randomUUID } from "crypto";
 import { setDefaultResultOrder } from "dns";
 import { config } from "../config.js";
 import { log } from "../logger.js";
+import {
+  computeVolumeActiveTvlMultiple,
+  estimateFeeVelocityUsdPerMin,
+} from "../strategy-library.js";
 
 setDefaultResultOrder("ipv4first");
 
@@ -483,9 +487,10 @@ async function pickBestPool(pools) {
 function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, holdersAnalysis }) {
   const poolAddress = pool.address || pool.pool_address;
   const activeTvl = num(poolDetail?.active_tvl ?? pool.tvl ?? pool.liquidity);
+  const feeWindow = num(poolDetail?.fee);
   const feeActiveTvlRatio = Number(poolDetail?.fee_active_tvl_ratio) > 0
     ? Number(Number(poolDetail.fee_active_tvl_ratio).toFixed(4))
-    : (activeTvl > 0 ? Number(((num(poolDetail?.fee) / activeTvl) * 100).toFixed(4)) : 0);
+    : (activeTvl > 0 ? Number(((feeWindow / activeTvl) * 100).toFixed(4)) : 0);
   const kolCount = holdersAnalysis.kolHolding || num(token.renowned_count) || num(info?.wallet_tags_stat?.renowned_wallets);
   const smartCount = holdersAnalysis.smartHolding + holdersAnalysis.smartAccumulating || num(token.smart_degen_count) || num(info?.wallet_tags_stat?.smart_wallets);
   const gmgnScore =
@@ -499,7 +504,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, ho
   const mint = tokenAddress(token) || info.address || pool.token_x?.address;
   const ageHours = tokenAgeHours(token);
 
-  return {
+  const condensed = {
     pool: poolAddress,
     name: pool.name || `${token.symbol || info.symbol || "?"}-SOL`,
     base: {
@@ -517,6 +522,7 @@ function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, ho
     bin_step: pool.pool_config?.bin_step ?? poolDetail?.dlmm_params?.bin_step ?? null,
     fee_pct: pool.pool_config?.base_fee_pct ?? poolDetail?.fee_pct ?? null,
     active_tvl: round(activeTvl),
+    fee_window: round(feeWindow),
     fee_active_tvl_ratio: feeActiveTvlRatio,
     volatility: poolDetail?.volatility != null ? Number(Number(poolDetail.volatility).toFixed(4)) : null,
     volatility_timeframe: getVolatilityTimeframe(config.screening?.timeframe || "5m"),
@@ -564,6 +570,11 @@ function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, ho
     price_vs_ath_pct: infoAnalysis?.priceVsAthPct != null ? Number(infoAnalysis.priceVsAthPct.toFixed(2)) : null,
     ath: info.ath_price || null,
     launchpad: token.launchpad_platform || info.launchpad_platform || info.launchpad || null,
+  };
+  return {
+    ...condensed,
+    volume_active_tvl_multiple: computeVolumeActiveTvlMultiple(condensed),
+    fee_velocity_usd_per_min: estimateFeeVelocityUsdPerMin(condensed, config.screening),
   };
 }
 
