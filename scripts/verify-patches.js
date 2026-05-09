@@ -45,6 +45,8 @@ const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertre
 const NANOCAP_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-nanocap-gmgn-first-discovery.js");
 const UPSTREAM_METEORA_DIRECT_VOLATILITY_VERIFIER_PATH = join(__dirname, "verify-upstream-meteora-direct-volatility.js");
 const GHOST_POSITION_RECONCILIATION_VERIFIER_PATH = join(__dirname, "verify-ghost-position-reconciliation.js");
+const ROJO_TRIGGER_NANOCAP_VERIFIER_PATH = join(__dirname, "verify-rojo-trigger-nanocap.js");
+const NANOCAP_BOTH_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-nanocap-both-source-discovery.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -469,6 +471,38 @@ function runGhostPositionReconciliationProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRojoTriggerNanocapProof() {
+  const result = spawnSync(process.execPath, [ROJO_TRIGGER_NANOCAP_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-rojo-trigger-nanocap failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runNanocapBothSourceDiscoveryProof() {
+  const result = spawnSync(process.execPath, [NANOCAP_BOTH_SOURCE_DISCOVERY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-nanocap-both-source-discovery failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -499,6 +533,8 @@ function buildChecks() {
   const nanocapGmgnFirstDiscoveryProof = runNanocapGmgnFirstDiscoveryProof();
   const upstreamMeteoraDirectVolatilityProof = runUpstreamMeteoraDirectVolatilityProof();
   const ghostPositionReconciliationProof = runGhostPositionReconciliationProof();
+  const rojoTriggerNanocapProof = runRojoTriggerNanocapProof();
+  const nanocapBothSourceDiscoveryProof = runNanocapBothSourceDiscoveryProof();
 
   return [
     {
@@ -1394,8 +1430,8 @@ function buildChecks() {
         Number(exampleProof?.management?.stopLossVelocityClosePct) === -3 &&
         exampleProof?.management?.rollingDrawdownExitEnabled === true &&
         Number(exampleProof?.management?.rollingDrawdownWindowMs) === 5400000 &&
-        Number(exampleProof?.management?.rollingDrawdownMinPeakPct) === 1 &&
-        Number(exampleProof?.management?.rollingDrawdownCurrentPnlPct) === -2 &&
+        Number(exampleProof?.management?.rollingDrawdownMinPeakPct) === 3 &&
+        Number(exampleProof?.management?.rollingDrawdownCurrentPnlPct) === 0 &&
         Number(exampleProof?.management?.rollingDrawdownMinDropPct) === 4 &&
         Number(exampleProof?.management?.earlyDumpPct) === -8 &&
         Number(exampleProof?.management?.earlyDumpMaxAgeMin) === 20 &&
@@ -1525,7 +1561,7 @@ function buildChecks() {
       test: () =>
         nanocapGmgnFirstDiscoveryProof?.success === true &&
         nanocapGmgnFirstDiscoveryProof?.defaults?.screeningSource === "meteora" &&
-        nanocapGmgnFirstDiscoveryProof?.nanocapExample?.screeningSource === "gmgn" &&
+        ["gmgn", "both"].includes(nanocapGmgnFirstDiscoveryProof?.nanocapExample?.screeningSource) &&
         nanocapGmgnFirstDiscoveryProof?.nanocapExample?.gmgnKeyIsEnvReferenced === true,
     },
     {
@@ -1776,6 +1812,25 @@ function buildChecks() {
       file: "tools/wallet.js",
       label: "[Upstream] Jupiter v2 swap endpoint present",
       test: (src) => src.includes("v6") || src.includes("jup.ag") || src.includes("jupiter"),
+    },
+    {
+      file: "scripts/verify-rojo-trigger-nanocap.js",
+      label: "[Nanocap] ROJO trigger hardening — peak>=3, current<=0, shadow fields present",
+      test: () =>
+        rojoTriggerNanocapProof?.success === true &&
+        rojoTriggerNanocapProof?.peak_threshold === 3 &&
+        rojoTriggerNanocapProof?.current_threshold === 0 &&
+        rojoTriggerNanocapProof?.shadow_peak === 1 &&
+        rojoTriggerNanocapProof?.shadow_current === -2,
+    },
+    {
+      file: "scripts/verify-nanocap-both-source-discovery.js",
+      label: "[Nanocap] Both-source discovery — nanocap example uses both, dual-source resolver present, shadow runner present",
+      test: () =>
+        nanocapBothSourceDiscoveryProof?.success === true &&
+        nanocapBothSourceDiscoveryProof?.nanocap_uses_both_source === true &&
+        nanocapBothSourceDiscoveryProof?.dual_source_resolver_present === true &&
+        nanocapBothSourceDiscoveryProof?.shadow_runner_present === true,
     },
   ];
 }

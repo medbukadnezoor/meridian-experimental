@@ -75,7 +75,10 @@ const exampleProof = resolveConfigFromPath(path.join(ROOT, "user-config.example.
   env: { GMGN_API_KEY: "synthetic-gmgn-key", DEEPSEEK_API_KEY: "synthetic-llm-key" },
   applyEnv: false,
 });
-assert.strictEqual(exampleProof.config.screening.source, "gmgn", "nanocap example config intends GMGN-first discovery");
+assert.ok(
+  ["gmgn", "both"].includes(exampleProof.config.screening.source),
+  `nanocap example config uses GMGN-capable discovery (got: ${exampleProof.config.screening.source})`
+);
 assert.strictEqual(exampleProof.config.gmgn.apiKey, "synthetic-gmgn-key", "nanocap example keeps GMGN key env-referenced");
 assert.strictEqual(exampleProof.config.gmgn.requireKol, false, "nanocap example does not require KOL by default");
 
@@ -161,9 +164,9 @@ const screeningSource = src("tools/screening.js");
 const exampleSource = src("user-config.example.json");
 const verifierSource = src("scripts/verify-nanocap-gmgn-first-discovery.js");
 
-assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn"])'), "supported screening source set is explicit");
+assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"])'), "supported screening source set is explicit");
 assert.ok(configBuilderSource.includes("normalizeScreeningSource"), "screening source normalizer exists");
-assert.ok(exampleSource.includes('"screeningSource": "gmgn"'), "nanocap tracked example sets intended GMGN source");
+assert.ok(exampleSource.includes('"screeningSource": "both"') || exampleSource.includes('"screeningSource": "gmgn"'), "nanocap tracked example sets a GMGN-capable source");
 assert.ok(exampleSource.includes('"apiKey": "env:GMGN_API_KEY"'), "nanocap example avoids committing GMGN secret values");
 
 assert.ok(gmgnSource.includes("export async function discoverGmgnPools"), "GMGN discovery export exists");
