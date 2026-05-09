@@ -4,21 +4,25 @@ import { isDevBlocked, getBlockedDevs } from "../dev-blocklist.js";
 import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
+import { discoverGmgnPools } from "./gmgn.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
+import {
+  appendDecisionContext,
+  buildCandidateDecisionContext,
+  summarizeIndicatorConfirmation,
+} from "../decision-context-log.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
 const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME = "30m";
 const TIMEFRAME_MINUTES = Object.freeze({
-  "1m": 1,
   "5m": 5,
   "15m": 15,
   "30m": 30,
   "1h": 60,
   "2h": 120,
   "4h": 240,
-  "6h": 360,
   "12h": 720,
   "24h": 1440,
 });
@@ -27,13 +31,121 @@ const PVP_RIVAL_LIMIT = 2;
 const PVP_MIN_ACTIVE_TVL = 5_000;
 const PVP_MIN_HOLDERS = 500;
 const PVP_MIN_GLOBAL_FEES_SOL = 30;
-const DEPLOY_LEASE_TTL_MS = 10 * 60 * 1000;
-const deployCandidateLeases = new Map();
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
   const num = Number(value);
   return Number.isFinite(num) ? num : null;
+}
+
+function normalizeSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase();
+}
+
+function scoreCandidate(pool) {
+  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
+  const organic = Number(pool.organic_score || 0);
+  const volume = Number(pool.volume_window || 0);
+  const holders = Number(pool.holders || 0);
+  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
+}
+
+function candidatePoolAddress(candidate = {}) {
+  return candidate.pool ?? candidate.pool_address ?? candidate.address ?? null;
+}
+
+function candidateBaseMint(candidate = {}) {
+  return candidate.base?.mint ?? candidate.base_mint ?? candidate.token_x?.address ?? candidate.token_x_mint ?? null;
+}
+
+function buildSourceEvidence(candidate = {}) {
+  return {
+    source: candidate.source ?? candidate.discovery_source ?? null,
+    pool: candidatePoolAddress(candidate),
+    base_mint: candidateBaseMint(candidate),
+    name: candidate.name ?? null,
+    active_tvl: candidate.active_tvl ?? candidate.tvl ?? null,
+    volume_window: candidate.volume_window ?? candidate.volume ?? null,
+    fee_active_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio ?? null,
+    bin_step: candidate.bin_step ?? candidate.dlmm_params?.bin_step ?? null,
+    volatility: candidate.volatility ?? null,
+    volatility_timeframe: candidate.volatility_timeframe ?? null,
+    mcap: candidate.mcap ?? null,
+    holders: candidate.holders ?? candidate.holder_count ?? null,
+    gmgn_score: candidate.gmgn_score ?? null,
+    gmgn_total_fee_sol: candidate.gmgn_total_fee_sol ?? null,
+  };
+}
+
+function isMeteoraSolDlmmCandidate(candidate = {}, runtimeConfig = config) {
+  const quoteMint = candidate.quote?.mint ?? candidate.token_y?.address ?? candidate.token_y_mint ?? null;
+  const quoteSymbol = normalizeSymbol(candidate.quote?.symbol ?? candidate.token_y?.symbol);
+  const poolType = String(candidate.pool_type ?? "").toLowerCase();
+  const activeTvl = candidateThresholdNumber(candidate, "active_tvl", "tvl");
+  const volume = candidateThresholdNumber(candidate, "volume_window", "volume");
+  const feeActiveTvlRatio = candidateThresholdNumber(candidate, "fee_active_tvl_ratio", "fee_tvl_ratio");
+  const binStep = candidateThresholdNumber(candidate, "bin_step", "dlmm_params.bin_step");
+  const volatility = candidateThresholdNumber(candidate, "volatility");
+  return Boolean(
+    candidatePoolAddress(candidate) &&
+    candidateBaseMint(candidate) &&
+    (poolType === "dlmm" || poolType === "") &&
+    (quoteMint === runtimeConfig.tokens?.SOL || quoteSymbol === "SOL") &&
+    activeTvl != null && activeTvl > 0 &&
+    volume != null && volume >= 0 &&
+    feeActiveTvlRatio != null && feeActiveTvlRatio > 0 &&
+    binStep != null && binStep > 0 &&
+    volatility != null && volatility > 0
+  );
+}
+
+function mergeCandidateSources(gmgnCandidate, meteoraCandidate, {
+  sourceResolution,
+  discoverySources,
+  sourceMode = "both",
+  sameMintAlternatives = [],
+} = {}) {
+  const preferredMetrics = meteoraCandidate || {};
+  const gmgnEvidence = gmgnCandidate ? buildSourceEvidence(gmgnCandidate) : null;
+  const meteoraEvidence = meteoraCandidate ? buildSourceEvidence(meteoraCandidate) : null;
+  const merged = {
+    ...(gmgnCandidate || {}),
+    ...(meteoraCandidate || {}),
+    source: sourceMode,
+    source_mode: sourceMode,
+    discovery_source: sourceMode,
+    discovery_sources: discoverySources,
+    source_resolution: sourceResolution,
+    source_evidence: {
+      gmgn: gmgnEvidence,
+      meteora: meteoraEvidence,
+      same_mint_alternatives: sameMintAlternatives,
+    },
+  };
+
+  for (const key of [
+    "active_tvl",
+    "volume_window",
+    "fee_active_tvl_ratio",
+    "bin_step",
+    "volatility",
+    "volatility_timeframe",
+    "organic_score",
+    "quote_organic_score",
+  ]) {
+    if (preferredMetrics[key] != null) merged[key] = preferredMetrics[key];
+  }
+
+  if (preferredMetrics.base?.organic != null) merged.base = { ...(merged.base || {}), organic: preferredMetrics.base.organic };
+  if (preferredMetrics.quote?.organic != null) merged.quote = { ...(merged.quote || {}), organic: preferredMetrics.quote.organic };
+  if (gmgnCandidate) {
+    for (const [key, value] of Object.entries(gmgnCandidate)) {
+      if (key.startsWith("gmgn_") && value != null) merged[key] = value;
+    }
+    if (gmgnCandidate.gmgn != null) merged.gmgn = gmgnCandidate.gmgn;
+  }
+
+  return merged;
 }
 
 export function getVolatilityTimeframe(sourceTimeframe) {
@@ -103,266 +215,6 @@ async function applyVolatilityTimeframe(rawPools, sourceTimeframe) {
   }
 
   return rawPools;
-}
-
-function getPoolAddress(value = {}) {
-  return value.pool ?? value.pool_address ?? value.address ?? null;
-}
-
-function getPoolName(value = {}) {
-  return value.name || value.pool_name || `${value.base?.symbol || "?"}-${value.quote?.symbol || "?"}`;
-}
-
-function getBaseMint(value = {}) {
-  return value.base_mint ?? value.base?.mint ?? value.token_x?.address ?? null;
-}
-
-function getFeeActiveTvlRatio(value = {}) {
-  return finiteNumberOrNull(value.fee_active_tvl_ratio ?? value.fee_tvl_ratio);
-}
-
-function getVolumeWindow(value = {}) {
-  return finiteNumberOrNull(value.volume_window ?? value.volume);
-}
-
-function getBinStep(value = {}) {
-  return finiteNumberOrNull(value.bin_step ?? value.dlmm_params?.bin_step);
-}
-
-export function buildDeployCandidateLease(candidate = {}, screeningConfig = {}, {
-  now = Date.now(),
-  ttlMs = DEPLOY_LEASE_TTL_MS,
-} = {}) {
-  const pool = getPoolAddress(candidate);
-  if (!pool) return null;
-
-  return {
-    created_at: new Date(now).toISOString(),
-    expires_at: new Date(now + ttlMs).toISOString(),
-    created_at_ms: now,
-    expires_at_ms: now + ttlMs,
-    ttl_ms: ttlMs,
-    pool,
-    name: getPoolName(candidate),
-    fee_tvl_ratio: getFeeActiveTvlRatio(candidate),
-    fee_active_tvl_ratio: getFeeActiveTvlRatio(candidate),
-    volume: getVolumeWindow(candidate),
-    volume_window: getVolumeWindow(candidate),
-    bin_step: getBinStep(candidate),
-    base_mint: getBaseMint(candidate),
-    threshold_snapshot: {
-      minFeeActiveTvlRatio: finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio),
-      minVolume: finiteNumberOrNull(screeningConfig.minVolume),
-      minBinStep: finiteNumberOrNull(screeningConfig.minBinStep),
-      maxBinStep: finiteNumberOrNull(screeningConfig.maxBinStep),
-      timeframe: screeningConfig.timeframe ?? null,
-      category: screeningConfig.category ?? null,
-    },
-  };
-}
-
-export function recordDeployCandidateLeases(candidates = [], screeningConfig = config.screening, {
-  now = Date.now(),
-  ttlMs = DEPLOY_LEASE_TTL_MS,
-} = {}) {
-  const activePools = new Set();
-  for (const candidate of candidates) {
-    const lease = buildDeployCandidateLease(candidate, screeningConfig, { now, ttlMs });
-    if (!lease) continue;
-    activePools.add(lease.pool);
-    deployCandidateLeases.set(lease.pool, lease);
-  }
-
-  for (const [pool, lease] of deployCandidateLeases.entries()) {
-    if (lease.expires_at_ms <= now || !activePools.has(pool)) {
-      deployCandidateLeases.delete(pool);
-    }
-  }
-
-  return candidates.length;
-}
-
-export function getDeployCandidateLease(poolAddress, { now = Date.now() } = {}) {
-  const pool = String(poolAddress || "").trim();
-  if (!pool) return null;
-  const lease = deployCandidateLeases.get(pool);
-  if (!lease) return null;
-  if (lease.expires_at_ms <= now) {
-    deployCandidateLeases.delete(pool);
-    return null;
-  }
-  return lease;
-}
-
-export function clearDeployCandidateLeases() {
-  deployCandidateLeases.clear();
-}
-
-function makeDeployGuardFailure({
-  code,
-  field,
-  actual = null,
-  threshold = null,
-  comparator = null,
-  message,
-}) {
-  return { code, field, actual, threshold, comparator, message };
-}
-
-export function validateDeployCandidateLease(args = {}, screeningConfig = {}, {
-  now = Date.now(),
-  lease = undefined,
-  getLease = getDeployCandidateLease,
-} = {}) {
-  const pool = String(args.pool_address || args.pool || "").trim();
-  const resolvedLease = lease === undefined ? getLease(pool, { now }) : lease;
-  const failures = [];
-
-  if (!pool) {
-    failures.push(makeDeployGuardFailure({
-      code: "missing_pool_address",
-      field: "pool_address",
-      message: "pool_address is required for deploy guard validation",
-    }));
-  } else if (!resolvedLease) {
-    failures.push(makeDeployGuardFailure({
-      code: "missing_fresh_candidate_lease",
-      field: "pool_address",
-      actual: pool,
-      message: `No fresh get_top_candidates deploy lease found for pool ${pool}`,
-    }));
-  } else if (resolvedLease.expires_at_ms <= now) {
-    failures.push(makeDeployGuardFailure({
-      code: "stale_candidate_lease",
-      field: "expires_at",
-      actual: resolvedLease.expires_at,
-      threshold: new Date(now).toISOString(),
-      comparator: ">",
-      message: `Candidate lease expired at ${resolvedLease.expires_at}`,
-    }));
-  }
-
-  if (resolvedLease) {
-    const minFeeActiveTvlRatio = finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio);
-    const minVolume = finiteNumberOrNull(screeningConfig.minVolume);
-    const minBinStep = finiteNumberOrNull(screeningConfig.minBinStep);
-    const maxBinStep = finiteNumberOrNull(screeningConfig.maxBinStep);
-    const feeRatio = finiteNumberOrNull(resolvedLease.fee_active_tvl_ratio ?? resolvedLease.fee_tvl_ratio);
-    const volume = finiteNumberOrNull(resolvedLease.volume_window ?? resolvedLease.volume);
-    const binStep = finiteNumberOrNull(resolvedLease.bin_step);
-
-    if (minFeeActiveTvlRatio != null && (feeRatio == null || feeRatio < minFeeActiveTvlRatio)) {
-      failures.push(makeDeployGuardFailure({
-        code: "fee_active_tvl_ratio_below_threshold",
-        field: "fee_active_tvl_ratio",
-        actual: feeRatio,
-        threshold: minFeeActiveTvlRatio,
-        comparator: ">=",
-        message: `fee_active_tvl_ratio ${feeRatio ?? "missing"} < minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`,
-      }));
-    }
-    if (minVolume != null && (volume == null || volume < minVolume)) {
-      failures.push(makeDeployGuardFailure({
-        code: "volume_window_below_threshold",
-        field: "volume_window",
-        actual: volume,
-        threshold: minVolume,
-        comparator: ">=",
-        message: `volume_window ${volume ?? "missing"} < minVolume ${minVolume}`,
-      }));
-    }
-    if (minBinStep != null && binStep != null && binStep < minBinStep) {
-      failures.push(makeDeployGuardFailure({
-        code: "bin_step_below_threshold",
-        field: "bin_step",
-        actual: binStep,
-        threshold: minBinStep,
-        comparator: ">=",
-        message: `bin_step ${binStep} < minBinStep ${minBinStep}`,
-      }));
-    }
-    if (maxBinStep != null && binStep != null && binStep > maxBinStep) {
-      failures.push(makeDeployGuardFailure({
-        code: "bin_step_above_threshold",
-        field: "bin_step",
-        actual: binStep,
-        threshold: maxBinStep,
-        comparator: "<=",
-        message: `bin_step ${binStep} > maxBinStep ${maxBinStep}`,
-      }));
-    }
-    if (args.base_mint && resolvedLease.base_mint && args.base_mint !== resolvedLease.base_mint) {
-      failures.push(makeDeployGuardFailure({
-        code: "base_mint_mismatch",
-        field: "base_mint",
-        actual: args.base_mint,
-        threshold: resolvedLease.base_mint,
-        comparator: "===",
-        message: `base_mint ${args.base_mint} does not match leased base_mint ${resolvedLease.base_mint}`,
-      }));
-    }
-  }
-
-  const reason = failures.length
-    ? `deploy_guard rejected ${pool || "unknown pool"}: ${failures.map((failure) => failure.message).join("; ")}`
-    : null;
-
-  return {
-    pass: failures.length === 0,
-    reason,
-    failures,
-    lease: resolvedLease || null,
-    audit: buildDeployGuardAuditPayload({
-      args,
-      lease: resolvedLease || null,
-      screeningConfig,
-      failures,
-      now,
-    }),
-  };
-}
-
-export function buildDeployGuardAuditPayload({
-  args = {},
-  lease = null,
-  screeningConfig = {},
-  failures = [],
-  now = Date.now(),
-} = {}) {
-  return {
-    guard: "deploy_guard",
-    decision: failures.length > 0 ? "safety_block" : "allow",
-    checked_at: new Date(now).toISOString(),
-    attempted: {
-      pool_address: args.pool_address ?? args.pool ?? null,
-      pool_name: args.pool_name ?? lease?.name ?? null,
-      deploy_args: { ...args },
-      rationale: args.rationale ?? null,
-      confidence: args.confidence ?? null,
-    },
-    lease: lease ? { ...lease } : null,
-    current_thresholds: {
-      minFeeActiveTvlRatio: finiteNumberOrNull(screeningConfig.minFeeActiveTvlRatio),
-      minVolume: finiteNumberOrNull(screeningConfig.minVolume),
-      minBinStep: finiteNumberOrNull(screeningConfig.minBinStep),
-      maxBinStep: finiteNumberOrNull(screeningConfig.maxBinStep),
-      timeframe: screeningConfig.timeframe ?? null,
-      category: screeningConfig.category ?? null,
-    },
-    failures,
-  };
-}
-
-function normalizeSymbol(symbol) {
-  return String(symbol || "").trim().toUpperCase();
-}
-
-function scoreCandidate(pool) {
-  const feeTvl = Number(pool.fee_active_tvl_ratio || 0);
-  const organic = Number(pool.organic_score || 0);
-  const volume = Number(pool.volume_window || 0);
-  const holders = Number(pool.holders || 0);
-  return feeTvl * 1000 + organic * 10 + volume / 100 + holders / 100;
 }
 
 async function fetchDiscordSignalCandidates() {
@@ -567,6 +419,115 @@ export function getDeterministicVetoAuditSnapshot(candidate = {}) {
   };
 }
 
+function getIndicatorDecisionStage(confirmation = {}) {
+  if (confirmation.skipped) return "indicator_skip";
+  return confirmation.confirmed ? "indicator_accept" : "indicator_reject";
+}
+
+function configuredNumber(value) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? null : num;
+}
+
+function candidateThresholdNumber(candidate = {}, ...paths) {
+  for (const path of paths) {
+    const value = path.split(".").reduce((current, key) => current?.[key], candidate);
+    const num = finiteNumberOrNull(value);
+    if (num != null) return num;
+  }
+  return null;
+}
+
+function formatThresholdValue(value) {
+  return value == null ? "missing" : String(value);
+}
+
+export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningConfig = {}) {
+  const feeActiveTvlRatio = candidateThresholdNumber(candidate, "fee_active_tvl_ratio", "fee_tvl_ratio");
+  const minFeeActiveTvlRatio = configuredNumber(screeningConfig.minFeeActiveTvlRatio);
+  if (minFeeActiveTvlRatio != null && (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
+    return `configured threshold veto: fee_active_tvl_ratio ${formatThresholdValue(feeActiveTvlRatio)} < ${minFeeActiveTvlRatio}`;
+  }
+
+  const volatility = candidateThresholdNumber(candidate, "volatility");
+  if (volatility == null || volatility <= 0) {
+    const timeframe = candidate.volatility_timeframe || getVolatilityTimeframe(screeningConfig.timeframe);
+    return `configured threshold veto: volatility_${timeframe} ${formatThresholdValue(volatility)} must be > 0`;
+  }
+
+  const binStep = candidateThresholdNumber(candidate, "bin_step", "dlmm_params.bin_step");
+  const minBinStep = configuredNumber(screeningConfig.minBinStep);
+  if (minBinStep != null && (binStep == null || binStep < minBinStep)) {
+    return `configured threshold veto: bin_step ${formatThresholdValue(binStep)} < ${minBinStep}`;
+  }
+  const maxBinStep = configuredNumber(screeningConfig.maxBinStep);
+  if (maxBinStep != null && (binStep == null || binStep > maxBinStep)) {
+    return `configured threshold veto: bin_step ${formatThresholdValue(binStep)} > ${maxBinStep}`;
+  }
+
+  const tvl = candidateThresholdNumber(candidate, "active_tvl", "tvl");
+  const minTvl = configuredNumber(screeningConfig.minTvl);
+  if (minTvl != null && (tvl == null || tvl < minTvl)) {
+    return `configured threshold veto: tvl ${formatThresholdValue(tvl)} < ${minTvl}`;
+  }
+  const maxTvl = configuredNumber(screeningConfig.maxTvl);
+  if (maxTvl != null && (tvl == null || tvl > maxTvl)) {
+    return `configured threshold veto: tvl ${formatThresholdValue(tvl)} > ${maxTvl}`;
+  }
+
+  const volume = candidateThresholdNumber(candidate, "volume_window", "volume");
+  const minVolume = configuredNumber(screeningConfig.minVolume);
+  if (minVolume != null && (volume == null || volume < minVolume)) {
+    return `configured threshold veto: volume ${formatThresholdValue(volume)} < ${minVolume}`;
+  }
+
+  const mcap = candidateThresholdNumber(candidate, "mcap", "token_info.mcap");
+  const minMcap = configuredNumber(screeningConfig.minMcap);
+  if (minMcap != null && (mcap == null || mcap < minMcap)) {
+    return `configured threshold veto: mcap ${formatThresholdValue(mcap)} < ${minMcap}`;
+  }
+  const maxMcap = configuredNumber(screeningConfig.maxMcap);
+  if (maxMcap != null && (mcap == null || mcap > maxMcap)) {
+    return `configured threshold veto: mcap ${formatThresholdValue(mcap)} > ${maxMcap}`;
+  }
+
+  const holders = candidateThresholdNumber(candidate, "holders", "holder_count", "base_token_holders");
+  const minHolders = configuredNumber(screeningConfig.minHolders);
+  if (minHolders != null && (holders == null || holders < minHolders)) {
+    return `configured threshold veto: holders ${formatThresholdValue(holders)} < ${minHolders}`;
+  }
+
+  const organicScore = candidateThresholdNumber(candidate, "organic_score", "base.organic", "token_x.organic_score");
+  const minOrganic = configuredNumber(screeningConfig.minOrganic);
+  if (minOrganic != null && (organicScore == null || organicScore < minOrganic)) {
+    return `configured threshold veto: organic_score ${formatThresholdValue(organicScore)} < ${minOrganic}`;
+  }
+
+  const quoteOrganic = candidateThresholdNumber(candidate, "quote.organic", "quote_organic_score", "token_y.organic_score");
+  const minQuoteOrganic = configuredNumber(screeningConfig.minQuoteOrganic);
+  if (minQuoteOrganic != null && (quoteOrganic == null || quoteOrganic < minQuoteOrganic)) {
+    return `configured threshold veto: quote_organic_score ${formatThresholdValue(quoteOrganic)} < ${minQuoteOrganic}`;
+  }
+
+  return null;
+}
+
+function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
+  const accepted = [];
+  for (const pool of pools) {
+    const vetoReason = getConfiguredPoolThresholdVetoReason(pool, screeningConfig);
+    if (vetoReason) {
+      log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
+      pushFilteredReason(filteredOut, pool, vetoReason, { priority: true });
+      stageCounts.configured_threshold_reject = (stageCounts.configured_threshold_reject || 0) + 1;
+    } else {
+      accepted.push(pool);
+    }
+  }
+  stageCounts.configured_threshold_accept = accepted.length;
+  return accepted;
+}
+
 export function formatDeterministicVetoAuditLine(candidate = {}, reason = "deterministic veto") {
   const name = candidate.name || `${candidate.base?.symbol || "?"}-${candidate.quote?.symbol || "?"}`;
   const snapshot = getDeterministicVetoAuditSnapshot(candidate);
@@ -638,9 +599,11 @@ async function enrichPvpRisk(pools) {
  * Returns condensed data optimized for LLM consumption (saves tokens).
  */
 export async function discoverPools({
-  page_size = config.screening.discoveryPageSize ?? 50,
+  page_size = 50,
+  category = null,
 } = {}) {
   const s = config.screening;
+  const discoveryCategory = category || s.category;
   const filters = [
     "base_token_has_critical_warnings=false",
     "quote_token_has_critical_warnings=false",
@@ -666,7 +629,7 @@ export async function discoverPools({
     page_size,
     filters,
     timeframe: s.timeframe,
-    category: s.category,
+    category: discoveryCategory,
   });
 
   let rawPools = Array.isArray(data.data) ? data.data : [];
@@ -714,25 +677,11 @@ export async function discoverPools({
   }
 
   rawPools = await applyVolatilityTimeframe(rawPools, s.timeframe);
+
   const condensed = rawPools.map(condensePool);
 
-  let pools = condensed.filter((p) => {
-    const volatility = finiteNumberOrNull(p.volatility);
-    if (volatility == null || volatility <= 0) {
-      const timeframe = p.volatility_timeframe || getVolatilityTimeframe(config.screening.timeframe);
-      log("screening", `Configured threshold filter: dropped ${p.name} — configured threshold veto: volatility_${timeframe} ${volatility ?? "missing"} must be > 0`);
-      return false;
-    }
-    return true;
-  });
-
-  const volatilityFiltered = condensed.length - pools.length;
-  if (volatilityFiltered > 0) {
-    log("screening", `Filtered ${volatilityFiltered} pool(s) with missing/invalid volatility`);
-  }
-
   // Hard-filter blacklisted tokens and blocked deployers (what pool discovery already gave us)
-  pools = pools.filter((p) => {
+  let pools = condensed.filter((p) => {
     if (isBlacklisted(p.base?.mint)) {
       log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in pool ${p.name}`);
       return false;
@@ -744,7 +693,7 @@ export async function discoverPools({
     return true;
   });
 
-  const filtered = condensed.length - volatilityFiltered - pools.length;
+  const filtered = condensed.length - pools.length;
   if (filtered > 0) log("blacklist", `Filtered ${filtered} pool(s) with blacklisted tokens/devs`);
 
   // If pool discovery didn't supply dev field, batch-fetch from Jupiter for any pools
@@ -786,14 +735,282 @@ export async function discoverPools({
   };
 }
 
+async function discoverMeteoraCandidateUniverse(runtimeConfig) {
+  const primaryCategory = runtimeConfig.screening.category || "trending";
+  const categories = [primaryCategory, ...(runtimeConfig.screening.discoveryExtraCategories || [])]
+    .map((category) => String(category || "").trim())
+    .filter(Boolean)
+    .filter((category, index, list) => list.indexOf(category) === index);
+  const pageSize = runtimeConfig.screening.discoveryPageSize || 50;
+  const discoveries = await Promise.all(categories.map((category) =>
+    discoverPools({ page_size: pageSize, category })
+      .catch((error) => {
+        log("screening", `Discovery category ${category} failed: ${error.message}`);
+        return { total: 0, pools: [] };
+      })
+  ));
+  const poolsByAddress = new Map();
+  for (const discovery of discoveries) {
+    for (const pool of discovery.pools || []) {
+      if (!poolsByAddress.has(pool.pool)) {
+        poolsByAddress.set(pool.pool, {
+          ...pool,
+          source: pool.source || "meteora",
+          discovery_source: pool.discovery_source || "meteora",
+        });
+      }
+    }
+  }
+  return {
+    total: discoveries.reduce((sum, discovery) => sum + (discovery.total ?? discovery.pools?.length ?? 0), 0),
+    pools: [...poolsByAddress.values()],
+    stage_counts: {
+      categories: discoveries.length,
+      deduped_pools: poolsByAddress.size,
+    },
+  };
+}
+
+async function validateGmgnOnlyCandidatesWithMeteora(candidates, runtimeConfig) {
+  const validations = new Map();
+  await Promise.all((candidates || []).map(async (candidate) => {
+    const poolAddress = candidatePoolAddress(candidate);
+    if (!poolAddress) return;
+    try {
+      const detail = await fetchPoolDiscoveryDetail({
+        poolAddress,
+        timeframe: getVolatilityTimeframe(runtimeConfig.screening?.timeframe || "5m"),
+      });
+      if (!detail) return;
+      const [withVolatility] = await applyVolatilityTimeframe([detail], runtimeConfig.screening?.timeframe || "5m");
+      const condensed = condensePool(withVolatility || detail);
+      if (isMeteoraSolDlmmCandidate(condensed, runtimeConfig)) {
+        validations.set(poolAddress, condensed);
+      }
+    } catch (error) {
+      log("screening", `GMGN-only Meteora validation failed for ${poolAddress.slice(0, 8)}: ${error.message}`);
+    }
+  }));
+  return validations;
+}
+
+export function resolveDualSourceDiscovery({
+  gmgnDiscovery = {},
+  meteoraDiscovery = {},
+  gmgnValidationByPool = new Map(),
+  sourceErrors = {},
+  runtimeConfig = config,
+} = {}) {
+  const gmgnPools = Array.isArray(gmgnDiscovery.pools) ? gmgnDiscovery.pools : [];
+  const meteoraPools = Array.isArray(meteoraDiscovery.pools) ? meteoraDiscovery.pools : [];
+  const filtered = [
+    ...(Array.isArray(gmgnDiscovery.filtered_examples) ? gmgnDiscovery.filtered_examples : []),
+    ...(Array.isArray(meteoraDiscovery.filtered_examples) ? meteoraDiscovery.filtered_examples : []),
+  ];
+  const counts = {
+    pool_overlap: 0,
+    mint_overlap: 0,
+    gmgn_only_accepted: 0,
+    gmgn_only_rejected: 0,
+    meteora_only_accepted: 0,
+    meteora_only_rejected: 0,
+    same_mint_alternatives_dropped: 0,
+    source_validation_reject: 0,
+  };
+
+  const gmgnByPool = new Map();
+  const meteoraByPool = new Map();
+  for (const pool of gmgnPools) {
+    const address = candidatePoolAddress(pool);
+    if (address && !gmgnByPool.has(address)) gmgnByPool.set(address, pool);
+  }
+  for (const pool of meteoraPools) {
+    const address = candidatePoolAddress(pool);
+    if (address && !meteoraByPool.has(address)) meteoraByPool.set(address, pool);
+  }
+
+  const candidates = [];
+  const allPools = new Set([...gmgnByPool.keys(), ...meteoraByPool.keys()]);
+  for (const poolAddress of allPools) {
+    const gmgnPool = gmgnByPool.get(poolAddress);
+    const meteoraPool = meteoraByPool.get(poolAddress);
+    if (gmgnPool && meteoraPool) {
+      counts.pool_overlap += 1;
+      candidates.push(mergeCandidateSources(gmgnPool, meteoraPool, {
+        sourceResolution: "overlap_same_pool",
+        discoverySources: ["gmgn", "meteora"],
+      }));
+      continue;
+    }
+    if (gmgnPool) {
+      const validated = gmgnValidationByPool.get(poolAddress);
+      if (!validated || !isMeteoraSolDlmmCandidate(validated, runtimeConfig)) {
+        counts.gmgn_only_rejected += 1;
+        counts.source_validation_reject += 1;
+        filtered.push({
+          stage: "source_validation_reject",
+          name: gmgnPool.name || gmgnPool.base?.symbol || poolAddress,
+          pool: poolAddress,
+          reason: "GMGN-only candidate lacks valid direct Meteora SOL DLMM validation",
+          source: "gmgn",
+        });
+        continue;
+      }
+      counts.gmgn_only_accepted += 1;
+      candidates.push(mergeCandidateSources(gmgnPool, validated, {
+        sourceResolution: "gmgn_only_validated",
+        discoverySources: ["gmgn"],
+      }));
+      continue;
+    }
+    if (meteoraPool) {
+      if (!isMeteoraSolDlmmCandidate(meteoraPool, runtimeConfig)) {
+        counts.meteora_only_rejected += 1;
+        filtered.push({
+          stage: "source_validation_reject",
+          name: meteoraPool.name || poolAddress,
+          pool: poolAddress,
+          reason: "Meteora-only candidate is not a valid SOL DLMM pool",
+          source: "meteora",
+        });
+        continue;
+      }
+      counts.meteora_only_accepted += 1;
+      candidates.push(mergeCandidateSources(null, meteoraPool, {
+        sourceResolution: "meteora_only",
+        discoverySources: ["meteora"],
+      }));
+    }
+  }
+
+  const byMint = new Map();
+  for (const candidate of candidates) {
+    const mint = candidateBaseMint(candidate);
+    if (!mint) continue;
+    const list = byMint.get(mint) || [];
+    list.push(candidate);
+    byMint.set(mint, list);
+  }
+
+  const resolved = [];
+  for (const list of byMint.values()) {
+    if (list.length === 1) {
+      resolved.push(list[0]);
+      continue;
+    }
+    counts.mint_overlap += list.length;
+    const sorted = [...list].sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+    const [winner, ...dropped] = sorted;
+    const alternatives = dropped.map(buildSourceEvidence);
+    winner.source_evidence = {
+      ...(winner.source_evidence || {}),
+      same_mint_alternatives: alternatives,
+    };
+    for (const candidate of dropped) {
+      counts.same_mint_alternatives_dropped += 1;
+      filtered.push({
+        stage: "same_mint_alternative_dropped",
+        name: candidate.name || candidate.base?.symbol || candidate.pool,
+        pool: candidate.pool,
+        base_mint: candidateBaseMint(candidate),
+        reason: "same base mint already represented by a higher-scored resolved pool",
+        source: Array.isArray(candidate.discovery_sources) ? candidate.discovery_sources.join("+") : candidate.source,
+      });
+    }
+    resolved.push(winner);
+  }
+
+  return {
+    total: (gmgnDiscovery.total ?? gmgnPools.length) + (meteoraDiscovery.total ?? meteoraPools.length),
+    pools: resolved.sort((a, b) => scoreCandidate(b) - scoreCandidate(a)),
+    filtered_examples: filtered,
+    source_errors: sourceErrors,
+    stage_counts: {
+      source: "both",
+      source_mode: "both",
+      gmgn_stage_counts: gmgnDiscovery.stage_counts || {},
+      meteora_stage_counts: meteoraDiscovery.stage_counts || {},
+      union_stage_counts: {
+        gmgn_candidates: gmgnPools.length,
+        meteora_candidates: meteoraPools.length,
+        resolved_candidates: resolved.length,
+        ...counts,
+      },
+      ...counts,
+    },
+  };
+}
+
 /**
  * Returns eligible pools for the agent to evaluate and pick from.
  * Hard filters applied in code, agent decides which to deploy into.
  */
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
-  const { pools } = await discoverPools({ page_size: config.screening.discoveryPageSize ?? 50 });
-  const filteredOut = [];
+  const source = String(config.screening.source || "meteora").toLowerCase();
+  if (!["meteora", "gmgn", "both"].includes(source)) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora, gmgn, or both.`);
+  }
+
+  let discovery;
+  if (source === "gmgn") {
+    discovery = await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) });
+  } else if (source === "both") {
+    const [gmgnResult, meteoraResult] = await Promise.allSettled([
+      discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) }),
+      discoverMeteoraCandidateUniverse(config),
+    ]);
+    const gmgnDiscovery = gmgnResult.status === "fulfilled"
+      ? gmgnResult.value
+      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
+    const meteoraDiscovery = meteoraResult.status === "fulfilled"
+      ? meteoraResult.value
+      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
+    const meteoraPools = new Set((meteoraDiscovery.pools || []).map(candidatePoolAddress).filter(Boolean));
+    const gmgnOnlyPools = (gmgnDiscovery.pools || []).filter((pool) => !meteoraPools.has(candidatePoolAddress(pool)));
+    const gmgnValidationByPool = await validateGmgnOnlyCandidatesWithMeteora(gmgnOnlyPools, config);
+    discovery = resolveDualSourceDiscovery({
+      gmgnDiscovery,
+      meteoraDiscovery,
+      gmgnValidationByPool,
+      sourceErrors: {
+        gmgn: gmgnResult.status === "rejected" ? gmgnResult.reason?.message || String(gmgnResult.reason) : null,
+        meteora: meteoraResult.status === "rejected" ? meteoraResult.reason?.message || String(meteoraResult.reason) : null,
+      },
+      runtimeConfig: config,
+    });
+  } else {
+    discovery = await discoverMeteoraCandidateUniverse(config);
+  }
+  let pools = discovery.pools || [];
+  const totalScreened = discovery.total ?? pools.length;
+  const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
+  const postDiscoveryStageCounts = {};
+
+  if (source === "gmgn") {
+    const before = pools.length;
+    pools = pools.filter((p) => {
+      if (isBlacklisted(p.base?.mint)) {
+        log("blacklist", `Filtered blacklisted token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)}) in GMGN pool ${p.name}`);
+        pushFilteredReason(filteredOut, p, "blacklisted token");
+        return false;
+      }
+      if (p.dev && isDevBlocked(p.dev)) {
+        log("dev_blocklist", `Filtered blocked deployer ${p.dev?.slice(0, 8)} token ${p.base?.symbol} in GMGN pool ${p.name}`);
+        pushFilteredReason(filteredOut, p, "blocked deployer");
+        return false;
+      }
+      return true;
+    });
+    if (pools.length < before) log("blacklist", `GMGN: filtered ${before - pools.length} blacklisted/blocked pool(s)`);
+  }
+
+  pools = filterConfiguredPoolThresholds(
+    pools,
+    config.screening,
+    filteredOut,
+    postDiscoveryStageCounts,
+  );
 
   // Exclude pools where the wallet already has an open position
   const { getMyPositions } = await import("./dlmm.js");
@@ -813,11 +1030,33 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       }
       if (isPoolOnCooldown(p.pool)) {
         log("screening", `Filtered cooldown pool ${p.name} (${p.pool.slice(0, 8)})`);
+        appendDecisionContext({
+          stage: "cooldown_block",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: "pool cooldown active",
+          metrics: buildCandidateDecisionContext(p),
+          source: "screening.pool_cooldown",
+        });
         pushFilteredReason(filteredOut, p, "pool cooldown active");
         return false;
       }
       if (isBaseMintOnCooldown(p.base?.mint)) {
         log("screening", `Filtered cooldown token ${p.base?.symbol} (${p.base?.mint?.slice(0, 8)})`);
+        appendDecisionContext({
+          stage: "cooldown_block",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: "token cooldown active",
+          metrics: buildCandidateDecisionContext(p),
+          source: "screening.token_cooldown",
+        });
         pushFilteredReason(filteredOut, p, "token cooldown active");
         return false;
       }
@@ -837,23 +1076,6 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         log("screening", `PVP hard filter removed ${before - eligible.length} pool(s)`);
       }
     }
-  }
-
-  if (
-    eligible.length > 0 &&
-    (config.screening.fallingKnifeVetoEnabled || config.screening.suspiciousVolumeVetoEnabled)
-  ) {
-    await enrichJupiterTokenSnapshots(eligible);
-
-    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-      const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
-      if (vetoReason) {
-        log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
-        pushFilteredReason(filteredOut, p, vetoReason);
-        return false;
-      }
-      return true;
-    }));
   }
 
   // Enrich with OKX data — advanced info (risk/bundle/sniper) + ATH price (no API key required)
@@ -913,6 +1135,37 @@ export async function getTopCandidates({ limit = 10 } = {}) {
         eligible[i].top_cluster_hold_pct = clusters[0]?.holding_pct ?? null;
       }
     }
+
+    await enrichJupiterTokenSnapshots(eligible);
+
+    // Deterministic nanocap safety gates. These run before the LLM sees candidates.
+    eligible.splice(0, eligible.length, ...eligible.filter((p) => {
+      const vetoReason = getDeterministicCandidateVetoReason(p, config.screening);
+      if (vetoReason) {
+        log("screening", formatDeterministicVetoAuditLine(p, vetoReason));
+        appendDecisionContext({
+          stage: "deterministic_veto",
+          actor: "SCREENER",
+          pool: p.pool,
+          poolName: p.name,
+          baseMint: p.base?.mint ?? null,
+          quoteMint: p.quote?.mint ?? null,
+          reason: vetoReason,
+          metrics: {
+            ...buildCandidateDecisionContext(p),
+            veto_audit: getDeterministicVetoAuditSnapshot(p),
+          },
+          source: "screening.deterministic_veto",
+        });
+        pushFilteredReason(filteredOut, p, vetoReason, {
+          priority: true,
+          audit: getDeterministicVetoAuditSnapshot(p),
+        });
+        return false;
+      }
+      return true;
+    }));
+
     // Wash trading hard filter — fake volume = misleading fee yield
     eligible.splice(0, eligible.length, ...eligible.filter((p) => {
       if (p.is_wash) {
@@ -984,6 +1237,20 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     const confirmedEligible = eligible.filter((pool) => {
       const confirmation = confirmationByPool.get(pool.pool);
       pool.indicator_confirmation = confirmation || null;
+      if (confirmation) {
+        appendDecisionContext({
+          stage: getIndicatorDecisionStage(confirmation),
+          actor: "SCREENER",
+          pool: pool.pool,
+          poolName: pool.name,
+          baseMint: pool.base?.mint ?? null,
+          quoteMint: pool.quote?.mint ?? null,
+          reason: confirmation.reason,
+          metrics: buildCandidateDecisionContext(pool),
+          chart: summarizeIndicatorConfirmation(confirmation),
+          source: "screening.indicator_confirmation",
+        });
+      }
       if (!confirmation || confirmation.confirmed) return true;
       pushFilteredReason(filteredOut, pool, `indicator reject: ${confirmation.reason}`);
       log("screening", `Indicator rejected ${pool.name} (${pool.pool.slice(0, 8)}): ${confirmation.reason}`);
@@ -996,13 +1263,21 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   }
 
   const ranked = rankCandidatesByDarwin(eligible);
-  recordDeployCandidateLeases(ranked, config.screening);
 
   return {
     candidates: ranked,
     total_eligible: ranked.length,
-    total_screened: pools.length,
+    total_screened: totalScreened || pools.length,
+    source,
+    stage_counts: {
+      source,
+      ranked: totalScreened || pools.length,
+      ...(discovery.stage_counts || {}),
+      ...postDiscoveryStageCounts,
+    },
+    source_errors: discovery.source_errors || {},
     filtered_examples: filteredOut.slice(0, 3),
+    all_filtered: filteredOut,
   };
 }
 
@@ -1038,6 +1313,7 @@ function condensePool(p) {
     quote: {
       symbol: p.token_y?.symbol,
       mint: p.token_y?.address,
+      organic: Math.round(p.token_y?.organic_score || 0),
     },
     pool_type: p.pool_type,
     bin_step: p.dlmm_params?.bin_step || null,
@@ -1059,6 +1335,7 @@ function condensePool(p) {
     holders: p.base_token_holders,
     mcap: round(p.token_x?.market_cap),
     organic_score: Math.round(p.token_x?.organic_score || 0),
+    quote_organic_score: Math.round(p.token_y?.organic_score || 0),
     token_age_hours: p.token_x?.created_at
       ? Math.floor((Date.now() - p.token_x.created_at) / 3_600_000)
       : null,
@@ -1169,10 +1446,17 @@ function fix(n, decimals) {
   return n != null ? Number(n.toFixed(decimals)) : null;
 }
 
-function pushFilteredReason(list, pool, reason) {
+function pushFilteredReason(list, pool, reason, options = {}) {
   if (!list || !pool) return;
-  list.push({
+  const entry = {
     name: pool.name || `${pool.base?.symbol || "?"}-${pool.quote?.symbol || "?"}`,
     reason,
-  });
+  };
+  if (options.audit) {
+    for (const [key, value] of Object.entries(options.audit)) {
+      if (value != null) entry[key] = value;
+    }
+  }
+  if (options.priority) list.unshift(entry);
+  else list.push(entry);
 }

@@ -26,12 +26,14 @@ import { recordPerformance } from "../lessons.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
+import { appendDecisionContext } from "../decision-context-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { signAndSimulateRelayTransactions } from "./relay-security.js";
 import {
   normalizeDeployRangeInputs,
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
+import { deriveRangeSide } from "../oor-reposition.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -334,6 +336,150 @@ function normalizeExecutionSignatures(result) {
   return signatures;
 }
 
+export const ADAPTIVE_CLOSE_MODE_DEFAULTS = Object.freeze({
+  hard_stop: "local_liquidity_first",
+  fast_stop: "local_liquidity_first",
+  velocity_stop: "local_liquidity_first",
+  rolling_drawdown: "fast_zap_attempt",
+  profit_giveback: "fast_zap_attempt",
+  low_yield: "relay_zap_normal",
+  oor_above: "relay_zap_normal",
+  manual: "relay_zap_normal",
+});
+
+const VALID_ADAPTIVE_CLOSE_MODES = new Set([
+  "local_liquidity_first",
+  "fast_zap_attempt",
+  "relay_zap_normal",
+  "local_close_no_swap",
+]);
+
+function normalizeAdaptiveCloseMode(value, fallback) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return VALID_ADAPTIVE_CLOSE_MODES.has(normalized) ? normalized : fallback;
+}
+
+export function classifyAdaptiveCloseReason(reason, urgent = false) {
+  const text = String(reason || "").toLowerCase();
+  if (text.includes("hard stop")) return "hard_stop";
+  if (text.includes("velocity stop") || text.includes("rug_like") || text.includes("rug-like")) return "velocity_stop";
+  if (text.includes("fast stop") || text.includes("early dump")) return "fast_stop";
+  if (text.includes("rolling fast drawdown") || text.includes("rolling drawdown")) return "rolling_drawdown";
+  if (text.includes("profit giveback")) return "profit_giveback";
+  if (text.includes("low yield") || text.includes("low-yield") || text.includes("yield")) return "low_yield";
+  if ((text.includes("out of range") || text.includes("oor")) && (text.includes("above") || text.includes("benign"))) return "oor_above";
+  if (text.includes("manual") || text.includes("operator")) return "manual";
+  return urgent ? "fast_stop" : "manual";
+}
+
+export function selectAdaptiveCloseMode({
+  reason,
+  urgent = false,
+  relayEnabled = false,
+  managementConfig = {},
+} = {}) {
+  const exitType = classifyAdaptiveCloseReason(reason, urgent);
+  const enabled = managementConfig.adaptiveCloseModeEnabled === true;
+  const configuredModes = managementConfig.adaptiveCloseModes && typeof managementConfig.adaptiveCloseModes === "object"
+    ? managementConfig.adaptiveCloseModes
+    : {};
+  const configuredMode = normalizeAdaptiveCloseMode(configuredModes[exitType], ADAPTIVE_CLOSE_MODE_DEFAULTS[exitType] || "local_liquidity_first");
+  const selectedMode = enabled
+    ? configuredMode
+    : (urgent ? "local_liquidity_first" : (relayEnabled ? "relay_zap_normal" : "local_liquidity_first"));
+  const fastZapTimeoutMs = Math.max(1, Number(managementConfig.adaptiveCloseFastZapTimeoutMs ?? 1500) || 1500);
+
+  return {
+    enabled,
+    exitType,
+    selectedMode,
+    requestedMode: configuredMode,
+    fastZapTimeoutMs,
+    shouldAttemptRelay: !!relayEnabled && (selectedMode === "relay_zap_normal" || selectedMode === "fast_zap_attempt"),
+    shouldUseFastZapBudget: enabled && selectedMode === "fast_zap_attempt",
+    skipPostCloseSwap: enabled && selectedMode === "local_close_no_swap",
+  };
+}
+
+function createCloseModeAudit(positionAddress, reason, urgent, decision) {
+  return {
+    adaptive_close_enabled: decision.enabled,
+    requested_reason: reason || "agent decision",
+    exit_type: decision.exitType,
+    selected_close_mode: decision.selectedMode,
+    requested_close_mode: decision.requestedMode,
+    urgent: !!urgent,
+    zap_attempted: false,
+    zap_submitted: false,
+    zap_quote_ms: null,
+    zap_order_ms: null,
+    zap_sign_ms: null,
+    zap_submit_ms: null,
+    zap_total_ms: null,
+    zap_fast_timeout_ms: decision.shouldUseFastZapBudget ? decision.fastZapTimeoutMs : null,
+    fallback_reason: null,
+    local_close_ms: null,
+    post_close_swap_ms: null,
+    final_sol_received: null,
+    no_duplicate_close_or_swap_guard: true,
+    position: positionAddress,
+  };
+}
+
+function closeModeContext(audit) {
+  return {
+    adaptive_close_enabled: audit.adaptive_close_enabled,
+    requested_reason: audit.requested_reason,
+    exit_type: audit.exit_type,
+    selected_close_mode: audit.selected_close_mode,
+    requested_close_mode: audit.requested_close_mode,
+    zap_attempted: audit.zap_attempted,
+    zap_submitted: audit.zap_submitted,
+    zap_quote_ms: audit.zap_quote_ms,
+    zap_order_ms: audit.zap_order_ms,
+    zap_sign_ms: audit.zap_sign_ms,
+    zap_submit_ms: audit.zap_submit_ms,
+    zap_total_ms: audit.zap_total_ms,
+    zap_fast_timeout_ms: audit.zap_fast_timeout_ms,
+    fallback_reason: audit.fallback_reason,
+    local_close_ms: audit.local_close_ms,
+    post_close_swap_ms: audit.post_close_swap_ms,
+    final_sol_received: audit.final_sol_received,
+    no_duplicate_close_or_swap_guard: audit.no_duplicate_close_or_swap_guard,
+  };
+}
+
+function startTimedStage(audit, stageName) {
+  const startedAt = Date.now();
+  return () => {
+    audit[`${stageName}_ms`] = Date.now() - startedAt;
+  };
+}
+
+async function meridianJsonAdaptive(pathname, options, audit, stageName, deadlineAt = null) {
+  const finish = startTimedStage(audit, `zap_${stageName}`);
+  try {
+    if (Number.isFinite(deadlineAt)) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`fast zap ${stageName} budget expired before ${stageName}`);
+      }
+      return await meridianJsonOnce(pathname, options, Math.max(1, remainingMs));
+    }
+    return await meridianJson(pathname, options);
+  } finally {
+    finish();
+  }
+}
+
+function assertFastZapSubmitBudget(audit, deadlineAt) {
+  if (!Number.isFinite(deadlineAt)) return;
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error("fast zap budget expired before submit");
+  }
+}
+
 const METEORA_INIT_BIN_ARRAY_DISCRIMINATOR = Buffer.from([35, 86, 19, 185, 78, 212, 75, 211]).toString("hex");
 const METEORA_INIT_BITMAP_EXTENSION_DISCRIMINATOR = Buffer.from([47, 157, 226, 180, 12, 240, 33, 71]).toString("hex");
 
@@ -526,27 +672,17 @@ export async function deployPosition({
   let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
   let activeBinsAbove = bins_above ?? 0;
 
-  if (volatility != null && (!Number.isFinite(Number(volatility)) || Number(volatility) <= 0)) {
-    log("deploy_reject", `Invalid pool volatility for ${pool_address.slice(0, 8)}: ${volatility}`);
-    appendDecision({
-      type: "deploy_reject",
-      actor: "SCREENER",
-      pool: pool_address,
-      pool_name: pool_name || pool_address,
-      summary: "Invalid pool volatility",
-      reason: `Invalid pool volatility: ${volatility}`,
-      risks: ["No on-chain deploy attempt was made"],
-      metrics: {
-        source: "dlmm.deploy.invalid_volatility",
-        volatility,
-      },
-      rejected: ["invalid_volatility"],
-    });
-    return { success: false, error: `Invalid pool volatility: ${volatility}` };
-  }
-
   if (isPoolOnCooldown(pool_address)) {
     log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: "Pool on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.pool_cooldown",
+    });
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
   }
 
@@ -555,6 +691,16 @@ export async function deployPosition({
   const baseMint = pool.lbPair.tokenXMint.toString();
   if (isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: "Token on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.token_cooldown",
+    });
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
   const activeBin = await pool.getActiveBin();
@@ -667,7 +813,7 @@ export async function deployPosition({
     active_price: activePrice,
   };
 
-  log("deploy_audit", `[range-normalized] ${JSON.stringify({
+  const normalizedRangeAudit = {
     pool_address,
     strategy: activeStrategy,
     active_bin: activeBin.binId,
@@ -678,7 +824,38 @@ export async function deployPosition({
     bins_above: activeBinsAbove,
     percent_inputs: normalizedRange.percent_inputs,
     range_coverage: rangeCoverage,
-  })}`);
+  };
+  log("deploy_audit", `[range-normalized] ${JSON.stringify(normalizedRangeAudit)}`);
+  appendDecisionContext({
+    stage: "deploy_attempt",
+    actor: "SCREENER",
+    pool: pool_address,
+    poolName: pool_name ?? null,
+    baseMint,
+    reason: "deploy_position called",
+    metrics: {
+      bin_step: actualBinStep,
+      base_fee: base_fee ?? null,
+      volatility: volatility ?? null,
+      fee_tvl_ratio: fee_tvl_ratio ?? null,
+      organic_score: organic_score ?? null,
+      initial_value_usd: initial_value_usd ?? null,
+    },
+    deploy: {
+      raw: {
+        strategy: activeStrategy,
+        amount_x: amount_x ?? null,
+        amount_y: amount_y ?? null,
+        amount_sol: amount_sol ?? null,
+        bins_below: bins_below ?? null,
+        bins_above: bins_above ?? null,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+      normalized: normalizedRangeAudit,
+    },
+    source: "dlmm.deploy.range_normalized",
+  });
 
   const narrowRangeGuard = validateSingleSidedSolBidAskRange({
     activeStrategy,
@@ -693,6 +870,19 @@ export async function deployPosition({
   });
   if (!narrowRangeGuard.ok) {
     log("deploy_reject", `[narrow-range-guard] ${narrowRangeGuard.reason} ${JSON.stringify(narrowRangeGuard.details)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: narrowRangeGuard.reason,
+      deploy: {
+        normalized: normalizedRangeAudit,
+        guard: narrowRangeGuard.details,
+      },
+      source: "dlmm.deploy.narrow_range_guard",
+    });
     throw new Error(narrowRangeGuard.reason);
   }
 
@@ -851,6 +1041,32 @@ export async function deployPosition({
           upside_pct: upside_pct ?? upsideCoveragePct,
         },
       });
+      appendDecisionContext({
+        stage: "deploy_success",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        position: positionAddress,
+        reason: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+        metrics: {
+          bin_step: actualBinStep,
+          base_fee: actualBaseFee,
+          volatility: volatility ?? null,
+          fee_tvl_ratio: fee_tvl_ratio ?? null,
+          organic_score: organic_score ?? null,
+        },
+        deploy: {
+          relay: true,
+          request_id: order.requestId,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          range_coverage: rangeCoverage,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_success",
+      });
 
       return {
         success: true,
@@ -877,6 +1093,21 @@ export async function deployPosition({
       };
     } catch (error) {
       log("deploy_error", `Relay deploy failed: ${error.message}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        reason: error.message,
+        deploy: {
+          relay: true,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_error",
+      });
       return { success: false, error: error.message };
     }
   }
@@ -986,6 +1217,31 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
       },
     });
+    appendDecisionContext({
+      stage: "deploy_success",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      position: newPosition.publicKey.toString(),
+      reason: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      metrics: {
+        bin_step: actualBinStep,
+        base_fee: actualBaseFee,
+        volatility: volatility ?? null,
+        fee_tvl_ratio: fee_tvl_ratio ?? null,
+        organic_score: organic_score ?? null,
+      },
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_success",
+    });
 
     return {
       success: true,
@@ -1010,6 +1266,21 @@ export async function deployPosition({
     };
   } catch (error) {
     log("deploy_error", error.message);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_error",
+    });
     return { success: false, error: error.message };
   }
 }
@@ -1404,6 +1675,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
                 upper_bin:              upperBin,
                 active_bin:             activeBin,
                 in_range:               !!lpData.inRange,
+                range_side:             deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
                 unclaimed_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative  : lpData.unCollectedFee)  * 10000) / 10000,
                 total_value_usd:        Math.round(safeNum(config.management.solMode ? lpData.valueNative           : lpData.value)           * 10000) / 10000,
                 total_value_true_usd:   Math.round(safeNum(lpData.value)                                                                      * 10000) / 10000,
@@ -1503,6 +1775,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           upper_bin:          upperBin,
           active_bin:         activeBin,
           in_range:           binData ? !binData.isOutOfRange : !isOOR,
+          range_side:         deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
           unclaimed_fees_usd: lpData
             ? Math.round((
                 config.management.solMode
@@ -1724,18 +1997,37 @@ export async function closePosition({ position_address, reason, urgent }) {
   }
 
   const tracked = getTrackedPosition(position_address);
+  let closeModeDecision = null;
+  let closeModeAudit = null;
 
   try {
     log("close", `Closing position: ${position_address}`);
     const wallet = getWallet();
     const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
     const poolMeta = await getPoolMetadata(poolAddress);
-    if (urgent && shouldUseLpAgentRelay()) {
+    closeModeDecision = selectAdaptiveCloseMode({
+      reason,
+      urgent,
+      relayEnabled: shouldUseLpAgentRelay(),
+      managementConfig: config.management,
+    });
+    closeModeAudit = createCloseModeAudit(position_address, reason, urgent, closeModeDecision);
+    const fastZapDeadlineAt = closeModeDecision.shouldUseFastZapBudget
+      ? Date.now() + closeModeDecision.fastZapTimeoutMs
+      : null;
+
+    log(
+      "close",
+      `Adaptive close mode: enabled=${closeModeDecision.enabled} exit=${closeModeDecision.exitType} mode=${closeModeDecision.selectedMode} reason="${reason || "agent decision"}"`,
+    );
+    if (urgent && shouldUseLpAgentRelay() && !closeModeDecision.shouldAttemptRelay) {
       log("close", "Urgent close: skipping relay zap-out and using local close-liquidity-first path");
     }
-    if (!urgent && shouldUseLpAgentRelay()) {
+    if (closeModeDecision.shouldAttemptRelay) {
       let relaySubmitted = false;
+      const relayStartedAt = Date.now();
       try {
+        closeModeAudit.zap_attempted = true;
         const pool = await getPool(poolAddress);
         const relayAllowedDebitMints = [
           pool.lbPair.tokenXMint.toString(),
@@ -1748,7 +2040,7 @@ export async function closePosition({ position_address, reason, urgent }) {
         const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
         const closeOutput = "allToken1";
 
-        const quotes = await meridianJson("/execution/zap-out/quotes", {
+        const quotes = await meridianJsonAdaptive("/execution/zap-out/quotes", {
           method: "POST",
           headers: getMeridianHeaders(),
           body: JSON.stringify({
@@ -1756,9 +2048,9 @@ export async function closePosition({ position_address, reason, urgent }) {
             positionId: position_address,
             bps: 10000,
           }),
-        });
+        }, closeModeAudit, "quote", fastZapDeadlineAt);
 
-        const order = await meridianJson("/execution/zap-out/order", {
+        const order = await meridianJsonAdaptive("/execution/zap-out/order", {
           method: "POST",
           headers: getMeridianHeaders(),
           body: JSON.stringify({
@@ -1775,7 +2067,7 @@ export async function closePosition({ position_address, reason, urgent }) {
             toBinId: closeToBinId,
             quoteRequestId: quotes.requestId,
           }),
-        });
+        }, closeModeAudit, "order", fastZapDeadlineAt);
 
         const closeUnsigned = order?.order?.transactions?.close || [];
         const swapUnsigned = order?.order?.transactions?.swap || [];
@@ -1783,6 +2075,7 @@ export async function closePosition({ position_address, reason, urgent }) {
           throw new Error(`Relay close returned no transactions for ${position_address}.`);
         }
 
+        const finishZapSign = startTimedStage(closeModeAudit, "zap_sign");
         const closeSigned = await signAndSimulateRelayTransactions(closeUnsigned, wallet, {
           connection: getConnection(),
           label: "zap-out close",
@@ -1797,8 +2090,12 @@ export async function closePosition({ position_address, reason, urgent }) {
           maxSolLoss: 0.05,
           requiredStaticAccounts: [wallet.publicKey.toString()],
         });
+        finishZapSign();
 
+        assertFastZapSubmitBudget(closeModeAudit, fastZapDeadlineAt);
         relaySubmitted = true;
+        closeModeAudit.zap_submitted = true;
+        const finishZapSubmit = startTimedStage(closeModeAudit, "zap_submit");
         const submit = await meridianJson("/execution/zap-out/submit", {
           method: "POST",
           headers: getMeridianHeaders(),
@@ -1811,6 +2108,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             },
           }),
         });
+        finishZapSubmit();
+        closeModeAudit.zap_total_ms = Date.now() - relayStartedAt;
 
         const claimTxHashes = [];
         const closeTxHashes = normalizeExecutionSignatures(submit);
@@ -1841,6 +2140,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             error: "Close submit succeeded but position still appears open after verification window",
             position: position_address,
             pool: poolAddress,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
             close_txs: closeTxHashes,
             txs: txHashes,
           };
@@ -1925,10 +2226,36 @@ export async function closePosition({ position_address, reason, urgent }) {
               minutes_held: minutesHeld,
             },
           });
+          appendDecisionContext({
+            stage: "close",
+            actor: "MANAGER",
+            pool: poolAddress,
+            poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            baseMint: livePosition?.base_mint || null,
+            position: position_address,
+            reason: reason || "agent decision",
+            metrics: {
+              pnl_sol: pnlUsd,
+              pnl_pct: pnlPct,
+              fees_sol: feesUsd,
+              minutes_held: minutesHeld,
+              minutes_out_of_range: minutesOOR,
+            },
+            close: {
+              relay: true,
+              urgent: !!urgent,
+              request_id: order.requestId,
+              txs: txHashes,
+              close_mode: closeModeContext(closeModeAudit),
+            },
+            source: "dlmm.close.relay_success",
+          });
 
           return {
             success: true,
             relay: true,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
             request_id: order.requestId,
             position: position_address,
             pool: poolAddress,
@@ -1952,10 +2279,30 @@ export async function closePosition({ position_address, reason, urgent }) {
           reason: reason || "agent decision",
           metrics: {},
         });
+        appendDecisionContext({
+          stage: "close",
+          actor: "MANAGER",
+          pool: poolAddress,
+          poolName: poolMeta.name || poolAddress.slice(0, 8),
+          baseMint: livePosition?.base_mint || null,
+          position: position_address,
+          reason: reason || "agent decision",
+          metrics: {},
+          close: {
+            relay: true,
+            urgent: !!urgent,
+            request_id: order.requestId,
+            txs: txHashes,
+            close_mode: closeModeContext(closeModeAudit),
+          },
+          source: "dlmm.close.relay_success_untracked",
+        });
 
         return {
           success: true,
           relay: true,
+          close_mode: closeModeAudit.selected_close_mode,
+          adaptive_close: closeModeContext(closeModeAudit),
           request_id: order.requestId,
           position: position_address,
           pool: poolAddress,
@@ -1967,10 +2314,12 @@ export async function closePosition({ position_address, reason, urgent }) {
         };
       } catch (relayError) {
         if (relaySubmitted) throw relayError;
+        closeModeAudit.fallback_reason = relayError.message;
         log("close_warn", `Relay zap-out failed before submit; falling back to local close + Jupiter autoswap: ${relayError.message}`);
       }
     }
 
+    const localCloseStartedAt = Date.now();
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
     const pool = await getPool(poolAddress);
@@ -1980,29 +2329,33 @@ export async function closePosition({ position_address, reason, urgent }) {
     const closeTxHashes = [];
 
     // ─── Step 1: Claim Fees (to clear account state) ───────────
+    // Skip claim on URGENT stop-loss — removeLiquidity (Step 2) uses shouldClaimAndClose:true
+    // which handles fees atomically. Skipping saves ~20–25s exposure during rug scenarios.
     const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
-    try {
-      if (urgent) {
-        log("close", `Step 1: Skipping separate fee claim for urgent close — removeLiquidity will claim and close atomically`);
-      } else if (recentlyClaimed) {
-        log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
-      } else {
-        log("close", `Step 1: Claiming fees for ${position_address}`);
-        const positionData = await pool.getPosition(positionPubKey);
-        const claimTxs = await pool.claimSwapFee({
-          owner: wallet.publicKey,
-          position: positionData,
-        });
-        if (claimTxs && claimTxs.length > 0) {
-          for (const tx of claimTxs) {
-            const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
-            claimTxHashes.push(claimHash);
+    if (urgent) {
+      log("close", `Step 1: Skipping claim — urgent stop-loss, going straight to liquidity removal`);
+    } else {
+      try {
+        if (recentlyClaimed) {
+          log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else {
+          log("close", `Step 1: Claiming fees for ${position_address}`);
+          const positionData = await pool.getPosition(positionPubKey);
+          const claimTxs = await pool.claimSwapFee({
+            owner: wallet.publicKey,
+            position: positionData,
+          });
+          if (claimTxs && claimTxs.length > 0) {
+            for (const tx of claimTxs) {
+              const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+              claimTxHashes.push(claimHash);
+            }
+            log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
           }
-          log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
         }
+      } catch (e) {
+        log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
       }
-    } catch (e) {
-      log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
     }
 
     // ─── Step 2: Remove Liquidity & Close ──────────────────────
@@ -2079,17 +2432,21 @@ export async function closePosition({ position_address, reason, urgent }) {
     }
 
     if (!closedConfirmed) {
+      closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
       return {
         success: false,
         error: "Close transactions sent but position still appears open after verification window",
         position: position_address,
         pool: poolAddress,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
         claim_txs: claimTxHashes,
         close_txs: closeTxHashes,
         txs: txHashes,
       };
     }
 
+    closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
     recordClose(position_address, reason || "agent decision");
 
     // Record performance for learning
@@ -2222,9 +2579,36 @@ export async function closePosition({ position_address, reason, urgent }) {
           minutes_held: minutesHeld,
         },
       });
+      appendDecisionContext({
+        stage: "close",
+        actor: "MANAGER",
+        pool: poolAddress,
+        poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+        baseMint: pool.lbPair.tokenXMint.toString(),
+        position: position_address,
+        reason: reason || "agent decision",
+        metrics: {
+          pnl_sol: pnlUsd,
+          pnl_pct: pnlPct,
+          fees_sol: feesUsd,
+          minutes_held: minutesHeld,
+          minutes_out_of_range: minutesOOR,
+        },
+        close: {
+          relay: false,
+          urgent: !!urgent,
+          txs: txHashes,
+          close_mode: closeModeContext(closeModeAudit),
+        },
+        source: "dlmm.close.local_success",
+      });
 
       return {
         success: true,
+        relay: false,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
+        skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
         position: position_address,
         pool: poolAddress,
         pool_name: tracked.pool_name || poolMeta.name || null,
@@ -2247,9 +2631,30 @@ export async function closePosition({ position_address, reason, urgent }) {
       reason: reason || "agent decision",
       metrics: {},
     });
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      pool: poolAddress,
+      poolName: poolMeta.name || poolAddress.slice(0, 8),
+      baseMint: pool.lbPair.tokenXMint.toString(),
+      position: position_address,
+      reason: reason || "agent decision",
+      metrics: {},
+      close: {
+        relay: false,
+        urgent: !!urgent,
+        txs: txHashes,
+        close_mode: closeModeContext(closeModeAudit),
+      },
+      source: "dlmm.close.local_success_untracked",
+    });
 
     return {
       success: true,
+      relay: false,
+      close_mode: closeModeAudit.selected_close_mode,
+      adaptive_close: closeModeContext(closeModeAudit),
+      skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
       position: position_address,
       pool: poolAddress,
       pool_name: poolMeta.name || null,
@@ -2260,6 +2665,19 @@ export async function closePosition({ position_address, reason, urgent }) {
     };
   } catch (error) {
     log("close_error", error.message);
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      position: position_address,
+      reason: error.message,
+      close: {
+        success: false,
+        urgent: !!urgent,
+        requested_reason: reason || null,
+        close_mode: closeModeAudit ? closeModeContext(closeModeAudit) : null,
+      },
+      source: "dlmm.close.error",
+    });
     return { success: false, error: error.message };
   }
 }

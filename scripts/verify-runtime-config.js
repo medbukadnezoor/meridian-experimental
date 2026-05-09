@@ -1,21 +1,19 @@
 #!/usr/bin/env node
 /**
- * Read-only runtime-config proof helper for the main bot.
+ * Read-only runtime-config proof helper.
  *
- * For --user-config, this imports config.js from a temporary directory with a
- * copied user-config.json. It does not read repo-local user-config.json unless
- * the caller explicitly points at it, and it never imports index.js.
+ * Resolves config through the shared config-builder against an explicit
+ * user-config path without touching the live runtime loader or repo state.
  */
 
-import fs from "fs";
-import os from "os";
-import path from "path";
 import { dirname, join, resolve } from "path";
-import { pathToFileURL, fileURLToPath } from "url";
+import { fileURLToPath } from "url";
+import { resolveConfigFromPath } from "../config-builder.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const RUNTIME_CONFIG_PATH = join(ROOT, "config.js");
+const CONFIG_BUILDER_PATH = join(ROOT, "config-builder.js");
 const REPO_LOCAL_USER_CONFIG_PATH = join(ROOT, "user-config.json");
 
 function printUsage() {
@@ -52,28 +50,27 @@ function parseArgs(argv) {
   return options;
 }
 
-function maskSecretPresence(value) {
-  return typeof value === "string" && value.trim() !== "" ? "set" : "not_set";
-}
-
-function sanitizeBaseUrl(value) {
-  if (!value) return null;
-  try {
-    const parsed = new URL(value);
-    return `${parsed.protocol}//${parsed.host}`;
-  } catch {
-    return "invalid";
-  }
-}
-
-function buildProof(imported, requestedUserConfigPath, effectiveUserConfigPath, userConfigExists) {
+function buildProof(imported, requestedUserConfigPath) {
   const llm = imported.config.llm;
   return {
     runtimeConfigPath: RUNTIME_CONFIG_PATH,
+    configBuilderPath: CONFIG_BUILDER_PATH,
     requestedUserConfigPath,
-    effectiveUserConfigPath,
-    userConfigExists,
+    effectiveUserConfigPath: imported.userConfigPath,
+    userConfigExists: imported.userConfigExists,
     management: {
+      stopLossCooldownHours: imported.config.management.stopLossCooldownHours,
+      oorCooldownHours: imported.config.management.oorCooldownHours,
+      repeatDeployCooldownEnabled: imported.config.management.repeatDeployCooldownEnabled,
+      repeatDeployCooldownTriggerCount: imported.config.management.repeatDeployCooldownTriggerCount,
+      repeatDeployCooldownHours: imported.config.management.repeatDeployCooldownHours,
+      repeatDeployCooldownScope: imported.config.management.repeatDeployCooldownScope,
+      repeatDeployCooldownMinFeeEarnedPct: imported.config.management.repeatDeployCooldownMinFeeEarnedPct,
+      repeatLowYieldCooldownEnabled: imported.config.management.repeatLowYieldCooldownEnabled,
+      repeatLowYieldCooldownTriggerCount: imported.config.management.repeatLowYieldCooldownTriggerCount,
+      repeatLowYieldCooldownLookbackHours: imported.config.management.repeatLowYieldCooldownLookbackHours,
+      repeatLowYieldCooldownHours: imported.config.management.repeatLowYieldCooldownHours,
+      repeatLowYieldCooldownScope: imported.config.management.repeatLowYieldCooldownScope,
       stopLossPct: imported.config.management.stopLossPct,
       stopLossConfirmDelayMs: imported.config.management.stopLossConfirmDelayMs,
       hardStopLossPct: imported.config.management.hardStopLossPct,
@@ -89,88 +86,124 @@ function buildProof(imported, requestedUserConfigPath, effectiveUserConfigPath, 
       earlyDumpMaxAgeMin: imported.config.management.earlyDumpMaxAgeMin,
       trailingTriggerPct: imported.config.management.trailingTriggerPct,
       trailingDropPct: imported.config.management.trailingDropPct,
+      profitGivebackEmergencyEnabled: imported.config.management.profitGivebackEmergencyEnabled,
+      profitGivebackTriggerPct: imported.config.management.profitGivebackTriggerPct,
+      profitGivebackFloorPct: imported.config.management.profitGivebackFloorPct,
+      supertrendLossExitEnabled: imported.config.management.supertrendLossExitEnabled,
+      supertrendLossExitPnlPct: imported.config.management.supertrendLossExitPnlPct,
+      supertrendLossExitInterval: imported.config.management.supertrendLossExitInterval,
+      supertrendLossExitConfirmChecks: imported.config.management.supertrendLossExitConfirmChecks,
       pnlSnapshotLoggingEnabled: imported.config.management.pnlSnapshotLoggingEnabled,
       pnlSnapshotDebug: imported.config.management.pnlSnapshotDebug,
       pnlSnapshotBotName: imported.config.management.pnlSnapshotBotName,
-      deployAmountSol: imported.config.management.deployAmountSol,
-      solMode: imported.config.management.solMode,
+      minAgeBeforeYieldCheck: imported.config.management.minAgeBeforeYieldCheck,
     },
-    risk: {
-      maxPositions: imported.config.risk.maxPositions,
-      maxDeployAmount: imported.config.risk.maxDeployAmount,
+    screening: {
+      excludeHighSingleOwnership: imported.config.screening.excludeHighSingleOwnership,
+      discoveryPageSize: imported.config.screening.discoveryPageSize,
+      discoveryExtraCategories: imported.config.screening.discoveryExtraCategories,
+      fallingKnifeVetoEnabled: imported.config.screening.fallingKnifeVetoEnabled,
+      fallingKnifeMaxPriceChange1hPct: imported.config.screening.fallingKnifeMaxPriceChange1hPct,
+      fallingKnifeSeverePriceChangePct: imported.config.screening.fallingKnifeSeverePriceChangePct,
+      fallingKnifeMinSellBuyRatio: imported.config.screening.fallingKnifeMinSellBuyRatio,
+      fallingKnifeRequireOversoldRsi: imported.config.screening.fallingKnifeRequireOversoldRsi,
+      suspiciousVolumeVetoEnabled: imported.config.screening.suspiciousVolumeVetoEnabled,
+      suspiciousVolumeMaxMcapToGlobalFeesRatio: imported.config.screening.suspiciousVolumeMaxMcapToGlobalFeesRatio,
+      suspiciousVolumeMinGlobalFeesSol: imported.config.screening.suspiciousVolumeMinGlobalFeesSol,
+      suspiciousVolumeMaxTokenAgeHours: imported.config.screening.suspiciousVolumeMaxTokenAgeHours,
+      suspiciousVolumeMinPriceDropPct: imported.config.screening.suspiciousVolumeMinPriceDropPct,
+    },
+    indicators: {
+      enabled: imported.config.indicators.enabled,
+      entryPreset: imported.config.indicators.entryPreset,
+      exitPreset: imported.config.indicators.exitPreset,
+      intervals: imported.config.indicators.intervals,
+      rsiLength: imported.config.indicators.rsiLength,
+      rsiOversold: imported.config.indicators.rsiOversold,
+      rsiOverbought: imported.config.indicators.rsiOverbought,
+      requireAllIntervals: imported.config.indicators.requireAllIntervals,
+    },
+    performance: {
+      materialWinPct: imported.config.performance.materialWinPct,
+      materialLossPct: imported.config.performance.materialLossPct,
+      dustNeutralAbsPct: imported.config.performance.dustNeutralAbsPct,
+      neutralCloseReasonBuckets: imported.config.performance.neutralCloseReasonBuckets,
+      darwinUseMaterialOutcomes: imported.config.performance.darwinUseMaterialOutcomes,
+      darwinExcludeNeutralOutcomes: imported.config.performance.darwinExcludeNeutralOutcomes,
     },
     llm: {
       screeningModel: llm.screeningModel,
       screeningBaseUrl: sanitizeBaseUrl(llm.screeningBaseUrl),
       screeningApiKeySet: maskSecretPresence(llm.screeningApiKey),
-      screeningThinkingEnabled: llm.screeningThinkingEnabled,
+      screeningThinking: llm.screeningThinking,
       screeningReasoningEffort: llm.screeningReasoningEffort,
-      screeningRequestTimeoutMs: llm.screeningRequestTimeoutMs,
+      screeningFallbackModel: llm.screeningFallbackModel,
+      screeningFallbackBaseUrl: sanitizeBaseUrl(llm.screeningFallbackBaseUrl),
+      screeningFallbackApiKeySet: maskSecretPresence(llm.screeningFallbackApiKey),
       managementModel: llm.managementModel,
       managementBaseUrl: sanitizeBaseUrl(llm.managementBaseUrl),
       managementApiKeySet: maskSecretPresence(llm.managementApiKey),
       generalModel: llm.generalModel,
       generalBaseUrl: sanitizeBaseUrl(llm.generalBaseUrl),
       generalApiKeySet: maskSecretPresence(llm.generalApiKey),
+      providerParamPolicy: {
+        openRouterIncludesProviderIgnore: shouldIncludeProviderParams("https://openrouter.ai/api/v1"),
+        cliProxyOmitsProviderIgnore: !shouldIncludeProviderParams("http://127.0.0.1:8317/v1"),
+        dashScopeOmitsProviderIgnore: !shouldIncludeProviderParams("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+      },
     },
   };
 }
 
-async function importConfigWithOptionalUserConfig(userConfigPath) {
-  const effectiveUserConfigPath = userConfigPath ?? REPO_LOCAL_USER_CONFIG_PATH;
-  const userConfigExists = fs.existsSync(effectiveUserConfigPath);
+function maskSecretPresence(value) {
+  return typeof value === "string" && value.trim() !== "" ? "set" : "not_set";
+}
 
-  if (!userConfigPath) {
-    const imported = await import(`${pathToFileURL(RUNTIME_CONFIG_PATH).href}?proof=${Date.now()}`);
-    return { imported, effectiveUserConfigPath, userConfigExists, cleanup: () => {} };
+function sanitizeBaseUrl(value) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return "invalid";
   }
+}
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "meridian-main-config-proof-"));
-  fs.copyFileSync(RUNTIME_CONFIG_PATH, path.join(tempDir, "config.js"));
-  if (userConfigExists) {
-    fs.copyFileSync(effectiveUserConfigPath, path.join(tempDir, "user-config.json"));
+function shouldIncludeProviderParams(baseUrl) {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "openrouter.ai" || hostname.endsWith(".openrouter.ai");
+  } catch {
+    return false;
   }
-
-  const imported = await import(`${pathToFileURL(path.join(tempDir, "config.js")).href}?proof=${Date.now()}`);
-  return {
-    imported,
-    effectiveUserConfigPath,
-    userConfigExists,
-    cleanup: () => fs.rmSync(tempDir, { recursive: true, force: true }),
-  };
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const resolution = await importConfigWithOptionalUserConfig(options.userConfigPath);
 
-  try {
-    const proof = buildProof(
-      resolution.imported,
-      options.userConfigPath,
-      resolution.effectiveUserConfigPath,
-      resolution.userConfigExists,
-    );
+  const resolution = resolveConfigFromPath(options.userConfigPath ?? REPO_LOCAL_USER_CONFIG_PATH, {
+    env: { ...process.env },
+    applyEnv: false,
+  });
+  const proof = buildProof(resolution, options.userConfigPath);
 
-    if (options.json) {
-      console.log(JSON.stringify(proof, null, 2));
-      return;
-    }
-
-    console.log("\n-- Meridian Main Runtime Config Proof --------------------------\n");
-    console.log(`config.js: ${proof.runtimeConfigPath}`);
-    console.log(`requested user-config: ${proof.requestedUserConfigPath ?? "(repo-local default)"}`);
-    console.log(`effective user-config: ${proof.effectiveUserConfigPath}${proof.userConfigExists ? "" : " (missing -> defaults only)"}`);
-    console.log("");
-    console.log(JSON.stringify({
-      management: proof.management,
-      risk: proof.risk,
-      llm: proof.llm,
-    }, null, 2));
-    console.log("");
-  } finally {
-    resolution.cleanup();
+  if (options.json) {
+    console.log(JSON.stringify(proof, null, 2));
+    return;
   }
+
+  console.log("\n-- Meridian Runtime Config Proof -------------------------------\n");
+  console.log(`config.js: ${proof.runtimeConfigPath}`);
+  console.log(`config-builder.js: ${proof.configBuilderPath}`);
+  console.log(`requested user-config: ${proof.requestedUserConfigPath ?? "(repo-local default)"}`);
+  console.log(`effective user-config: ${proof.effectiveUserConfigPath}${proof.userConfigExists ? "" : " (missing -> defaults only)"}`);
+  console.log("");
+  console.log(JSON.stringify({
+    management: proof.management,
+    performance: proof.performance,
+    llm: proof.llm,
+  }, null, 2));
+  console.log("");
 }
 
 await main();

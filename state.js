@@ -123,6 +123,22 @@ function appendPnlHistory(pos, currentPnlPct, velocityWindowMs, rollingWindowMs,
   return { changed: true, velocity, rollingDrawdown, initialized };
 }
 
+function clearSupertrendLossExitFields(pos) {
+  if (!pos) return false;
+  let changed = false;
+  for (const key of [
+    "supertrend_loss_exit_checks",
+    "supertrend_loss_exit_last_at",
+    "supertrend_loss_exit_last_direction",
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(pos, key)) {
+      delete pos[key];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function isGhostLikeLivePosition(position) {
   const value = Math.abs(toFiniteNumber(position?.total_value_usd, 0));
   const fees = Math.abs(toFiniteNumber(position?.unclaimed_fees_usd, 0));
@@ -133,11 +149,12 @@ function isGhostLikeLivePosition(position) {
 }
 
 function getGhostObservationAgeMs(tracked, livePosition) {
-  if (!tracked?.deployed_at) return Number.POSITIVE_INFINITY;
   const candidates = [];
-  const deployedAt = new Date(tracked.deployed_at).getTime();
-  if (Number.isFinite(deployedAt) && deployedAt > 0) {
-    candidates.push(Date.now() - deployedAt);
+  if (tracked?.deployed_at) {
+    const deployedAt = new Date(tracked.deployed_at).getTime();
+    if (Number.isFinite(deployedAt) && deployedAt > 0) {
+      candidates.push(Date.now() - deployedAt);
+    }
   }
   const liveAgeMinutes = toFiniteNumber(livePosition?.age_minutes, Number.NaN);
   if (Number.isFinite(liveAgeMinutes) && liveAgeMinutes >= 0) {
@@ -262,6 +279,42 @@ export function clearLowYieldStrike(position_address) {
   save(state);
 }
 
+export function recordSupertrendLossExitCheck(position_address, { bearish, confirmChecks = 2 } = {}) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) {
+    return { count: 0, confirmChecks: Math.max(1, Number(confirmChecks) || 1), confirmed: false };
+  }
+
+  const required = Math.max(1, Math.trunc(Number(confirmChecks) || 1));
+  if (!bearish) {
+    const changed = clearSupertrendLossExitFields(pos);
+    if (changed) save(state);
+    return { count: 0, confirmChecks: required, confirmed: false };
+  }
+
+  const previous = Math.max(0, Math.trunc(Number(pos.supertrend_loss_exit_checks) || 0));
+  const count = Math.min(previous + 1, required);
+  pos.supertrend_loss_exit_checks = count;
+  pos.supertrend_loss_exit_last_at = new Date().toISOString();
+  pos.supertrend_loss_exit_last_direction = "bearish";
+  save(state);
+  return {
+    count,
+    confirmChecks: required,
+    confirmed: count >= required,
+  };
+}
+
+export function clearSupertrendLossExitCheck(position_address) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  const changed = clearSupertrendLossExitFields(pos);
+  if (changed) save(state);
+  return changed;
+}
+
 /**
  * How many minutes has a position been out of range?
  * Returns 0 if currently in range.
@@ -340,6 +393,7 @@ export function recordClose(position_address, reason) {
   if (!pos) return;
   pos.closed = true;
   pos.closed_at = new Date().toISOString();
+  clearSupertrendLossExitFields(pos);
   pos.notes.push(`Closed at ${pos.closed_at}: ${reason}`);
   pushEvent(state, { action: "close", position: position_address, pool_name: pos.pool_name || pos.pool, reason });
   save(state);
@@ -355,6 +409,7 @@ export function recordRebalance(old_position, new_position) {
   if (old) {
     old.closed = true;
     old.closed_at = new Date().toISOString();
+    clearSupertrendLossExitFields(old);
     old.notes.push(`Rebalanced into ${new_position} at ${old.closed_at}`);
   }
   const newPos = state.positions[new_position];
@@ -478,6 +533,29 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
   save(state);
   log("state", `Position ${position_address} rejected trailing drop after 15s recheck (pending current: ${pendingCurrent.toFixed(2)}%, current: ${currentPnlPct ?? "?"}%)`);
   return { confirmed: false, rejected: true };
+}
+
+function buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlPct, mgmtConfig = {}) {
+  if (!mgmtConfig.profitGivebackEmergencyEnabled) return null;
+  if (currentPnlPct == null) return null;
+
+  const triggerPct = Number(mgmtConfig.profitGivebackTriggerPct);
+  const floorPct = Number(mgmtConfig.profitGivebackFloorPct);
+  if (!Number.isFinite(triggerPct) || !Number.isFinite(floorPct)) return null;
+
+  const peakPnlPct = Number(pos?.peak_pnl_pct ?? 0);
+  if (!Number.isFinite(peakPnlPct)) return null;
+  if (peakPnlPct < triggerPct || currentPnlPct > floorPct) return null;
+
+  const dropFromPeak = peakPnlPct - currentPnlPct;
+  return {
+    action: "PROFIT_GIVEBACK",
+    reason: `Profit giveback emergency: peak ${peakPnlPct.toFixed(2)}% -> current ${currentPnlPct.toFixed(2)}% (floor ${floorPct}%, trigger ${triggerPct}%)`,
+    urgent: true,
+    peak_pnl_pct: peakPnlPct,
+    current_pnl_pct: currentPnlPct,
+    drop_from_peak_pct: dropFromPeak,
+  };
 }
 
 /**
@@ -614,6 +692,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     if (rollingDrawdownExit) {
       return rollingDrawdownExit;
     }
+
+    const profitGivebackEmergency = buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlPct, mgmtConfig);
+    if (profitGivebackEmergency) {
+      return profitGivebackEmergency;
+    }
   }
 
   // ── Early dump detection (young position losing fast) ─────────
@@ -740,6 +823,7 @@ export function syncOpenPositions(active_addresses) {
 
     pos.closed = true;
     pos.closed_at = new Date().toISOString();
+    clearSupertrendLossExitFields(pos);
     pos.notes.push(`Auto-closed during state sync (not found on-chain)`);
     changed = true;
     log("state", `Position ${posId} auto-closed (missing from on-chain data)`);
@@ -811,6 +895,7 @@ export function reconcileGhostPositions(livePositions = []) {
       if (tracked && !tracked.closed) {
         tracked.closed = true;
         tracked.closed_at = nowIso;
+        clearSupertrendLossExitFields(tracked);
         tracked.notes = Array.isArray(tracked.notes) ? tracked.notes : [];
         tracked.notes.push(`Auto-closed during ghost reconciliation: ${candidate.reason}`);
         pushEvent(state, {

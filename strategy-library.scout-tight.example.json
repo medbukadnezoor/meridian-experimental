@@ -1,0 +1,34 @@
+{
+  "active": "scout_tight_bidask_retrace",
+  "strategies": {
+    "scout_tight_bidask_retrace": {
+      "id": "scout_tight_bidask_retrace",
+      "name": "Scout Tight Bid-Ask Retrace",
+      "author": "meridian-phase2a",
+      "lp_strategy": "bid_ask",
+      "token_criteria": {
+        "notes": "Scout-only tight-bin evidence strategy for high-fee, high-volume retrace or runner pools. Keep filters quality-biased; do not loosen screening to compensate for tighter bins."
+      },
+      "entry": {
+        "condition": "Deploy SOL-only into a tight bid_ask range below active price after candidate passes current scout screening.",
+        "single_side": "sol",
+        "notes": "Use amount_y only, amount_x=0. The upper bin is pinned to active price with bins_above=0."
+      },
+      "range": {
+        "type": "tight",
+        "bins_below": 35,
+        "bins_below_min": 29,
+        "bins_below_max": 35,
+        "bins_above": 0,
+        "notes": "Tight single-sided SOL range for the OOR-reposition scout trial. No volatility expansion unless a future strategy JSON explicitly defines it."
+      },
+      "exit": {
+        "notes": "OOR-above may close and reposition only after fresh same-pool/base-mint screening passes. OOR-below is adverse/rug-risk and must not reposition."
+      },
+      "best_for": "Phase 2A scout evidence: tight bid_ask fee-density and OOR-above reposition behavior on higher-flow pools.",
+      "raw": "Owner-approved scout tight-bin strategy-library profile; strategy-specific numbers live in JSON/config, not generic deploy code.",
+      "added_at": "2026-05-06T09:26:00.000Z",
+      "updated_at": "2026-05-06T09:26:00.000Z"
+    }
+  }
+}

@@ -15,9 +15,9 @@ import { fileURLToPath } from "url";
 import {
   classifyCloseReason,
   classifyMaterialOutcome,
-  getMaterialOutcomeOptions,
   summarizeMaterialPerformance,
 } from "../performance-metrics.js";
+import { buildConfig } from "../config-builder.js";
 import { recalculateWeights } from "../signal-weights.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -137,9 +137,16 @@ function runDarwinProof() {
 
 function runUpdateConfigProof() {
   const executor = loadSource("tools/executor.js");
+  const definitions = loadSource("tools/definitions.js");
   const executorKeys = MATERIAL_UPDATE_CONFIG_FIELDS.filter((key) => materialConfigMapEntryPresent(executor, key));
+  const definitionKeys = MATERIAL_UPDATE_CONFIG_FIELDS.filter((key) => materialDefinitionsFieldPresent(definitions, key));
 
   assert.deepStrictEqual(executorKeys, [...MATERIAL_UPDATE_CONFIG_FIELDS], "executor material update_config keys");
+  assert.deepStrictEqual(definitionKeys, [...MATERIAL_UPDATE_CONFIG_FIELDS], "definitions material update_config keys");
+  assert.ok(definitions.includes("live-tunable through operator-only"), "definitions document live-tunable operator-only scope");
+  assert.ok(definitions.includes("Raw WR/Material WR reporting"), "definitions document report labels");
+  assert.ok(definitions.includes("Darwin material learning only"), "definitions document Darwin-only learning scope");
+  assert.ok(definitions.includes("not stop-loss, TP, entry, sizing, routing, or GMGN policy"), "definitions document no trading-policy change");
 
   return {
     liveTunable: true,
@@ -152,16 +159,19 @@ function runUpdateConfigProof() {
 
 function runOwnerLabelProof() {
   const index = loadSource("index.js");
+  const briefing = loadSource("briefing.js");
   const poolMemory = loadSource("pool-memory.js");
   const analyzer = loadSource("scripts/analyze-material-wins.js");
   const proof = {
     thresholdsCommand: index.includes("Raw WR") && index.includes("Material WR") && !index.includes("  Win rate:"),
+    briefing: briefing.includes("Raw WR") && briefing.includes("Material WR"),
     poolMemory: poolMemory.includes("raw WR") && poolMemory.includes("material WR"),
     analyzerText: analyzer.includes("Raw WR") && analyzer.includes("Material WR"),
     ambiguousBareWinRateHeadlineAbsent: !index.includes("  Win rate:"),
   };
 
   assert.ok(proof.thresholdsCommand, "/thresholds labels Raw WR and Material WR explicitly");
+  assert.ok(proof.briefing, "briefing labels Raw WR and Material WR explicitly");
   assert.ok(proof.poolMemory, "pool memory labels raw/material WR explicitly");
   assert.ok(proof.analyzerText, "material analyzer labels Raw WR and Material WR explicitly");
   assert.ok(proof.ambiguousBareWinRateHeadlineAbsent, "ambiguous bare Win rate headline absent");
@@ -286,25 +296,25 @@ function main() {
   assert.strictEqual(summary.material_win_rate_pct, 22.22);
   assert.strictEqual(summary.material_decision_win_rate_pct, 33.33);
 
-  const defaultConfig = getMaterialOutcomeOptions({});
-  assert.strictEqual(defaultConfig.materialWinPct, 1.0);
-  assert.strictEqual(defaultConfig.materialLossPct, -1.0);
-  assert.strictEqual(defaultConfig.dustNeutralAbsPct, 1.0);
-  assert.strictEqual(defaultConfig.darwinUseMaterialOutcomes, true);
-  assert.strictEqual(defaultConfig.darwinExcludeNeutralOutcomes, true);
+  const defaultConfig = buildConfig({});
+  assert.strictEqual(defaultConfig.performance.materialWinPct, 1.0);
+  assert.strictEqual(defaultConfig.performance.materialLossPct, -1.0);
+  assert.strictEqual(defaultConfig.performance.dustNeutralAbsPct, 1.0);
+  assert.strictEqual(defaultConfig.performance.darwinUseMaterialOutcomes, true);
+  assert.strictEqual(defaultConfig.performance.darwinExcludeNeutralOutcomes, true);
 
-  const flatConfig = getMaterialOutcomeOptions({
+  const flatConfig = buildConfig({
     materialWinPct: 2,
     materialLossPct: -3,
     dustNeutralAbsPct: 0.5,
     darwinUseMaterialOutcomes: false,
     darwinExcludeNeutralOutcomes: false,
   });
-  assert.strictEqual(flatConfig.materialWinPct, 2);
-  assert.strictEqual(flatConfig.materialLossPct, -3);
-  assert.strictEqual(flatConfig.dustNeutralAbsPct, 0.5);
-  assert.strictEqual(flatConfig.darwinUseMaterialOutcomes, false);
-  assert.strictEqual(flatConfig.darwinExcludeNeutralOutcomes, false);
+  assert.strictEqual(flatConfig.performance.materialWinPct, 2);
+  assert.strictEqual(flatConfig.performance.materialLossPct, -3);
+  assert.strictEqual(flatConfig.performance.dustNeutralAbsPct, 0.5);
+  assert.strictEqual(flatConfig.performance.darwinUseMaterialOutcomes, false);
+  assert.strictEqual(flatConfig.performance.darwinExcludeNeutralOutcomes, false);
 
   const darwinProof = runDarwinProof();
   const updateConfigProof = runUpdateConfigProof();
@@ -314,7 +324,7 @@ function main() {
     success: true,
     cases,
     summary,
-    runtimeConfig: defaultConfig,
+    runtimeConfig: defaultConfig.performance,
     darwinProof,
     updateConfigProof,
     ownerLabelProof,

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Synthetic behavioral proof for confirmed and hard stop-loss handling.
+ * Synthetic behavioral proof for the nanocap stop-loss trial.
  *
- * Runs in a temporary directory so state.js writes only temporary state.json.
+ * Runs in a temporary directory so state.js writes only temporary state.json/logs.
  * Does not import index.js, run the bot, or call trading APIs.
  */
 
@@ -25,20 +25,20 @@ function assert(condition, message) {
 
 function baseConfig(overrides = {}) {
   return {
-    earlyDumpPct: -4,
+    earlyDumpPct: -8,
     earlyDumpMaxAgeMin: 20,
-    stopLossPct: -4,
+    stopLossPct: -8,
     stopLossConfirmDelayMs: 15000,
-    stopLossFastClosePct: -6,
-    hardStopLossPct: -8,
-    stopLossVelocityWindowMs: 90000,
-    stopLossVelocityClosePct: -2.5,
+    hardStopLossPct: -15,
     trailingTakeProfit: true,
-    trailingTriggerPct: 3,
-    trailingDropPct: 1.5,
-    outOfRangeWaitMinutes: 180,
-    outOfRangeHardCloseMinutes: 240,
-    minFeePerTvl24h: 7,
+    trailingTriggerPct: 6,
+    trailingDropPct: 3,
+    profitGivebackEmergencyEnabled: true,
+    profitGivebackTriggerPct: 6,
+    profitGivebackFloorPct: 2,
+    outOfRangeWaitMinutes: 60,
+    outOfRangeHardCloseMinutes: 120,
+    minFeePerTvl24h: 4,
     minAgeBeforeYieldCheck: 60,
     ...overrides,
   };
@@ -82,58 +82,52 @@ async function main() {
     }
 
     track("soft");
-    const softCandidate = updatePnlAndCheckExits("soft", makePosition("soft", { pnl_pct: -4.25 }), baseConfig());
-    assert(softCandidate?.action === "STOP_LOSS_CANDIDATE", "soft -4.25% should queue a stop-loss candidate");
+    const softCandidate = updatePnlAndCheckExits("soft", makePosition("soft", { pnl_pct: -8.5 }), baseConfig());
+    assert(softCandidate?.action === "STOP_LOSS_CANDIDATE", "soft -8.5% should queue a stop-loss candidate");
     assert(softCandidate?.needs_confirmation === true, "soft stop-loss candidate should require confirmation");
     assert(Number(softCandidate?.confirm_delay_ms) === 15000, "soft stop-loss should honor 15000ms confirmation delay");
     assert(String(softCandidate?.reason || "").startsWith("Stop loss candidate:"), "soft stop-loss reason should be candidate-labeled");
 
-    track("fast");
-    const fastStop = updatePnlAndCheckExits("fast", makePosition("fast", { pnl_pct: -6.1 }), baseConfig());
-    assert(fastStop?.action === "STOP_LOSS", "fast -6.1% should close immediately");
-    assert(fastStop?.urgent === true, "fast stop-loss should be urgent");
-    assert(String(fastStop?.reason || "").startsWith("Fast stop loss:"), "fast stop-loss reason should be clearly labeled");
-
     track("hard");
-    const hardStop = updatePnlAndCheckExits("hard", makePosition("hard", { pnl_pct: -8.1 }), baseConfig());
-    assert(hardStop?.action === "STOP_LOSS", "hard -8.1% should close immediately");
+    const hardStop = updatePnlAndCheckExits("hard", makePosition("hard", { pnl_pct: -15.1 }), baseConfig());
+    assert(hardStop?.action === "STOP_LOSS", "hard -15.1% should close immediately");
     assert(hardStop?.urgent === true, "hard stop-loss should be urgent");
     assert(String(hardStop?.reason || "").startsWith("Hard stop loss:"), "hard stop-loss reason should be clearly labeled");
 
     track("early");
-    const earlyDump = updatePnlAndCheckExits("early", makePosition("early", { pnl_pct: -4.2, age_minutes: 5 }), baseConfig());
-    assert(earlyDump?.action === "STOP_LOSS", "young -4.2% should trigger early-dump stop-loss family exit");
+    const earlyDump = updatePnlAndCheckExits("early", makePosition("early", { pnl_pct: -8.2, age_minutes: 5 }), baseConfig());
+    assert(earlyDump?.action === "STOP_LOSS", "young -8.2% should trigger early-dump stop-loss family exit");
     assert(String(earlyDump?.reason || "").startsWith("Early dump:"), "early dump should keep a separate reason label");
     assert(!earlyDump?.needs_confirmation, "early dump should not be routed through ordinary stop-loss confirmation");
 
     track("legacy");
     const legacy = updatePnlAndCheckExits(
       "legacy",
-      makePosition("legacy", { pnl_pct: -4.25 }),
-      baseConfig({ stopLossConfirmDelayMs: 0, hardStopLossPct: null, stopLossFastClosePct: null }),
+      makePosition("legacy", { pnl_pct: -8.5 }),
+      baseConfig({ stopLossConfirmDelayMs: 0, hardStopLossPct: null }),
     );
     assert(legacy?.action === "STOP_LOSS", "legacy no-delay stop-loss should close immediately");
     assert(String(legacy?.reason || "").startsWith("Stop loss:"), "legacy stop-loss reason should remain unchanged");
     assert(!legacy?.needs_confirmation, "legacy no-delay stop-loss should not require confirmation");
 
     const confirmed = buildStopLossConfirmationResult({
-      currentPnlPct: -4.25,
-      stopLossPct: -4,
+      currentPnlPct: -8.25,
+      stopLossPct: -8,
       delayMs: 15000,
-      candidatePnlPct: -4.5,
+      candidatePnlPct: -8.5,
       pair: "TEST-SOL",
     });
-    assert(confirmed.confirmed === true, "recheck still below -4% should confirm");
+    assert(confirmed.confirmed === true, "recheck still below -8% should confirm");
     assert(String(confirmed.closeReason || "").startsWith("Stop loss confirmed:"), "confirmed close reason should be owner-readable");
 
     const rejected = buildStopLossConfirmationResult({
-      currentPnlPct: -3.75,
-      stopLossPct: -4,
+      currentPnlPct: -7.75,
+      stopLossPct: -8,
       delayMs: 15000,
-      candidatePnlPct: -4.5,
+      candidatePnlPct: -8.5,
       pair: "TEST-SOL",
     });
-    assert(rejected.rejected === true, "recheck above -4% should reject");
+    assert(rejected.rejected === true, "recheck above -8% should reject");
     assert(String(rejected.rejectionReason || "").startsWith("Stop loss candidate rejected:"), "rejected candidate should be owner-readable");
 
     tempStateFileCreated = fs.existsSync(path.join(tempDir, "state.json"));
@@ -145,11 +139,6 @@ async function main() {
         needsConfirmation: softCandidate.needs_confirmation,
         confirmDelayMs: softCandidate.confirm_delay_ms,
         reason: softCandidate.reason,
-      },
-      fastStop: {
-        action: fastStop.action,
-        urgent: fastStop.urgent,
-        reason: fastStop.reason,
       },
       hardStop: {
         action: hardStop.action,

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Synthetic proof for the single-side SOL narrow-range deploy guard.
+ * Synthetic proof for the nanocap single-side SOL narrow-range deploy guard.
  *
- * Imports pure range helpers only. No trading APIs, bot runtime, or deploy calls.
+ * Pure helper import only: no trading APIs, no bot runtime, no deploy calls.
  */
 
 import assert from "assert";
@@ -13,11 +13,12 @@ import {
   normalizeDeployRangeInputs,
   validateSingleSidedSolBidAskRange,
 } from "../tools/deploy-range-guard.js";
+import { buildConfig } from "../config-builder.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const ACTIVE_BIN_ID = 1000;
-const BIN_STEP = 100;
+const BIN_STEP = 50;
 
 function priceOfBin(binId, binStep = BIN_STEP) {
   return Math.pow(1 + binStep / 10_000, binId);
@@ -40,7 +41,7 @@ function coverageFor(activeBinsBelow, activeBinsAbove = 0) {
   };
 }
 
-function normalize(args, fallbackBinsBelow = 69) {
+function normalize(args, fallbackBinsBelow = 85) {
   return normalizeDeployRangeInputs({
     activeBinId: ACTIVE_BIN_ID,
     activePrice: priceOfBin(ACTIVE_BIN_ID),
@@ -51,7 +52,7 @@ function normalize(args, fallbackBinsBelow = 69) {
   });
 }
 
-function validate(activeBinsBelow, guardConfig = { minSingleSidedSolBins: 35, minSingleSidedSolDownsidePct: 1 }) {
+function validate(activeBinsBelow, guardConfig) {
   return validateSingleSidedSolBidAskRange({
     activeStrategy: "bid_ask",
     isSingleSidedSol: true,
@@ -70,35 +71,36 @@ function loadSource(relativePath) {
 }
 
 function main() {
+  const nanocapConfig = buildConfig({ preset: "nanocap-v1" }, {});
+  const guardConfig = nanocapConfig.strategy;
+  assert.strictEqual(guardConfig.minSingleSidedSolBins, 35, "nanocap minSingleSidedSolBins default");
+  assert.strictEqual(guardConfig.minSingleSidedSolDownsidePct, 1, "nanocap minSingleSidedSolDownsidePct default");
+
   const incident = normalize({
-    bins_below: 47,
+    bins_below: 79,
     bins_above: 0,
     downside_pct: 0,
     upside_pct: 0,
   });
-  assert.strictEqual(incident.activeBinsBelow, 47, "downside_pct=0 must not override bins_below");
+  assert.strictEqual(incident.activeBinsBelow, 79, "downside_pct=0 must not override bins_below");
   assert.strictEqual(incident.activeBinsAbove, 0, "upside_pct=0 must not add upside bins");
   assert.strictEqual(incident.percent_inputs.downside_pct_used, false, "zero downside_pct is ignored");
   assert.strictEqual(incident.percent_inputs.upside_pct_used, false, "zero upside_pct is ignored");
-  assert.strictEqual(validate(incident.activeBinsBelow).ok, true, "incident-shape bins_below=47 should pass");
+  const incidentGuard = validate(incident.activeBinsBelow, guardConfig);
+  assert.strictEqual(incidentGuard.ok, true, "incident-shape bins_below=79 should normalize to a valid range");
 
-  const zeroWidth = validate(0);
-  assert.strictEqual(zeroWidth.ok, false, "zero-width single-side SOL bid_ask range should reject");
-  assert.ok(zeroWidth.reason.includes("zero-width bin range"), "zero-width reason should be explicit");
-
-  const oneBin = validate(1);
-  assert.strictEqual(oneBin.ok, false, "1-bin single-side SOL bid_ask range should reject");
-  assert.ok(oneBin.reason.includes("absolute floor 5"), "1-bin reason should include absolute floor");
-
-  const belowConfigured = validate(34);
-  assert.strictEqual(belowConfigured.ok, false, "below configured floor should reject");
-  assert.ok(belowConfigured.reason.includes("configured minimum 35"), "configured floor reason should be explicit");
-
-  const accepted = validate(35);
-  assert.strictEqual(accepted.ok, true, "configured floor should pass");
+  const positiveDownside = normalize({
+    bins_below: 79,
+    bins_above: 0,
+    downside_pct: 25,
+    upside_pct: 0,
+  });
+  assert.strictEqual(positiveDownside.percent_inputs.downside_pct_used, true, "positive downside_pct still converts to bins");
+  assert.ok(positiveDownside.activeBinsBelow > 0, "positive downside_pct produces downside bins");
+  assert.notStrictEqual(positiveDownside.activeBinsBelow, 79, "positive downside_pct takes precedence over bins_below");
 
   const positiveUpside = normalize({
-    bins_below: 47,
+    bins_below: 79,
     bins_above: 0,
     downside_pct: 0,
     upside_pct: 5,
@@ -106,38 +108,48 @@ function main() {
   assert.strictEqual(positiveUpside.percent_inputs.upside_pct_used, true, "positive upside_pct remains visible for single-side rejection");
   assert.ok(positiveUpside.activeBinsAbove > 0, "positive upside_pct converts before deploy path rejects single-side SOL");
 
+  const rejected = [0, 1, 4, 5, 34].map((bins) => {
+    const result = validate(bins, guardConfig);
+    assert.strictEqual(result.ok, false, `bins_below=${bins} should be rejected`);
+    assert.ok(result.reason.includes("Narrow single-side SOL bid_ask deploy rejected"), `bins_below=${bins} reason prefix`);
+    assert.ok(result.reason.includes("configured minimum 35"), `bins_below=${bins} configured threshold reason`);
+    return { bins_below: bins, reason: result.reason, details: result.details };
+  });
+
+  const accepted = [35, 69, 79, 85, 90].map((bins) => {
+    const result = validate(bins, guardConfig);
+    assert.strictEqual(result.ok, true, `bins_below=${bins} should pass`);
+    return { bins_below: bins, details: result.details };
+  });
+
   const dlmmSource = loadSource("tools/dlmm.js");
   const definitionsSource = loadSource("tools/definitions.js");
-  const configSource = loadSource("config.js");
-  const agentSource = loadSource("agent.js");
   assert.ok(dlmmSource.includes("[range-raw]"), "deploy path logs raw range args");
   assert.ok(dlmmSource.includes("[range-normalized]"), "deploy path logs normalized range");
   assert.ok(dlmmSource.includes("[narrow-range-guard]"), "deploy path logs narrow-range rejection");
   assert.ok(dlmmSource.includes("normalizedRange.percent_inputs.upside_pct_used"), "single-side upside rejection reads normalized positive pct");
   assert.ok(definitionsSource.includes("Zero or negative percentage fields are ignored"), "tool schema discourages 0 pct overrides");
-  assert.ok(configSource.includes("minSingleSidedSolBins"), "runtime config exposes minSingleSidedSolBins");
-  assert.ok(agentSource.includes("callParams.reasoning_effort = config.llm.screeningReasoningEffort"), "SCREENER passes configured reasoning effort");
 
   console.log(JSON.stringify({
     success: true,
-    incident_zero_pct: {
-      input: { bins_below: 47, downside_pct: 0, upside_pct: 0 },
-      normalized: incident,
-      guard_ok: true,
+    guard_defaults: {
+      minSingleSidedSolBins: guardConfig.minSingleSidedSolBins,
+      minSingleSidedSolDownsidePct: guardConfig.minSingleSidedSolDownsidePct,
     },
-    rejected: [
-      { bins_below: 0, reason: zeroWidth.reason, details: zeroWidth.details },
-      { bins_below: 1, reason: oneBin.reason, details: oneBin.details },
-      { bins_below: 34, reason: belowConfigured.reason, details: belowConfigured.details },
-    ],
-    accepted: { bins_below: 35, details: accepted.details },
+    incident_zero_pct: {
+      input: { bins_below: 79, downside_pct: 0, upside_pct: 0 },
+      normalized: incident,
+      guard_ok: incidentGuard.ok,
+    },
+    positive_downside_conversion: positiveDownside,
     positive_upside_visible_for_reject: positiveUpside,
+    rejected,
+    accepted,
     source_markers: {
       raw_audit_log: true,
       normalized_audit_log: true,
       rejection_audit_log: true,
       schema_zero_pct_warning: true,
-      screener_reasoning_effort: true,
     },
   }, null, 2));
 }

@@ -11,6 +11,12 @@ import { log } from "./logger.js";
 
 const STRATEGY_FILE = "./strategy-library.json";
 
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function load() {
   if (!fs.existsSync(STRATEGY_FILE)) return { active: null, strategies: {} };
   try {
@@ -135,4 +141,46 @@ export function getActiveStrategy() {
   const db = load();
   if (!db.active || !db.strategies[db.active]) return null;
   return db.strategies[db.active];
+}
+
+export function resolveStrategyRangePolicy(strategy = null, runtimeConfig = {}) {
+  const range = strategy?.range ?? {};
+  const binsBelowDefault = finiteNumber(range.bins_below) ?? finiteNumber(runtimeConfig?.strategy?.binsBelow);
+  const binsBelowMin = finiteNumber(range.bins_below_min) ?? null;
+  const binsBelowMax = finiteNumber(range.bins_below_max) ?? null;
+  const binsAbove = finiteNumber(range.bins_above);
+  const lpStrategy = strategy?.lp_strategy || runtimeConfig?.strategy?.strategy || "bid_ask";
+  const singleSide = String(strategy?.entry?.single_side || range.single_side || "").toLowerCase();
+  const singleSidedSol = singleSide === "sol" || range.single_sided_sol === true;
+
+  return {
+    strategyId: strategy?.id ?? null,
+    strategyName: strategy?.name ?? null,
+    lpStrategy,
+    singleSidedSol,
+    binsBelowDefault,
+    binsBelowMin,
+    binsBelowMax,
+    binsAbove: binsAbove ?? null,
+    hasExplicitRangePolicy: binsBelowDefault != null || binsBelowMin != null || binsBelowMax != null || binsAbove != null,
+  };
+}
+
+export function resolveActiveStrategyRangePolicy(runtimeConfig = {}) {
+  return resolveStrategyRangePolicy(getActiveStrategy(), runtimeConfig);
+}
+
+export function describeRangePolicyForPrompt(policy = {}) {
+  if (!policy?.hasExplicitRangePolicy) {
+    return "Use the active strategy and runtime config range policy. If no range is configured, use the deploy tool defaults and safety guards.";
+  }
+  const parts = [];
+  if (policy.lpStrategy) parts.push(`strategy=${policy.lpStrategy}`);
+  if (policy.singleSidedSol) parts.push("single-sided SOL");
+  if (policy.binsBelowDefault != null) parts.push(`default bins_below=${policy.binsBelowDefault}`);
+  if (policy.binsBelowMin != null || policy.binsBelowMax != null) {
+    parts.push(`bins_below bounds=[${policy.binsBelowMin ?? "none"}, ${policy.binsBelowMax ?? "none"}]`);
+  }
+  if (policy.binsAbove != null) parts.push(`bins_above=${policy.binsAbove}`);
+  return parts.join("; ");
 }

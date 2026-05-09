@@ -114,32 +114,33 @@ function setBaseMintCooldown(db, baseMint, hours, reason) {
   return cooldownUntil;
 }
 
-function normalizeCooldownScope(value, fallback = "token") {
-  const scope = String(value || fallback).toLowerCase();
-  return ["pool", "token", "both"].includes(scope) ? scope : fallback;
+function countRecentLowYieldPoolCloses(entry, lookbackHours) {
+  if (!entry?.deploys?.length) return 0;
+  const lookbackMs = Math.max(0, lookbackHours) * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
+  return entry.deploys.filter((deploy) => {
+    if (!isLowYieldCloseReason(deploy?.close_reason)) return false;
+    const closedAt = Date.parse(deploy?.closed_at || "");
+    return Number.isFinite(closedAt) && closedAt >= cutoff;
+  }).length;
 }
 
-function setScopedCooldown(db, entry, hours, reason, scope) {
-  if (scope === "pool" || scope === "both" || !entry.base_mint) {
-    const poolCooldownUntil = setPoolCooldown(entry, hours, reason);
-    log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
-  }
-  if ((scope === "token" || scope === "both") && entry.base_mint) {
-    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, hours, reason);
-    if (mintCooldownUntil) {
-      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+function countRecentLowYieldBaseMintCloses(db, baseMint, lookbackHours) {
+  if (!baseMint) return 0;
+  const lookbackMs = Math.max(0, lookbackHours) * 60 * 60 * 1000;
+  const cutoff = Date.now() - lookbackMs;
+  let count = 0;
+  for (const entry of Object.values(db)) {
+    if (entry?.base_mint !== baseMint || !Array.isArray(entry?.deploys)) continue;
+    for (const deploy of entry.deploys) {
+      if (!isLowYieldCloseReason(deploy?.close_reason)) continue;
+      const closedAt = Date.parse(deploy?.closed_at || "");
+      if (Number.isFinite(closedAt) && closedAt >= cutoff) {
+        count += 1;
+      }
     }
   }
-}
-
-function countRecentLowYieldCloses(entry, lookbackHours) {
-  const lookbackMs = Math.max(0, Number(lookbackHours)) * 60 * 60 * 1000;
-  const cutoffMs = Date.now() - lookbackMs;
-  return entry.deploys.filter((d) => {
-    if (!isLowYieldCloseReason(d.close_reason)) return false;
-    const closedAtMs = Date.parse(d.closed_at || "");
-    return Number.isFinite(closedAtMs) && (lookbackMs === 0 || closedAtMs >= cutoffMs);
-  }).length;
+  return count;
 }
 
 // ─── Write ─────────────────────────────────────────────────────
@@ -263,32 +264,19 @@ export function recordPoolDeploy(poolAddress, deployData) {
     entry.base_mint = deployData.base_mint;
   }
 
-  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon.
+  // Set cooldown for low yield closes — pool wasn't profitable enough, don't redeploy soon
   // Match any reason containing "low yield" (reasons look like "Trailing TP: Low yield: fee/TVL 3.00% < min 7%")
   if (isLowYieldCloseReason(deploy.close_reason)) {
-    if (config.management?.repeatLowYieldCooldownEnabled) {
-      const triggerCount = Math.max(1, Number(config.management.repeatLowYieldCooldownTriggerCount ?? 3));
-      const lookbackHours = Math.max(0, Number(config.management.repeatLowYieldCooldownLookbackHours ?? 48));
-      const cooldownHours = Math.max(0, Number(config.management.repeatLowYieldCooldownHours ?? 12));
-      const scope = normalizeCooldownScope(config.management.repeatLowYieldCooldownScope, "token");
-      const recentLowYieldCloses = countRecentLowYieldCloses(entry, lookbackHours);
-
-      if (cooldownHours > 0 && recentLowYieldCloses >= triggerCount) {
-        const reason = `repeat low-yield closes (${triggerCount}x/${lookbackHours}h)`;
-        setScopedCooldown(db, entry, cooldownHours, reason, scope);
-      }
-    } else {
-      const cooldownHours = 4;
-      const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
-      log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
-    }
+    const cooldownHours = 4;
+    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "low yield");
+    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
-  // Set cooldown for stop-loss-family closes — token dumped on us, don't redeploy soon.
-  // Early dump exits return STOP_LOSS and older records may be prefixed as
-  // "Trailing TP: Early dump...", so classify by close-reason content.
-  // Rolling fast-drawdown exits are emergency stop-loss-family closes too.
-  // Duration configurable via config.management.stopLossCooldownHours (default: 12h).
+  // Set cooldown for stop-loss style closes — token dumped on us, don't redeploy soon.
+  // Early-dump closes are emitted as STOP_LOSS actions but may be stored with a
+  // "Trailing TP: Early dump..." prefix by older callers, so classify by content.
+  // Rolling fast-drawdown closes are emergency stop-loss-family exits too.
+  // Duration configurable via config.management.stopLossCooldownHours (default fallback: 12h)
   if (isStopLossCooldownCloseReason(deploy.close_reason)) {
     const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
     const cooldownReason = getStopLossCooldownReason(deploy.close_reason);
@@ -297,6 +285,30 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (${cooldownReason} close)`);
     if (entry.base_mint && mintCooldownUntil) {
       log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${cooldownReason} close)`);
+    }
+  }
+
+  if (config.management.repeatLowYieldCooldownEnabled && isLowYieldCloseReason(deploy.close_reason)) {
+    const triggerCount = Math.max(1, Number(config.management.repeatLowYieldCooldownTriggerCount ?? 3));
+    const lookbackHours = Math.max(1, Number(config.management.repeatLowYieldCooldownLookbackHours ?? 48));
+    const cooldownHours = Math.max(0, Number(config.management.repeatLowYieldCooldownHours ?? 12));
+    const rawScope = String(config.management.repeatLowYieldCooldownScope || "token").toLowerCase();
+    const scope = ["pool", "token", "both"].includes(rawScope) ? rawScope : "token";
+    const poolLowYieldCount = countRecentLowYieldPoolCloses(entry, lookbackHours);
+    const tokenLowYieldCount = countRecentLowYieldBaseMintCloses(db, entry.base_mint, lookbackHours);
+
+    if (cooldownHours > 0 && poolLowYieldCount >= triggerCount && (scope === "pool" || scope === "both" || !entry.base_mint)) {
+      const reason = `repeat low-yield closes (${poolLowYieldCount} within ${lookbackHours}h)`;
+      const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
+      log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+    }
+
+    if (cooldownHours > 0 && tokenLowYieldCount >= triggerCount && (scope === "token" || scope === "both") && entry.base_mint) {
+      const reason = `repeat low-yield closes (${tokenLowYieldCount} within ${lookbackHours}h)`;
+      const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+      if (mintCooldownUntil) {
+        log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+      }
     }
   }
 
@@ -328,7 +340,8 @@ export function recordPoolDeploy(poolAddress, deployData) {
   if (config.management.repeatDeployCooldownEnabled) {
     const triggerCount = Math.max(1, Number(config.management.repeatDeployCooldownTriggerCount ?? 3));
     const cooldownHours = Math.max(0, Number(config.management.repeatDeployCooldownHours ?? 12));
-    const scope = normalizeCooldownScope(config.management.repeatDeployCooldownScope, "token");
+    const rawScope = String(config.management.repeatDeployCooldownScope || "token").toLowerCase();
+    const scope = ["pool", "token", "both"].includes(rawScope) ? rawScope : "token";
     const recentRepeatDeploys = entry.deploys.slice(-triggerCount);
     const repeatedFeeGeneratingDeploys =
       cooldownHours > 0 &&
@@ -337,7 +350,16 @@ export function recordPoolDeploy(poolAddress, deployData) {
 
     if (repeatedFeeGeneratingDeploys) {
       const reason = `repeat fee-generating deploys (${triggerCount}x)`;
-      setScopedCooldown(db, entry, cooldownHours, reason, scope);
+      if (scope === "pool" || scope === "both" || !entry.base_mint) {
+        const poolCooldownUntil = setPoolCooldown(entry, cooldownHours, reason);
+        log("pool-memory", `Cooldown set for ${entry.name} until ${poolCooldownUntil} (${reason})`);
+      }
+      if ((scope === "token" || scope === "both") && entry.base_mint) {
+        const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, reason);
+        if (mintCooldownUntil) {
+          log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (${reason})`);
+        }
+      }
     }
   }
 
@@ -535,10 +557,7 @@ export function recallForPool(poolAddress) {
 
   // Deploy history summary
   if (entry.total_deploys > 0) {
-    const materialText = entry.material_win_rate_sample_count > 0
-      ? `, material WR ${entry.material_win_rate}% (${entry.material_win_rate_sample_count} material / ${entry.neutral_close_count ?? 0} neutral)`
-      : "";
-    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), avg PnL ${entry.avg_pnl_pct}%, raw WR ${entry.win_rate}%${materialText}, last outcome: ${entry.last_outcome}`);
+    lines.push(`POOL MEMORY [${entry.name}]: ${entry.total_deploys} past deploy(s), raw WR ${entry.win_rate}%, material WR ${entry.material_win_rate ?? 0}% over ${entry.material_win_rate_sample_count ?? 0} material sample(s), neutral/dust closes ${entry.neutral_close_count ?? 0}, avg PnL ${entry.avg_pnl_pct}%, last outcome: ${entry.last_outcome}`);
   }
 
   if (entry.cooldown_until && new Date(entry.cooldown_until) > new Date()) {
@@ -590,6 +609,7 @@ export function addPoolNote({ pool_address, note }) {
       total_deploys: 0,
       avg_pnl_pct: 0,
       win_rate: 0,
+      ...emptyMaterialStats(),
       last_deployed_at: null,
       last_outcome: null,
       notes: [],

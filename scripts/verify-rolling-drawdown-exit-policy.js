@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Synthetic proof for the main-bot rolling fast-drawdown exit.
+ * Synthetic proof for the nanocap rolling fast-drawdown exit.
  *
  * Runs in a temporary directory so state.js writes only temporary state.json/logs.
  * Does not import index.js, run the bot, or call trading APIs.
@@ -23,19 +23,19 @@ function assert(condition, message) {
 
 function baseConfig(overrides = {}) {
   return {
-    earlyDumpPct: -4,
+    earlyDumpPct: -8,
     earlyDumpMaxAgeMin: 20,
-    stopLossPct: -4,
+    stopLossPct: -8,
     stopLossConfirmDelayMs: 15000,
-    hardStopLossPct: -8,
-    stopLossFastClosePct: -6,
+    hardStopLossPct: -15,
+    stopLossFastClosePct: -10,
     stopLossVelocityWindowMs: 90000,
-    stopLossVelocityClosePct: -2.5,
+    stopLossVelocityClosePct: -3,
     rollingDrawdownExitEnabled: true,
     rollingDrawdownWindowMs: 5400000,
-    rollingDrawdownMinPeakPct: 2,
-    rollingDrawdownCurrentPnlPct: -3,
-    rollingDrawdownMinDropPct: 6,
+    rollingDrawdownMinPeakPct: 1,
+    rollingDrawdownCurrentPnlPct: -2,
+    rollingDrawdownMinDropPct: 4,
     trailingTakeProfit: true,
     trailingTriggerPct: 6,
     trailingDropPct: 3,
@@ -109,82 +109,81 @@ async function main() {
     }
 
     const pureDrawdown = calculateRollingPeakDrawdown([
-      { ts: new Date(Date.now() - 60_000).toISOString(), pnl_pct: 3.2 },
-    ], -3, 5_400_000);
+      { ts: new Date(Date.now() - 60_000).toISOString(), pnl_pct: 3 },
+    ], -2, 5_400_000);
     const pureDecision = buildRollingDrawdownExitDecision({
-      currentPnlPct: -3,
+      currentPnlPct: -2,
       managementConfig: baseConfig(),
       rollingDrawdown: pureDrawdown,
     });
-    assert(pureDecision?.action === "STOP_LOSS", "pure helper should produce STOP_LOSS for +3.2% -> -3%");
+    assert(pureDecision?.action === "STOP_LOSS", "pure helper should produce STOP_LOSS for +3% -> -2%");
     assert(pureDecision?.urgent === true, "pure helper decision should be urgent");
     assert(String(pureDecision?.reason || "").startsWith("Rolling fast drawdown:"), "pure helper reason should be labeled");
 
     track("fires");
-    const fireInitial = updatePnlAndCheckExits("fires", makePosition("fires", { pnl_pct: 3.2 }), baseConfig());
-    assert(fireInitial == null, "initial +3.2% sample should not close");
+    const fireInitial = updatePnlAndCheckExits("fires", makePosition("fires", { pnl_pct: 3 }), baseConfig());
+    assert(fireInitial == null, "initial +3% sample should not close");
     backdateLatestHistoryPoint(tempDir, "fires", 80 * 60_000);
-    const fireExit = updatePnlAndCheckExits("fires", makePosition("fires", { pnl_pct: -3 }), baseConfig());
-    assert(fireExit?.action === "STOP_LOSS", "+3.2% then -3% within 90m should close");
+    const fireExit = updatePnlAndCheckExits("fires", makePosition("fires", { pnl_pct: -2 }), baseConfig());
+    assert(fireExit?.action === "STOP_LOSS", "+3% then -2% within 90m should close");
     assert(fireExit?.urgent === true, "rolling drawdown exit should be urgent");
     assert(String(fireExit?.reason || "").startsWith("Rolling fast drawdown:"), "rolling exit reason should be labeled");
-    assert(String(fireExit?.reason || "").includes("drop 6.20pp"), "rolling exit reason should include pp drop");
+    assert(String(fireExit?.reason || "").includes("drop 5.00pp"), "rolling exit reason should include pp drop");
     assert(getHistory(tempDir, "fires").length >= 2, "90m rolling rule should retain history older than the 90s velocity window");
 
     track("low-peak");
-    const lowPeakConfig = baseConfig({ stopLossPct: -50, stopLossFastClosePct: null, hardStopLossPct: null });
-    updatePnlAndCheckExits("low-peak", makePosition("low-peak", { pnl_pct: 1.9 }), lowPeakConfig);
+    updatePnlAndCheckExits("low-peak", makePosition("low-peak", { pnl_pct: 0.9 }), baseConfig());
     backdateLatestHistoryPoint(tempDir, "low-peak", 60 * 60_000);
-    const lowPeak = updatePnlAndCheckExits("low-peak", makePosition("low-peak", { pnl_pct: -4.5 }), lowPeakConfig);
-    assert(lowPeak == null, "peak below +2% should not fire even with >=6pp drop");
+    const lowPeak = updatePnlAndCheckExits("low-peak", makePosition("low-peak", { pnl_pct: -3.5 }), baseConfig());
+    assert(lowPeak == null, "peak below +1% should not fire even with >=4pp drop");
 
     track("current-high");
-    updatePnlAndCheckExits("current-high", makePosition("current-high", { pnl_pct: 3.2 }), baseConfig());
+    updatePnlAndCheckExits("current-high", makePosition("current-high", { pnl_pct: 3 }), baseConfig());
     backdateLatestHistoryPoint(tempDir, "current-high", 60 * 60_000);
-    const currentHigh = updatePnlAndCheckExits("current-high", makePosition("current-high", { pnl_pct: -2.9 }), baseConfig());
-    assert(currentHigh == null, "current PnL above -3% should not fire");
+    const currentHigh = updatePnlAndCheckExits("current-high", makePosition("current-high", { pnl_pct: -1.9 }), baseConfig());
+    assert(currentHigh == null, "current PnL above -2% should not fire");
 
     track("small-drop");
-    updatePnlAndCheckExits("small-drop", makePosition("small-drop", { pnl_pct: 2.5 }), baseConfig());
+    updatePnlAndCheckExits("small-drop", makePosition("small-drop", { pnl_pct: 1.5 }), baseConfig());
     backdateLatestHistoryPoint(tempDir, "small-drop", 60 * 60_000);
-    const smallDrop = updatePnlAndCheckExits("small-drop", makePosition("small-drop", { pnl_pct: -3 }), baseConfig());
-    assert(smallDrop == null, "drop below 6pp should not fire");
+    const smallDrop = updatePnlAndCheckExits("small-drop", makePosition("small-drop", { pnl_pct: -2 }), baseConfig());
+    assert(smallDrop == null, "drop below 4pp should not fire");
 
     track("stale");
-    updatePnlAndCheckExits("stale", makePosition("stale", { pnl_pct: 3.2 }), baseConfig());
+    updatePnlAndCheckExits("stale", makePosition("stale", { pnl_pct: 3 }), baseConfig());
     backdateLatestHistoryPoint(tempDir, "stale", 91 * 60_000);
-    const stale = updatePnlAndCheckExits("stale", makePosition("stale", { pnl_pct: -3 }), baseConfig());
+    const stale = updatePnlAndCheckExits("stale", makePosition("stale", { pnl_pct: -2 }), baseConfig());
     assert(stale == null, "qualifying peak older than 90m should not fire");
 
     track("disabled");
-    updatePnlAndCheckExits("disabled", makePosition("disabled", { pnl_pct: 3.2 }), baseConfig({ rollingDrawdownExitEnabled: false }));
+    updatePnlAndCheckExits("disabled", makePosition("disabled", { pnl_pct: 3 }), baseConfig({ rollingDrawdownExitEnabled: false }));
     backdateLatestHistoryPoint(tempDir, "disabled", 60 * 60_000);
-    const disabled = updatePnlAndCheckExits("disabled", makePosition("disabled", { pnl_pct: -3 }), baseConfig({ rollingDrawdownExitEnabled: false }));
+    const disabled = updatePnlAndCheckExits("disabled", makePosition("disabled", { pnl_pct: -2 }), baseConfig({ rollingDrawdownExitEnabled: false }));
     assert(disabled == null, "disabled rolling drawdown rule should not fire");
 
     track("suspicious");
-    updatePnlAndCheckExits("suspicious", makePosition("suspicious", { pnl_pct: 3.2 }), baseConfig());
+    updatePnlAndCheckExits("suspicious", makePosition("suspicious", { pnl_pct: 3 }), baseConfig());
     backdateLatestHistoryPoint(tempDir, "suspicious", 60 * 60_000);
-    const suspicious = updatePnlAndCheckExits("suspicious", makePosition("suspicious", { pnl_pct: -3, pnl_pct_suspicious: true }), baseConfig());
+    const suspicious = updatePnlAndCheckExits("suspicious", makePosition("suspicious", { pnl_pct: -2, pnl_pct_suspicious: true }), baseConfig());
     assert(suspicious == null, "suspicious PnL should not trigger rolling drawdown exit");
 
     track("hard");
-    const hardStop = updatePnlAndCheckExits("hard", makePosition("hard", { pnl_pct: -8.1 }), baseConfig());
-    assert(hardStop?.action === "STOP_LOSS", "hard -8.1% should still close immediately");
+    const hardStop = updatePnlAndCheckExits("hard", makePosition("hard", { pnl_pct: -15.1 }), baseConfig());
+    assert(hardStop?.action === "STOP_LOSS", "hard -15.1% should still close immediately");
     assert(hardStop?.urgent === true, "hard stop-loss should remain urgent");
     assert(String(hardStop?.reason || "").startsWith("Hard stop loss:"), "hard stop-loss label should be preserved");
 
     track("fast");
-    const fastStop = updatePnlAndCheckExits("fast", makePosition("fast", { pnl_pct: -6.1 }), baseConfig());
-    assert(fastStop?.action === "STOP_LOSS", "fast -6.1% should still close immediately");
+    const fastStop = updatePnlAndCheckExits("fast", makePosition("fast", { pnl_pct: -10.1 }), baseConfig());
+    assert(fastStop?.action === "STOP_LOSS", "fast -10.1% should still close immediately");
     assert(fastStop?.urgent === true, "fast stop-loss should remain urgent");
     assert(String(fastStop?.reason || "").startsWith("Fast stop loss:"), "fast stop-loss label should be preserved");
 
     track("velocity");
-    const velocityInitial = updatePnlAndCheckExits("velocity", makePosition("velocity", { pnl_pct: -3.2 }), baseConfig());
+    const velocityInitial = updatePnlAndCheckExits("velocity", makePosition("velocity", { pnl_pct: -5.2 }), baseConfig());
     assert(velocityInitial == null, "initial velocity sample should not close");
     backdateLatestHistoryPoint(tempDir, "velocity", 60_000);
-    const velocityStop = updatePnlAndCheckExits("velocity", makePosition("velocity", { pnl_pct: -5.8 }), baseConfig());
+    const velocityStop = updatePnlAndCheckExits("velocity", makePosition("velocity", { pnl_pct: -8.8 }), baseConfig());
     assert(velocityStop?.action === "STOP_LOSS", "velocity stop should remain intact");
     assert(velocityStop?.urgent === true, "velocity stop should remain urgent");
     assert(String(velocityStop?.reason || "").startsWith("Velocity stop loss:"), "velocity stop label should be preserved");

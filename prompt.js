@@ -10,9 +10,12 @@
  * @returns {string} - Complete system prompt
  */
 import { config } from "./config.js";
+import { describeRangePolicyForPrompt, resolveActiveStrategyRangePolicy } from "./strategy-library.js";
 
 export function buildSystemPrompt(agentType, portfolio, positions, stateSummary = null, lessons = null, perfSummary = null, weightsSummary = null, decisionSummary = null) {
   const s = config.screening;
+  const activeRangePolicy = resolveActiveStrategyRangePolicy(config);
+  const activeRangeGuidance = describeRangePolicyForPrompt(activeRangePolicy);
 
   // MANAGER gets a leaner prompt — positions are pre-loaded in the goal, not repeated here
   if (agentType === "MANAGER") {
@@ -128,7 +131,8 @@ POOL MEMORY: Past losses or problems → strong skip signal.
 
 DEPLOY RULES:
 - COMPOUNDING: Use the deploy amount from the goal EXACTLY. Do NOT default to a smaller number.
-- bins_below = round(35 + (volatility/5)*34) clamped to [35,69]. bins_above = 0.
+- Active strategy range: ${activeRangeGuidance}.
+- If the active strategy declares bins_below bounds, choose bins within those bounds. Do not invent a volatility-expanded range unless the strategy JSON explicitly defines that policy.
 - Bin steps must be [80-125].
 - Pick ONE pool. Deploy or explain why none qualify.
 

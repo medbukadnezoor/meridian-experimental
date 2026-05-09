@@ -4,7 +4,7 @@ import path from "path";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
-import { log } from "./logger.js";
+import { log, logAction } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
 import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin } from "./tools/screening.js";
@@ -14,7 +14,7 @@ import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike } from "./state.js";
-import { getActiveStrategy } from "./strategy-library.js";
+import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -23,11 +23,20 @@ import { stageSignals } from "./signal-tracker.js";
 import { getWeightsSummary } from "./signal-weights.js";
 import { bootstrapHiveMind, ensureAgentId, getHiveMindPullMode, isHiveMindEnabled, pullHiveMindLessons, pullHiveMindPresets, registerHiveMindAgent, startHiveMindBackgroundSync } from "./hivemind.js";
 import { appendDecision } from "./decision-log.js";
+import { appendDecisionContext } from "./decision-context-log.js";
 import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
+import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
-import { formatSupertrendUrgentExitReason, isUrgentSupertrendLossExit } from "./supertrend-urgent-exit.js";
+import {
+  buildOorRepositionDecision,
+  buildOorRepositionDeployArgs,
+  deriveRangeSide,
+  findFreshSamePoolCandidate,
+  isOorRepositionEligibleRangeSide,
+  isOorRepositionEnabled,
+} from "./oor-reposition.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -85,6 +94,17 @@ const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 const PNL_SNAPSHOT_LOG_DIR = "./logs";
 let _pnlSnapshotWarningLogged = false;
 
+function finiteNumberOrNull(value) {
+  if (value == null || value === "") return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function formatPct(value) {
+  const num = finiteNumberOrNull(value);
+  return num == null ? "?" : num.toFixed(2);
+}
+
 function isSoftStopLossCandidate(position, managementConfig) {
   const pnlPct = finiteNumberOrNull(position?.pnl_pct);
   const stopLossPct = finiteNumberOrNull(managementConfig?.stopLossPct);
@@ -119,6 +139,25 @@ function appendPnlSnapshot(wallet, position, exit = null) {
     };
     const dateStr = now.toISOString().slice(0, 10);
     fs.appendFileSync(path.join(PNL_SNAPSHOT_LOG_DIR, `pnl-snapshots-${dateStr}.jsonl`), JSON.stringify(entry) + "\n");
+    appendDecisionContext({
+      ts: entry.ts,
+      stage: "pnl_snapshot_link",
+      actor: "MANAGER",
+      pool: entry.pool,
+      poolName: entry.poolName,
+      baseMint: entry.baseMint,
+      position: entry.position,
+      reason: entry.stopCandidate ? "PnL snapshot crossed stop candidate state" : "PnL snapshot",
+      metrics: {
+        age_min: entry.ageMin,
+        pnl_pct: entry.pnlPct,
+        peak_pnl_pct: entry.peakPnlPct,
+        trailing_active: entry.trailingActive,
+        in_range: entry.inRange,
+        stop_candidate: entry.stopCandidate,
+      },
+      source: `pnl-snapshots-${dateStr}.jsonl`,
+    });
     if (config.management.pnlSnapshotDebug) {
       log("state", `[PnL snapshot] ${entry.poolName ?? entry.position?.slice(0, 8) ?? "position"} PnL=${entry.pnlPct ?? "?"}%`);
     }
@@ -218,77 +257,6 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   _trailingDropConfirmTimers.set(positionAddress, timer);
 }
 
-function finiteNumberOrNull(value) {
-  if (value == null || value === "") return null;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
-
-function formatPct(value) {
-  const num = finiteNumberOrNull(value);
-  return num == null ? "?" : num.toFixed(2);
-}
-
-function formatActiveBinOracleExitReason(row) {
-  return [
-    `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
-    `active_bin=${row.active_bin ?? "?"}`,
-    `10s_delta=${row.velocity_10s_bin_delta ?? "n/a"}`,
-    `30s_delta=${row.velocity_30s_bin_delta ?? "n/a"}`,
-    `pnl=${formatPct(row.pnl_pct)}%`,
-  ].join("; ");
-}
-
-activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
-  const positionAddress = row?.position;
-  if (!positionAddress || _activeBinOracleEmergencyInFlight.has(positionAddress)) return;
-  _activeBinOracleEmergencyInFlight.add(positionAddress);
-  const pair = row.pair || row.pool || positionAddress.slice(0, 8);
-  const reason = formatActiveBinOracleExitReason(row);
-  log("state", `[Active-bin oracle] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
-  try {
-    const result = await executeTool("close_position", {
-      position_address: positionAddress,
-      reason,
-      urgent: true,
-    });
-    if (result?.success) {
-      log("state", `[Active-bin oracle] Emergency direct close succeeded: ${pair} PnL=${formatPct(result.pnl_pct)}%`);
-      return;
-    }
-    log("cron_error", `[Active-bin oracle] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
-    _activeBinOracleEmergencyInFlight.delete(positionAddress);
-  } catch (error) {
-    log("cron_error", `[Active-bin oracle] Emergency direct close error for ${pair}: ${error.message}`);
-    _activeBinOracleEmergencyInFlight.delete(positionAddress);
-  }
-}, { enabled: true, maxPnlPct: 2 });
-
-async function closeUrgentStopLossDirect(position, reason, sourceLabel, liveMessage = null) {
-  const pair = position?.pair ?? position?.pool_name ?? position?.position?.slice(0, 8) ?? "position";
-  log("state", `[${sourceLabel}] URGENT stop-loss: ${pair} — ${reason} — closing directly (no MANAGER)`);
-  await liveMessage?.toolStart("close_position");
-  try {
-    const result = await executeTool("close_position", {
-      position_address: position.position,
-      reason,
-      urgent: true,
-    });
-    await liveMessage?.toolFinish("close_position", result, !!result?.success);
-    if (result?.success) {
-      log("state", `[${sourceLabel}] Direct urgent stop-loss close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
-      return { attempted: true, success: true, result };
-    }
-    const error = result?.error ?? "unknown";
-    log("cron_error", `[${sourceLabel}] Direct urgent stop-loss close failed for ${pair}: ${error}`);
-    return { attempted: true, success: false, error };
-  } catch (error) {
-    await liveMessage?.toolFinish("close_position", { error: error.message }, false);
-    log("cron_error", `[${sourceLabel}] Direct urgent stop-loss close error for ${pair}: ${error.message}`);
-    return { attempted: true, success: false, error: error.message };
-  }
-}
-
 function scheduleStopLossConfirmation(position, exit) {
   const positionAddress = position?.position;
   const delayMs = Math.max(0, Number(exit?.confirm_delay_ms ?? config.management.stopLossConfirmDelayMs ?? 0));
@@ -301,7 +269,7 @@ function scheduleStopLossConfirmation(position, exit) {
 
   log(
     "state",
-    `[Stop loss candidate] ${pair} PnL=${formatPct(candidatePnlPct)}% <= ${stopLossPct}% - rechecking in ${Math.round(delayMs / 1000)}s`,
+    `[Stop loss candidate] ${pair} PnL=${formatPct(candidatePnlPct)}% <= ${stopLossPct}% — rechecking in ${Math.round(delayMs / 1000)}s`,
   );
 
   const timer = setTimeout(async () => {
@@ -352,6 +320,183 @@ function scheduleStopLossConfirmation(position, exit) {
   _stopLossConfirmTimers.set(positionAddress, timer);
   return true;
 }
+
+function isEmergencyDirectExit(exit) {
+  return !!exit?.urgent && (
+    exit.action === "STOP_LOSS" ||
+    exit.action === "PROFIT_GIVEBACK"
+  );
+}
+
+async function closeEmergencyDirect(position, exit, source = "management") {
+  const pair = position?.pair || position?.pool_name || position?.position || "position";
+  const reason = exit?.reason || "Emergency exit";
+  log("state", `[${source}] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
+  const result = await executeTool("close_position", {
+    position_address: position.position,
+    reason,
+    urgent: true,
+  });
+  if (result?.success) {
+    log("state", `[${source}] Emergency direct close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+  } else {
+    log("cron_error", `[${source}] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
+  }
+  return result;
+}
+
+function appendOorRepositionDecision(entry) {
+  const decision = buildOorRepositionDecision(entry);
+  logAction({
+    tool: "oor_reposition_decision",
+    ...decision,
+    args: {
+      position: decision.position,
+      pool: decision.pool,
+      rangeSide: decision.rangeSide,
+      decision: decision.decision,
+    },
+    result: decision,
+    success: !["failed"].includes(decision.decision),
+  });
+  appendDecisionContext({
+    stage: "oor_reposition_decision",
+    actor: "MANAGER",
+    pool: decision.pool,
+    poolName: decision.pair,
+    baseMint: decision.baseMint,
+    position: decision.position,
+    pair: decision.pair,
+    reason: decision.reason,
+    metrics: decision,
+    source: "management.oor_reposition",
+  });
+  return decision;
+}
+
+async function runOorRepositionAfterConfirmedClose(position, closeRule, closeResult) {
+  const closeReason = closeRule?.reason || "OOR";
+  const rangeSide = position.range_side || deriveRangeSide(position);
+  const baseEntry = { position, closeReason, closeResult, rangeSide };
+
+  if (!isOorRepositionEnabled(config)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "skip",
+      reason: "OOR reposition disabled",
+    });
+  }
+  if (!isOorRepositionEligibleRangeSide(rangeSide)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "skip",
+      reason: `range side ${rangeSide} is not eligible for reposition`,
+    });
+  }
+  if (!closeResult?.success || closeResult?.dry_run) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: closeResult?.dry_run
+        ? "close was dry-run only; no confirmed close"
+        : "close did not return success",
+    });
+  }
+
+  const afterClose = await getMyPositions({ force: true, silent: true }).catch((error) => ({ error: error.message, positions: [] }));
+  if (afterClose?.positions?.some((p) => p.position === position.position)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: "close confirmation blocked: old position still appears open",
+    });
+  }
+  if ((afterClose?.positions?.length ?? 0) >= config.risk.maxPositions) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: `max positions reached after close (${afterClose.positions.length}/${config.risk.maxPositions})`,
+    });
+  }
+
+  const balance = await getWalletBalances().catch((error) => ({ error: error.message, sol: null }));
+  const minRequired = config.management.deployAmountSol + config.management.gasReserve;
+  if (process.env.DRY_RUN !== "true" && !(Number.isFinite(balance.sol) && balance.sol >= minRequired)) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      decision: "blocked",
+      reason: `insufficient SOL after close (${balance.sol ?? "unknown"} < ${minRequired})`,
+    });
+  }
+
+  const freshScreeningAt = new Date().toISOString();
+  const fresh = await getTopCandidates({ limit: config.management.oorRepositionCandidateLimit ?? 25 })
+    .catch((error) => ({ error: error.message, candidates: [] }));
+  const freshCandidates = fresh?.candidates || fresh?.pools || [];
+  const freshCandidate = findFreshSamePoolCandidate(freshCandidates, {
+    pool: position.pool,
+    baseMint: position.base_mint,
+  });
+  if (!freshCandidate) {
+    return appendOorRepositionDecision({
+      ...baseEntry,
+      freshScreeningAt,
+      freshCandidates,
+      decision: "blocked",
+      reason: fresh?.error || "fresh screening did not return same pool/base mint candidate",
+    });
+  }
+
+  appendOorRepositionDecision({
+    ...baseEntry,
+    freshScreeningAt,
+    freshCandidates,
+    freshCandidate,
+    decision: "attempt",
+    reason: "fresh same-pool/base-mint candidate passed screening; attempting guarded deploy_position",
+  });
+
+  const deployArgs = buildOorRepositionDeployArgs(freshCandidate, config);
+  const deployResult = await executeTool("deploy_position", deployArgs);
+  const deploySucceeded = deployResult?.success !== false && !deployResult?.error && !deployResult?.blocked;
+  return appendOorRepositionDecision({
+    ...baseEntry,
+    freshScreeningAt,
+    freshCandidates,
+    freshCandidate,
+    guardResult: deployResult,
+    decision: deploySucceeded ? "success" : deployResult?.blocked ? "blocked" : "failed",
+    reason: deploySucceeded
+      ? "guarded same-pool reposition deployed"
+      : deployResult?.reason || deployResult?.error || "guarded same-pool reposition failed",
+  });
+}
+
+function formatActiveBinOracleExitReason(row) {
+  return [
+    `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
+    `active_bin=${row.active_bin ?? "?"}`,
+    `10s_delta=${row.velocity_10s_bin_delta ?? "n/a"}`,
+    `30s_delta=${row.velocity_30s_bin_delta ?? "n/a"}`,
+    `pnl=${formatPct(row.pnl_pct)}%`,
+  ].join("; ");
+}
+
+activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
+  const positionAddress = row?.position;
+  if (!positionAddress || _activeBinOracleEmergencyInFlight.has(positionAddress)) return;
+  _activeBinOracleEmergencyInFlight.add(positionAddress);
+  const pair = row.pair || row.pool || positionAddress.slice(0, 8);
+  const reason = formatActiveBinOracleExitReason(row);
+  const result = await closeEmergencyDirect(
+    { position: positionAddress, pair },
+    { action: "STOP_LOSS", reason, urgent: true },
+    "Active-bin oracle",
+  );
+  if (!result?.success) {
+    _activeBinOracleEmergencyInFlight.delete(positionAddress);
+  }
+}, { enabled: true, maxPnlPct: 2 });
 
 
 async function runBriefing() {
@@ -428,12 +573,12 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // JS trailing TP check
     const exitMap = new Map();
+    const directEmergencyMap = new Map();
     for (const p of positionData) {
       if (!p.pnl_pct_suspicious && queuePeakConfirmation(p.position, p.pnl_pct)) {
         schedulePeakConfirmation(p.position);
       }
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
-      appendPnlSnapshot(null, p, exit);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
           if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
@@ -445,8 +590,36 @@ export async function runManagementCycle({ silent = false } = {}) {
           scheduleStopLossConfirmation(p, exit);
           continue;
         }
+        if (isEmergencyDirectExit(exit)) {
+          const result = await closeEmergencyDirect(p, exit, "Management cycle");
+          directEmergencyMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: exit.reason,
+            result,
+          });
+          continue;
+        }
         exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
+        continue;
+      }
+      const supertrendExit = await evaluateSupertrendLossExit(p, config.management);
+      if (supertrendExit?.pending) {
+        log("state", supertrendExit.reason);
+        continue;
+      }
+      if (supertrendExit) {
+        if (isEmergencyDirectExit(supertrendExit)) {
+          const result = await closeEmergencyDirect(p, supertrendExit, "Management cycle Supertrend loss");
+          directEmergencyMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: supertrendExit.reason,
+            result,
+          });
+          continue;
+        }
+        exitMap.set(p.position, supertrendExit);
+        log("state", `Exit alert for ${p.pair}: ${supertrendExit.reason}`);
       }
     }
 
@@ -454,6 +627,10 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
+      if (directEmergencyMap.has(p.position)) {
+        actionMap.set(p.position, directEmergencyMap.get(p.position));
+        continue;
+      }
       // Hard exit — highest priority (with optional indicator gate)
       if (exitMap.has(p.position)) {
         const exit = exitMap.get(p.position);
@@ -470,19 +647,8 @@ export async function runManagementCycle({ silent = false } = {}) {
         } else {
           log(
             "indicators",
-            `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${exit.reason}`,
+            `Exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${exit.reason}`,
           );
-        }
-        if (exit.action === "STOP_LOSS" && exit.urgent) {
-          const direct = await closeUrgentStopLossDirect(p, exit.reason, "Management cycle", liveMessage);
-          actionMap.set(p.position, {
-            action: "DIRECT_CLOSE",
-            rule: "urgent_stop_loss",
-            reason: exit.reason,
-            directCloseSuccess: direct.success,
-            directCloseError: direct.error ?? null,
-          });
-          continue;
         }
         actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exit.reason });
         continue;
@@ -497,6 +663,15 @@ export async function runManagementCycle({ silent = false } = {}) {
       if (closeRule) {
         if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
           scheduleStopLossConfirmation(p, closeRule);
+          continue;
+        }
+        if (isEmergencyDirectExit(closeRule)) {
+          const result = await closeEmergencyDirect(p, closeRule, "Management cycle");
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
           continue;
         }
         if (closeRule.reason === "low yield") {
@@ -528,18 +703,21 @@ export async function runManagementCycle({ silent = false } = {}) {
         } else {
           log(
             "indicators",
-            `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — hard OOR rule reached: ${closeRule.reason}`,
+            `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${closeRule.reason}`,
           );
         }
-        if (closeRule.rule === 1 && closeRule.urgent) {
-          const direct = await closeUrgentStopLossDirect(p, closeRule.reason, "Management cycle", liveMessage);
-          actionMap.set(p.position, {
-            action: "DIRECT_CLOSE",
-            rule: "urgent_stop_loss",
+        if (closeRule.rule === 4 && isOorRepositionEnabled(config) && isOorRepositionEligibleRangeSide(closeRule.rangeSide)) {
+          const result = await executeTool("close_position", {
+            position_address: p.position,
             reason: closeRule.reason,
-            directCloseSuccess: direct.success,
-            directCloseError: direct.error ?? null,
+            urgent: !!closeRule.urgent,
           });
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
+          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
           continue;
         }
         actionMap.set(p.position, closeRule);
@@ -567,16 +745,17 @@ export async function runManagementCycle({ silent = false } = {}) {
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
       let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
+      if (act.action === "CLOSED_DIRECT") line += `\n⚡ Closed directly: ${act.reason}`;
+      if (act.action === "DIRECT_CLOSE_FAILED") line += `\n⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.action === "DIRECT_CLOSE") line += `\n⚡ Direct emergency close ${act.directCloseSuccess ? "sent" : "failed"}: ${act.reason}${act.directCloseError ? ` (${act.directCloseError})` : ""}`;
       if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       if (act.indicatorHold) line += `\n📊 Indicator hold: ${act.indicatorHold}`;
       return line;
     });
 
-    const needsAction = [...actionMap.values()].filter(a => a.action !== "STAY");
+    const needsAction = [...actionMap.values()].filter(a => !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action));
     const actionSummary = needsAction.length > 0
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
@@ -588,10 +767,8 @@ export async function runManagementCycle({ silent = false } = {}) {
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
       const a = actionMap.get(p.position);
-      return a.action !== "STAY" && a.action !== "DIRECT_CLOSE";
+      return !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action);
     });
-
-    const directCloseCount = [...actionMap.values()].filter((a) => a.action === "DIRECT_CLOSE").length;
 
     if (actionPositions.length > 0) {
       log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
@@ -628,13 +805,8 @@ After executing, write a brief one-line result per position.
 
       mgmtReport += `\n\n${content}`;
     } else {
-      if (directCloseCount > 0) {
-        log("cron", `Management: ${directCloseCount} urgent direct close(s) already attempted — skipping LLM`);
-        await liveMessage?.note(`${directCloseCount} urgent direct close(s) attempted; no LLM action needed.`);
-      } else {
-        log("cron", "Management: all positions STAY — skipping LLM");
-        await liveMessage?.note("No tool actions needed.");
-      }
+      log("cron", "Management: all positions STAY — skipping LLM");
+      await liveMessage?.note("No tool actions needed.");
     }
 
     // Trigger screening after management
@@ -724,6 +896,8 @@ export async function runScreeningCycle({ silent = false } = {}) {
 
     // Load active strategy
     const activeStrategy = getActiveStrategy();
+    const activeRangePolicy = resolveStrategyRangePolicy(activeStrategy, config);
+    const activeRangeGuidance = describeRangePolicyForPrompt(activeRangePolicy);
     const strategyBlock = activeStrategy
       ? `ACTIVE STRATEGY: ${activeStrategy.name} — LP: ${activeStrategy.lp_strategy} | bins_above: ${activeStrategy.range?.bins_above ?? 0} (FIXED — never change) | deposit: ${activeStrategy.entry?.single_side === "sol" ? "SOL only (amount_y, amount_x=0)" : "dual-sided"} | best for: ${activeStrategy.best_for}`
       : `No active strategy — use default bid_ask, bins_above: 0, SOL only.`;
@@ -935,7 +1109,9 @@ ${candidateBlocks.join("\n\n")}
 STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   bins_below = round(35 + (volatility/5)*55) clamped to [35,90].
+   lp_strategy: MUST be "${activeStrategy?.lp_strategy ?? 'bid_ask'}" — taken from ACTIVE STRATEGY above. Do NOT use "spot". Do NOT change this value.
+   Range policy: ${activeRangeGuidance}.
+   If bins_below bounds are configured by the active strategy, keep bins_below inside those bounds. Do not use volatility expansion unless the strategy JSON explicitly defines it.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
 3. Report in this exact format (no tables, no extra sections):
@@ -1073,33 +1249,35 @@ Summarize the current portfolio health, total fees earned, and performance of al
           schedulePeakConfirmation(p.position);
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
-        appendPnlSnapshot(null, p, exit);
+        appendPnlSnapshot(result.wallet, p, exit);
         if (exit) {
           if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
             scheduleStopLossConfirmation(p, exit);
             continue;
           }
-          const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
-          if (!indicatorConfirmation.confirmed) {
-            log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
-            continue;
+          if (isEmergencyDirectExit(exit)) {
+            _pollTriggeredAt = Date.now();
+            try {
+              await closeEmergencyDirect(p, exit, "PnL poll");
+            } catch (e) {
+              log("cron_error", `Direct emergency close error: ${e.message}`);
+            }
+            break;
+          }
+          if ((exit.indicatorPolicy ?? "confirm") !== "bypass") {
+            const indicatorConfirmation = await confirmExitIndicator(p, exit.reason);
+            if (!indicatorConfirmation.confirmed) {
+              log("state", `[PnL poll] Exit alert suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
+              continue;
+            }
+          } else {
+            log("state", `[PnL poll] Exit indicator bypass: ${p.pair} — ${exit.reason}`);
           }
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
             if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
-          }
-          if (isUrgentSupertrendLossExit({ exit, position: p, indicatorConfirmation })) {
-            const urgentReason = formatSupertrendUrgentExitReason(exit, indicatorConfirmation);
-            log("state", `[PnL poll] URGENT Supertrend loss exit: ${p.pair} — ${urgentReason} — closing directly (no cooldown, no LLM)`);
-            _pollTriggeredAt = Date.now();
-            const direct = await closeUrgentStopLossDirect(p, urgentReason, "PnL poll Supertrend loss", null);
-            if (!direct.success) {
-              log("state", `[PnL poll] Direct Supertrend loss close failed for ${p.pair}: ${direct.error ?? "unknown"}, falling back to management`);
-              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
-            }
-            break;
           }
           // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
           const isStopLoss = exit.action === "STOP_LOSS";
@@ -1141,6 +1319,24 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
+        const supertrendExit = await evaluateSupertrendLossExit(p, config.management);
+        if (supertrendExit?.pending) {
+          log("state", `[PnL poll] ${supertrendExit.reason}`);
+        } else if (supertrendExit) {
+          log("state", `[PnL poll] URGENT Supertrend loss exit: ${p.pair} — ${supertrendExit.reason} — closing directly (no cooldown, no LLM)`);
+          _pollTriggeredAt = Date.now();
+          try {
+            const result = await closeEmergencyDirect(p, supertrendExit, "PnL poll Supertrend loss");
+            if (!result?.success) {
+              log("state", `[PnL poll] Direct Supertrend loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+            }
+          } catch (e) {
+            log("cron_error", `Direct Supertrend loss close error: ${e.message}`);
+            runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+          }
+          break;
+        }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
@@ -1173,10 +1369,14 @@ Summarize the current portfolio health, total fees earned, and performance of al
             break;
           }
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
-          const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
-          if (!indicatorConfirmation.confirmed) {
-            log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
-            continue;
+          if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
+            const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
+            if (!indicatorConfirmation.confirmed) {
+              log("state", `[PnL poll] Deterministic close suppressed by indicators: ${p.pair} — ${indicatorConfirmation.reason}`);
+              continue;
+            }
+          } else {
+            log("state", `[PnL poll] Deterministic close indicator bypass: ${p.pair} — ${closeRule.reason}`);
           }
           const bypassPollCooldown = !!closeRule.urgent;
           const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
@@ -1274,32 +1474,34 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
     return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
+  const rangeSide = position.range_side || deriveRangeSide(position);
   if (
+    rangeSide === "above_range" &&
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range" };
+    return { action: "CLOSE", rule: 3, reason: "pumped far above range", rangeSide, oorSide: rangeSide };
   }
   if (
-    position.active_bin != null &&
-    position.upper_bin != null &&
-    position.active_bin > position.upper_bin &&
+    (rangeSide === "above_range" || rangeSide === "below_range") &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
     const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
     return {
       action: "CLOSE",
       rule: 4,
-      reason: oorExit?.reason || "OOR",
+      reason: oorExit?.reason || `OOR ${rangeSide}`,
       indicatorPolicy: oorExit?.indicatorPolicy ?? "confirm",
       urgent: oorExit?.urgent ?? false,
+      rangeSide,
+      oorSide: rangeSide,
     };
   }
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= 60
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
@@ -1365,9 +1567,11 @@ function formatConfigSnapshot() {
     "",
     `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.binsBelow}`,
     `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}%${config.management.stopLossConfirmDelayMs ? ` confirmed after ${Math.round(config.management.stopLossConfirmDelayMs / 1000)}s` : ""} | fast ${config.management.stopLossFastClosePct ?? "off"}% | hard ${config.management.hardStopLossPct ?? "off"}% | take profit: ${config.management.takeProfitPct}%`,
+    `Stop loss: ${config.management.stopLossPct}%${config.management.stopLossConfirmDelayMs ? ` confirmed after ${Math.round(config.management.stopLossConfirmDelayMs / 1000)}s` : ""} | hard ${config.management.hardStopLossPct ?? "off"}% | take profit: ${config.management.takeProfitPct}%`,
     `Early dump: ${config.management.earlyDumpPct != null ? `${config.management.earlyDumpPct}% within ${config.management.earlyDumpMaxAgeMin}m` : "disabled"}`,
     `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
+    `Profit giveback emergency: ${config.management.profitGivebackEmergencyEnabled ? `on | peak >= ${config.management.profitGivebackTriggerPct}% and current <= ${config.management.profitGivebackFloorPct}%` : "off"}`,
+    `PnL snapshots: ${config.management.pnlSnapshotLoggingEnabled ? "on" : "off"}`,
     `OOR: soft ${config.management.outOfRangeWaitMinutes}m${config.management.outOfRangeHardCloseMinutes != null ? ` | hard ${config.management.outOfRangeHardCloseMinutes}m` : ""} | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
     `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
     `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
@@ -1408,6 +1612,9 @@ function settingValue(key) {
     stopLossPct: config.management.stopLossPct,
     trailingTriggerPct: config.management.trailingTriggerPct,
     trailingDropPct: config.management.trailingDropPct,
+    profitGivebackEmergencyEnabled: config.management.profitGivebackEmergencyEnabled,
+    profitGivebackTriggerPct: config.management.profitGivebackTriggerPct,
+    profitGivebackFloorPct: config.management.profitGivebackFloorPct,
     repeatDeployCooldownEnabled: config.management.repeatDeployCooldownEnabled,
     repeatDeployCooldownTriggerCount: config.management.repeatDeployCooldownTriggerCount,
     repeatDeployCooldownHours: config.management.repeatDeployCooldownHours,
@@ -1486,6 +1693,9 @@ function renderSettingsMenu(page = "main") {
       [toggleButton("trailingTakeProfit", "Trailing TP")],
       stepButtons("trailingTriggerPct", "Trail trigger", 0.5, { digits: 1 }),
       stepButtons("trailingDropPct", "Trail drop", 0.5, { digits: 1 }),
+      [toggleButton("profitGivebackEmergencyEnabled", "Profit giveback")],
+      stepButtons("profitGivebackTriggerPct", "Giveback peak", 0.5, { digits: 1 }),
+      stepButtons("profitGivebackFloorPct", "Giveback floor", 0.5, { digits: 1 }),
       [toggleButton("repeatDeployCooldownEnabled", "Repeat cooldown")],
       stepButtons("repeatDeployCooldownTriggerCount", "Repeat count", 1, { digits: 0 }),
       stepButtons("repeatDeployCooldownHours", "Repeat hrs", 1, { digits: 0 }),
@@ -1683,13 +1893,15 @@ async function deployLatestCandidate(index) {
     stageSignals(candidate.pool, candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate));
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
-  const binsBelow = Math.max(35, Math.min(90, Math.round(35 + ((Number(candidate.volatility) || 0) / 5) * 55)));
+  const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
+  const binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
+  const binsAbove = activeRangePolicy.binsAbove ?? 0;
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
-    strategy: config.strategy.strategy,
+    strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
     bins_below: binsBelow,
-    bins_above: 0,
+    bins_above: binsAbove,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
     bin_step: candidate.bin_step,
@@ -2256,8 +2468,10 @@ Commands:
       console.log(`  timeframe:            ${s.timeframe}`);
       const perf = getPerformanceSummary();
       if (perf) {
+        const materialWr = perf.material_win_rate_pct == null ? "N/A" : `${perf.material_win_rate_pct}%`;
         console.log(`\n  Based on ${perf.total_positions_closed} closed positions`);
-        console.log(`  Raw WR: ${perf.raw_win_rate_pct ?? perf.win_rate_pct}%  |  Material WR: ${perf.material_win_rate_pct ?? "n/a"}% (${perf.material_sample_count ?? 0} material / ${perf.neutral_count ?? 0} neutral)  |  Avg PnL: ${perf.avg_pnl_pct}%`);
+        console.log(`  Raw WR: ${perf.raw_win_rate_pct}%  |  Material WR: ${materialWr} of all closes (${perf.material_sample_count} material sample(s))`);
+        console.log(`  Neutral/dust closes: ${perf.neutral_count ?? 0} (${perf.neutral_rate_pct ?? 0}%)  |  Avg PnL: ${perf.avg_pnl_pct}%`);
       } else {
         console.log("\n  No closed positions yet — thresholds are preset defaults.");
       }

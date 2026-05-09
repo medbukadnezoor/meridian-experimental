@@ -1,3 +1,15 @@
+export const OPERATOR_UPDATE_CONFIG_MATERIAL_OUTCOME_FIELDS = Object.freeze([
+  "materialWinPct",
+  "materialLossPct",
+  "dustNeutralAbsPct",
+  "neutralCloseReasonBuckets",
+  "darwinUseMaterialOutcomes",
+  "darwinExcludeNeutralOutcomes",
+]);
+
+export const OPERATOR_UPDATE_CONFIG_MATERIAL_OUTCOME_NOTE =
+  "Material outcome thresholds are live-tunable through operator-only `meridian config set` and Telegram `/setcfg`; they affect Raw WR/Material WR reporting and Darwin material learning only, not stop-loss, TP, entry, sizing, routing, or GMGN policy.";
+
 export const tools = [
   // ═══════════════════════════════════════════
   //  SCREENING TOOLS
@@ -127,22 +139,22 @@ Only call this if you need the current price to calculate a specific bin range (
       description: `Open a new DLMM liquidity position.
 
 PRIORITY ORDER for strategy and bins:
-1. User explicitly specifies → always follow exactly (user override is absolute)
-2. No user spec → use active strategy's lp_strategy and choose bins based on volatility
+1. User explicitly specifies → follow exactly unless code-enforced safety/forced-mode rules reject or repair it
+2. No user spec → use active strategy's lp_strategy and configured range bounds/defaults
 
 HARD RULES:
 - Never use 'curve'.
 - Bin Step: Only deploy in pools with bin_step between 80 and 125.
+- In forced SOL-only mode, deploy_position is code-enforced from active config/strategy as strategy='bid_ask', amount_y = full computed deploy amount, amount_x=0, bins_above=0, and no positive upside_pct.
 - For single-side SOL deploys (amount_y only, amount_x=0), do not request upside exposure:
   use bins_below only, keep bins_above=0, and the upper bin will be pinned to the current active bin.
 - Do not send both bins and percentage ranges. If using bins_below, omit downside_pct/upside_pct entirely.
   Zero or negative percentage fields are ignored by the deterministic range guard.
-- deploy_position can only execute after a fresh get_top_candidates result for the same pool passes live screening thresholds.
 
 Guidelines (only when user hasn't specified):
-- Strategy: use the active strategy's lp_strategy field (bid_ask or spot)
-- Bins: choose 35–69 for standard volatility; up to 350 for wide-range strategies. Max 1400 total.
-- Deposit: Can be single-sided (SOL only or Base only) or dual-sided.
+- Strategy: use the active strategy's lp_strategy field (bid_ask or spot).
+- Bins: use active strategy range fields when present: bins_below, bins_below_min, bins_below_max, and bins_above. Max 1400 total.
+- Deposit: Standard mode can be single-sided or dual-sided. Forced SOL-only mode is amount_y only, amount_x=0.
 
 WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
       parameters: {
@@ -191,12 +203,8 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           base_fee: { type: "number", description: "Pool base fee percentage (from discover_pools)" },
           volatility: { type: "number", description: "Pool volatility at deploy time" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
-          fee_active_tvl_ratio: { type: "number", description: "fee/active TVL ratio at deploy time" },
-          volume_window: { type: "number", description: "Screening-window pool volume at deploy time" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
-          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" },
-          rationale: { type: "string", description: "Optional caller rationale for the attempted deploy. Preserved for deploy guard audit logs." },
-          confidence: { type: "number", description: "Optional caller confidence from 0 to 1. Preserved for deploy guard audit logs." }
+          initial_value_usd: { type: "number", description: "Estimated USD value being deployed" }
         },
         required: ["pool_address"]
       }
@@ -915,7 +923,7 @@ Call list_lessons first to find the lesson ID.`,
       name: "get_performance_history",
       description: `Retrieve closed position records filtered by time window.
 Use when the user asks about recent performance, last 24h positions, how you've been doing, P&L history, etc.
-Returns individual closed positions with PnL, fees, strategy, hold time, and close reason.`,
+Returns individual closed positions with PnL, fees, strategy, hold time, close reason, raw WR fields, and material/neutral outcome classification.`,
       parameters: {
         type: "object",
         properties: {
@@ -939,7 +947,7 @@ Returns individual closed positions with PnL, fees, strategy, hold time, and clo
     function: {
       name: "get_pool_memory",
       description: `Check your deploy history for a pool BEFORE deploying.
-Returns all past deploys, PnL, win rate, and any notes you've added.
+Returns all past deploys, PnL, Raw WR, Material WR, neutral/dust close counts, and any notes you've added.
 
 Call this tool before deploying to any pool — you may have been here before and it didn't work.
 Also useful during screening to skip pools with a bad track record.`,

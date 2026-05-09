@@ -207,7 +207,7 @@ export function buildStopLossConfirmationResult({
       confirmed: true,
       rejected: false,
       closeReason,
-      logMessage: `[Stop loss confirmed] ${pair || "position"} - ${closeReason} - closing directly`,
+      logMessage: `[Stop loss confirmed] ${pair || "position"} — ${closeReason} — closing directly`,
     };
   }
 

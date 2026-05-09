@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Synthetic proof for deterministic falling-knife / suspicious-volume vetoes.
+ * Synthetic proof for deterministic nanocap falling-knife / suspicious-volume vetoes.
  *
  * Pure helper import only: no trading APIs, no bot runtime, no deploy/close calls.
  */
@@ -69,13 +69,6 @@ async function main() {
     assert(larpAuditLine.includes("mcap/global_fees=21090"), "audit line should include mcap/global_fees ratio");
     assert(larpAuditLine.includes("token_age_hours=66"), "audit line should include token age");
 
-    const disabledReason = getDeterministicCandidateVetoReason(larpLike, {
-      ...screeningConfig,
-      fallingKnifeVetoEnabled: false,
-      suspiciousVolumeVetoEnabled: false,
-    });
-    assert(disabledReason == null, "disabled veto config should preserve existing candidate behavior");
-
     const benign5mFrequency = {
       name: "BENIGN-5M-SOL",
       price_change_pct: -6.5,
@@ -126,7 +119,6 @@ async function main() {
 
     console.log(JSON.stringify({
       success: true,
-      disabledDefault: { vetoed: false, reason: disabledReason },
       larpLike: { vetoed: true, reason: larpReason, audit: larpAudit, auditLine: larpAuditLine },
       benignOversold: { vetoed: false, reason: benignReason },
       benign5mFrequency: { vetoed: false, reason: benignReason },

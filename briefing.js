@@ -3,6 +3,7 @@ import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
 import { config } from "./config.js";
 import { getAutoresearchBriefingSummary } from "./autoresearch.js";
+import { summarizeMaterialPerformance } from "./performance-metrics.js";
 
 const STATE_FILE = "./state.json";
 const LESSONS_FILE = "./lessons.json";
@@ -23,6 +24,7 @@ export async function generateBriefing() {
   const perfLast24h = (lessonsData.performance || []).filter(p => new Date(p.recorded_at) > last24h);
   const totalPnLUsd = perfLast24h.reduce((sum, p) => sum + (p.pnl_usd || 0), 0);
   const totalFeesUsd = perfLast24h.reduce((sum, p) => sum + (p.fees_earned_usd || 0), 0);
+  const perf24Summary = summarizeMaterialPerformance(perfLast24h, config);
 
   // 3. Lessons Learned
   const lessonsLast24h = (lessonsData.lessons || []).filter(l => new Date(l.created_at) > last24h);
@@ -43,8 +45,8 @@ export async function generateBriefing() {
     `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)}`,
     `💎 Fees Earned: $${totalFeesUsd.toFixed(2)}`,
     perfLast24h.length > 0
-      ? `📈 Win Rate (24h): ${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
-      : "📈 Win Rate (24h): N/A",
+      ? `📈 Raw WR (24h): ${perf24Summary.raw_win_rate_pct}% | Material WR: ${perf24Summary.material_win_rate_pct ?? "N/A"}% | Neutral/dust: ${perf24Summary.neutral_count}`
+      : "📈 Raw WR / Material WR (24h): N/A",
     "",
     `<b>Lessons Learned:</b>`,
     lessonsLast24h.length > 0
@@ -55,7 +57,7 @@ export async function generateBriefing() {
     `<b>Current Portfolio:</b>`,
     `📂 Open Positions: ${openPositions.length}`,
     perfSummary
-      ? `📊 All-time PnL: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win)`
+      ? `📊 All-time PnL: $${perfSummary.total_pnl_usd.toFixed(2)} (Raw WR ${perfSummary.raw_win_rate_pct}%, Material WR ${perfSummary.material_win_rate_pct ?? "N/A"}%, Neutral/dust ${perfSummary.neutral_count})`
       : "",
     "────────────────"
   ];
