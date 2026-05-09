@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates, getVolatilityTimeframe, validateDeployCandidateLease } from "./screening.js";
+import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -15,16 +15,14 @@ import { addLesson, clearAllLessons, clearPerformance, removeLessonsByKeyword, g
 import { setPositionInstruction } from "../state.js";
 
 import { getPoolMemory, addPoolNote } from "../pool-memory.js";
-import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy } from "../strategy-library.js";
+import { addStrategy, listStrategies, getStrategy, setActiveStrategy, removeStrategy, getActiveStrategy, resolveStrategyRangePolicy } from "../strategy-library.js";
 import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-blacklist.js";
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, computeDeployAmount, reloadScreeningThresholds } from "../config.js";
-import { getActiveStrategy } from "../strategy-library.js";
 import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-guard.js";
-import { makeDeployThresholdsUnavailableBlock } from "./deploy-threshold-guard.js";
-import { appendDecision, getRecentDecisions } from "../decision-log.js";
+import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -33,117 +31,13 @@ import { execSync, spawn } from "child_process";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 import { log, logAction } from "../logger.js";
+import { appendDecisionContext } from "../decision-context-log.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
 
 const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
   "Telegram slash command /setcfg",
 ]);
-
-function numberOrNull(value) {
-  if (value == null || value === "") return null;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
-
-function poolDetailTvl(pool) {
-  return numberOrNull(pool?.active_tvl ?? pool?.tvl);
-}
-
-function poolDetailBinStep(pool) {
-  return numberOrNull(pool?.dlmm_params?.bin_step ?? pool?.bin_step);
-}
-
-function poolDetailFeeActiveTvlRatio(pool) {
-  const direct = numberOrNull(pool?.fee_active_tvl_ratio ?? pool?.fee_tvl_ratio);
-  if (direct != null) return direct;
-  const fee = numberOrNull(pool?.fee);
-  const activeTvl = poolDetailTvl(pool);
-  return fee != null && activeTvl != null && activeTvl > 0 ? (fee / activeTvl) * 100 : null;
-}
-
-function poolDetailVolatility(pool) {
-  return numberOrNull(pool?.volatility);
-}
-
-async function validateDeployPoolThresholds(args = {}) {
-  const poolAddress = args.pool_address || args.pool;
-  if (!poolAddress) {
-    return { pass: false, reason: "pool_address is required for deploy threshold validation" };
-  }
-
-  const screening = config.screening;
-  const sourceTimeframe = screening.timeframe || "5m";
-  const volatilityTimeframe = getVolatilityTimeframe(sourceTimeframe);
-  let detail;
-  try {
-    detail = await getPoolDetail({ pool_address: poolAddress, timeframe: sourceTimeframe });
-    if (!detail) throw new Error(`Pool ${poolAddress} not found`);
-  } catch (error) {
-    return makeDeployThresholdsUnavailableBlock(error, poolAddress);
-  }
-  const failures = [];
-
-  const tvl = poolDetailTvl(detail);
-  const minTvl = numberOrNull(screening.minTvl);
-  const maxTvl = numberOrNull(screening.maxTvl);
-  if (minTvl != null && (tvl == null || tvl < minTvl)) {
-    failures.push(`Pool TVL ${tvl ?? "missing"} < minTvl ${minTvl}`);
-  }
-  if (maxTvl != null && tvl != null && tvl > maxTvl) {
-    failures.push(`Pool TVL ${tvl} > maxTvl ${maxTvl}`);
-  }
-
-  const feeActiveTvlRatio = poolDetailFeeActiveTvlRatio(detail);
-  const minFeeActiveTvlRatio = numberOrNull(screening.minFeeActiveTvlRatio);
-  if (minFeeActiveTvlRatio != null && (feeActiveTvlRatio == null || feeActiveTvlRatio < minFeeActiveTvlRatio)) {
-    failures.push(`Pool fee_active_tvl_ratio ${feeActiveTvlRatio ?? "missing"} < minFeeActiveTvlRatio ${minFeeActiveTvlRatio}`);
-  }
-
-  const binStep = poolDetailBinStep(detail);
-  const minBinStep = numberOrNull(screening.minBinStep);
-  const maxBinStep = numberOrNull(screening.maxBinStep);
-  if (minBinStep != null && (binStep == null || binStep < minBinStep)) {
-    failures.push(`Pool bin_step ${binStep ?? "missing"} < minBinStep ${minBinStep}`);
-  }
-  if (maxBinStep != null && (binStep == null || binStep > maxBinStep)) {
-    failures.push(`Pool bin_step ${binStep ?? "missing"} > maxBinStep ${maxBinStep}`);
-  }
-
-  let volatilityDetail = detail;
-  if (sourceTimeframe !== volatilityTimeframe) {
-    try {
-      volatilityDetail = await getPoolDetail({ pool_address: poolAddress, timeframe: volatilityTimeframe });
-    } catch (error) {
-      return makeDeployThresholdsUnavailableBlock(error, poolAddress, `pool ${volatilityTimeframe} volatility`);
-    }
-  }
-  const volatility = poolDetailVolatility(volatilityDetail);
-  if (volatility == null || volatility <= 0) {
-    failures.push(`Pool ${volatilityTimeframe} volatility ${volatility ?? "missing"} must be > 0`);
-  }
-
-  if (failures.length > 0) {
-    return {
-      pass: false,
-      reason: `deploy threshold validation rejected ${poolAddress}: ${failures.join("; ")}`,
-      guard: "deploy_thresholds",
-      failures: failures.map((message) => ({ code: "deploy_threshold_recheck_failed", message })),
-    };
-  }
-
-  return { pass: true };
-}
-
-function shouldForceSingleSidedSolBidAsk() {
-  if (config.strategy.forceSingleSidedSolBidAsk === false) return false;
-  const activeStrategy = getActiveStrategy();
-  if (activeStrategy) {
-    if (activeStrategy.lp_strategy !== "bid_ask") return false;
-    if (activeStrategy.entry?.single_side && activeStrategy.entry.single_side !== "sol") return false;
-  }
-  return config.strategy.strategy === "bid_ask";
-}
 
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
@@ -246,8 +140,6 @@ const toolMap = {
       // screening
       minFeeActiveTvlRatio: ["screening", "minFeeActiveTvlRatio"],
       excludeHighSupplyConcentration: ["screening", "excludeHighSupplyConcentration"],
-      discoveryPageSize: ["screening", "discoveryPageSize"],
-      excludeHighSingleOwnership: ["screening", "excludeHighSingleOwnership"],
       minTvl: ["screening", "minTvl"],
       maxTvl: ["screening", "maxTvl"],
       minVolume: ["screening", "minVolume"],
@@ -273,6 +165,16 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],
+      fallingKnifeVetoEnabled: ["screening", "fallingKnifeVetoEnabled"],
+      fallingKnifeMaxPriceChange1hPct: ["screening", "fallingKnifeMaxPriceChange1hPct"],
+      fallingKnifeSeverePriceChangePct: ["screening", "fallingKnifeSeverePriceChangePct"],
+      fallingKnifeMinSellBuyRatio: ["screening", "fallingKnifeMinSellBuyRatio"],
+      fallingKnifeRequireOversoldRsi: ["screening", "fallingKnifeRequireOversoldRsi"],
+      suspiciousVolumeVetoEnabled: ["screening", "suspiciousVolumeVetoEnabled"],
+      suspiciousVolumeMaxMcapToGlobalFeesRatio: ["screening", "suspiciousVolumeMaxMcapToGlobalFeesRatio"],
+      suspiciousVolumeMinGlobalFeesSol: ["screening", "suspiciousVolumeMinGlobalFeesSol"],
+      suspiciousVolumeMaxTokenAgeHours: ["screening", "suspiciousVolumeMaxTokenAgeHours"],
+      suspiciousVolumeMinPriceDropPct: ["screening", "suspiciousVolumeMinPriceDropPct"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -286,13 +188,13 @@ const toolMap = {
       repeatDeployCooldownHours: ["management", "repeatDeployCooldownHours"],
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
-      repeatLowYieldCooldownEnabled: ["management", "repeatLowYieldCooldownEnabled"],
-      repeatLowYieldCooldownTriggerCount: ["management", "repeatLowYieldCooldownTriggerCount"],
-      repeatLowYieldCooldownLookbackHours: ["management", "repeatLowYieldCooldownLookbackHours"],
-      repeatLowYieldCooldownHours: ["management", "repeatLowYieldCooldownHours"],
-      repeatLowYieldCooldownScope: ["management", "repeatLowYieldCooldownScope"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
       stopLossPct: ["management", "stopLossPct"],
+      stopLossConfirmDelayMs: ["management", "stopLossConfirmDelayMs"],
+      hardStopLossPct: ["management", "hardStopLossPct"],
+      stopLossFastClosePct: ["management", "stopLossFastClosePct"],
+      stopLossVelocityWindowMs: ["management", "stopLossVelocityWindowMs"],
+      stopLossVelocityClosePct: ["management", "stopLossVelocityClosePct"],
       rollingDrawdownExitEnabled: ["management", "rollingDrawdownExitEnabled"],
       rollingDrawdownWindowMs: ["management", "rollingDrawdownWindowMs"],
       rollingDrawdownMinPeakPct: ["management", "rollingDrawdownMinPeakPct"],
@@ -303,6 +205,9 @@ const toolMap = {
       trailingTakeProfit: ["management", "trailingTakeProfit"],
       trailingTriggerPct: ["management", "trailingTriggerPct"],
       trailingDropPct: ["management", "trailingDropPct"],
+      profitGivebackEmergencyEnabled: ["management", "profitGivebackEmergencyEnabled"],
+      profitGivebackTriggerPct: ["management", "profitGivebackTriggerPct"],
+      profitGivebackFloorPct: ["management", "profitGivebackFloorPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       earlyDumpPct: ["management", "earlyDumpPct"],
       earlyDumpMaxAgeMin: ["management", "earlyDumpMaxAgeMin"],
@@ -319,14 +224,14 @@ const toolMap = {
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
       healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
-      // model routing is operator-only — not LLM-mutable
-      // performance classification
+      // performance outcome classification
       materialWinPct: ["performance", "materialWinPct"],
       materialLossPct: ["performance", "materialLossPct"],
       dustNeutralAbsPct: ["performance", "dustNeutralAbsPct"],
       neutralCloseReasonBuckets: ["performance", "neutralCloseReasonBuckets"],
       darwinUseMaterialOutcomes: ["performance", "darwinUseMaterialOutcomes"],
       darwinExcludeNeutralOutcomes: ["performance", "darwinExcludeNeutralOutcomes"],
+      // model routing is operator-only — not LLM-mutable
       // strategy
       strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "binsBelow"],
@@ -441,51 +346,39 @@ export async function executeTool(name, args) {
   }
 
   if (name === "deploy_position") {
-    const forceSingleSide = shouldForceSingleSidedSolBidAsk();
-    const computedDeployAmountSol = forceSingleSide && process.env.DRY_RUN !== "true"
-      ? computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol)
-      : config.management.deployAmountSol;
+    const forcedDeployAmountSol = process.env.DRY_RUN === "true"
+      ? config.management.deployAmountSol
+      : computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol);
+    const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
     const forcedDeploy = normalizeForcedSingleSidedSolBidAskArgs(args, {
-      force: forceSingleSide,
-      deployAmountSol: Number.isFinite(computedDeployAmountSol) ? computedDeployAmountSol : config.management.deployAmountSol,
-      binsBelow: config.strategy.binsBelow,
+      force: config.strategy.forceSingleSidedSolBidAsk || activeRangePolicy.singleSidedSol,
+      deployAmountSol: Number.isFinite(forcedDeployAmountSol) ? forcedDeployAmountSol : config.management.deployAmountSol,
+      strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
+      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsBelowMin: activeRangePolicy.binsBelowMin,
+      binsBelowMax: activeRangePolicy.binsBelowMax,
+      binsAbove: activeRangePolicy.binsAbove ?? 0,
     });
     if (!forcedDeploy.ok) {
-      const duration = Date.now() - startTime;
       log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);
-      logAction({
-        tool: name,
-        args,
-        result: {
-          blocked: true,
-          guard: "forced_single_side_bidask",
-          retryable_tool_args: forcedDeploy.retryableToolArgs === true,
-          reason: forcedDeploy.reason,
-          details: forcedDeploy.details ?? null,
-        },
-        duration_ms: duration,
-        success: false,
-      });
-      appendDecision({
-        type: "deploy_guard",
+      appendDecisionContext({
+        stage: "deploy_reject",
         actor: "SCREENER",
-        pool: args?.pool_address,
-        pool_name: args?.pool_name || args?.pool_address,
-        summary: "Blocked malformed SOL-only bid_ask deploy args before safety checks",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
         reason: forcedDeploy.reason,
-        risks: ["No on-chain deploy attempt was made"],
-        metrics: {
-          guard: "forced_single_side_bidask",
-          attempted: args,
+        deploy: {
+          forced_single_side_bidask: true,
+          args,
           details: forcedDeploy.details ?? null,
         },
-        rejected: ["forced_single_side_bidask_args"],
+        source: "executor.forced_single_side_bidask",
       });
       return {
         success: false,
         blocked: true,
         retryable_tool_args: forcedDeploy.retryableToolArgs === true,
-        guard: "forced_single_side_bidask",
         reason: forcedDeploy.reason,
         details: forcedDeploy.details ?? null,
       };
@@ -501,51 +394,24 @@ export async function executeTool(name, args) {
     const safetyCheck = await runSafetyChecks(name, args);
     if (!safetyCheck.pass) {
       log("safety_block", `${name} blocked: ${safetyCheck.reason}`);
-      if (name === "deploy_position" && ["deploy_guard", "deploy_thresholds"].includes(safetyCheck.guard)) {
-        const duration = Date.now() - startTime;
-        const rejectedCodes = (safetyCheck.failures || []).map((failure) => failure.code);
-        const risks = (safetyCheck.failures || []).map((failure) => failure.message);
-        const metrics = safetyCheck.audit || {
-          guard: safetyCheck.guard,
-          failures: safetyCheck.failures || [],
-          attempted: {
-            pool_address: args.pool_address ?? args.pool ?? null,
-            pool_name: args.pool_name ?? null,
-            deploy_args: { ...args },
-          },
-        };
-        logAction({
-          tool: name,
-          args,
-          result: {
-            blocked: true,
-            reason: safetyCheck.reason,
-            guard: safetyCheck.guard,
-            failures: safetyCheck.failures || [],
-            audit: safetyCheck.audit || null,
-          },
-          duration_ms: duration,
-          success: false,
-        });
-        appendDecision({
-          type: "deploy_guard",
+      if (name === "deploy_position") {
+        appendDecisionContext({
+          stage: "deploy_reject",
           actor: "SCREENER",
-          pool: args.pool_address || safetyCheck.audit?.attempted?.pool_address,
-          pool_name: args.pool_name || safetyCheck.audit?.attempted?.pool_name,
-          summary: safetyCheck.guard === "deploy_thresholds"
-            ? "Blocked deploy_position by fresh threshold recheck"
-            : "Blocked deploy_position before execution",
+          pool: args?.pool_address ?? null,
+          poolName: args?.pool_name ?? null,
+          baseMint: args?.base_mint ?? null,
           reason: safetyCheck.reason,
-          risks,
-          metrics,
-          rejected: rejectedCodes,
+          deploy: {
+            safety_block: true,
+            args,
+          },
+          source: "executor.safety_block",
         });
       }
       return {
         blocked: true,
         reason: safetyCheck.reason,
-        ...(safetyCheck.guard ? { guard: safetyCheck.guard } : {}),
-        ...(safetyCheck.failures ? { failures: safetyCheck.failures } : {}),
       };
     }
   }
@@ -553,16 +419,19 @@ export async function executeTool(name, args) {
   // ─── Execute ──────────────────────────────
   try {
     const result = await fn(args);
-    const duration = Date.now() - startTime;
+    let duration = Date.now() - startTime;
     const success = result?.success !== false && !result?.error;
+    const delayCloseActionLog = name === "close_position";
 
-    logAction({
-      tool: name,
-      args,
-      result: summarizeResult(result),
-      duration_ms: duration,
-      success,
-    });
+    if (!delayCloseActionLog) {
+      logAction({
+        tool: name,
+        args,
+        result: summarizeResult(result),
+        duration_ms: duration,
+        success,
+      });
+    }
 
     if (success) {
       if (name === "swap_token" && result.tx) {
@@ -577,7 +446,8 @@ export async function executeTool(name, args) {
           if (poolAddr) addPoolNote({ pool_address: poolAddr, note: `Closed: low yield (fee/TVL below threshold) at ${new Date().toISOString().slice(0,10)}` }).catch?.(() => {});
         }
         // Auto-swap base token back to SOL unless user said to hold
-        if (!args.skip_swap && result.base_mint) {
+        if (!args.skip_swap && !result.skip_post_close_swap && result.base_mint) {
+          const autoSwapStartedAt = Date.now();
           try {
             const balances = await getWalletBalances({});
             const token = balances.tokens?.find(t => t.mint === result.base_mint);
@@ -588,10 +458,21 @@ export async function executeTool(name, args) {
               result.auto_swapped = true;
               result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
               if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
+              if (result.adaptive_close) {
+                result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+                result.adaptive_close.final_sol_received = swapResult?.amount_out ?? null;
+              }
             }
           } catch (e) {
+            if (result.adaptive_close) {
+              result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+              result.adaptive_close.post_close_swap_error = e.message;
+            }
             log("executor_warn", `Auto-swap after close failed: ${e.message}`);
           }
+        } else if (result.skip_post_close_swap && result.adaptive_close) {
+          result.adaptive_close.post_close_swap_ms = 0;
+          result.adaptive_close.post_close_swap_skipped = true;
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
@@ -605,6 +486,17 @@ export async function executeTool(name, args) {
           log("executor_warn", `Auto-swap after claim failed: ${e.message}`);
         }
       }
+    }
+
+    if (delayCloseActionLog) {
+      duration = Date.now() - startTime;
+      logAction({
+        tool: name,
+        args,
+        result: summarizeResult(result),
+        duration_ms: duration,
+        success,
+      });
     }
 
     return result;
@@ -633,20 +525,6 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
-      const deployGuard = validateDeployCandidateLease(args, config.screening);
-      if (!deployGuard.pass) {
-        return {
-          pass: false,
-          reason: deployGuard.reason,
-          guard: "deploy_guard",
-          failures: deployGuard.failures,
-          audit: deployGuard.audit,
-        };
-      }
-
-      const poolThresholds = await validateDeployPoolThresholds(args);
-      if (!poolThresholds.pass) return poolThresholds;
-
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
@@ -758,6 +636,25 @@ async function runSafetyChecks(name, args) {
  * Summarize a result for logging (truncate large responses).
  */
 function summarizeResult(result) {
+  if (result?.adaptive_close) {
+    return {
+      success: result.success,
+      relay: result.relay,
+      close_mode: result.close_mode,
+      adaptive_close: result.adaptive_close,
+      position: result.position,
+      pool: result.pool,
+      pool_name: result.pool_name,
+      pnl_usd: result.pnl_usd,
+      pnl_pct: result.pnl_pct,
+      sol_received: result.sol_received,
+      auto_swapped: result.auto_swapped,
+      skip_post_close_swap: result.skip_post_close_swap,
+      txs: result.txs,
+      close_txs: result.close_txs,
+      error: result.error,
+    };
+  }
   const str = JSON.stringify(result);
   if (str.length > 1000) {
     return str.slice(0, 1000) + "...(truncated)";

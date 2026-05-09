@@ -33,16 +33,22 @@ const client = new OpenAI({
 });
 
 await client.chat.completions.create({
-  model: "deepseek-v4-flash",
+  model: "deepseek-v4-pro",
   messages: [{ role: "user", content: "ping" }],
   tools: [],
-  thinking: { type: "disabled" },
+  thinking: { type: "enabled" },
+  reasoning_effort: "high",
 });
 
 assert.deepStrictEqual(
   capturedBody.thinking,
-  { type: "disabled" },
+  { type: "enabled" },
   "thinking toggle should be serialized as a top-level DeepSeek parameter"
+);
+assert.strictEqual(
+  capturedBody.reasoning_effort,
+  "high",
+  "screening reasoning effort should be serialized as a top-level DeepSeek parameter"
 );
 assert.strictEqual(
   Object.hasOwn(capturedBody, "extra_body"),

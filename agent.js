@@ -5,15 +5,47 @@ import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const API_LOGS_PATH = path.join("/Users/marcelyuwono/Trading Project Files/DLMM/logs", "api_activity.jsonl");
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = __dirname;
+
+function dateKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function resolveApiLogsPath(date = new Date()) {
+  const configured = process.env.API_LOGS_PATH;
+  if (configured) {
+    if (configured.endsWith(".jsonl")) return configured;
+    return path.join(configured, `api-activity-${dateKey(date)}.jsonl`);
+  }
+  return path.join(REPO_ROOT, "logs", `api-activity-${dateKey(date)}.jsonl`);
+}
+
+function sanitizeErrorMessage(error) {
+  return String(error?.message || error?.error?.message || error || "")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/sk-[A-Za-z0-9_-]+/g, "sk-[redacted]")
+    .replace(/dashscope[_-]?[A-Za-z0-9_-]+/gi, "dashscope_[redacted]")
+    .slice(0, 500);
+}
+
+function sanitizeBaseUrlHost(baseUrl) {
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return "invalid";
+  }
+}
 
 function logApiActivity(data) {
   try {
-    if (!fs.existsSync(path.dirname(API_LOGS_PATH))) {
-      fs.mkdirSync(path.dirname(API_LOGS_PATH), { recursive: true });
+    const logPath = resolveApiLogsPath();
+    if (!fs.existsSync(path.dirname(logPath))) {
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
     }
-    fs.appendFileSync(API_LOGS_PATH, JSON.stringify({ timestamp: new Date().toISOString(), ...data }) + "\n");
+    fs.appendFileSync(logPath, JSON.stringify({ timestamp: new Date().toISOString(), ...data }) + "\n");
   } catch(e) {
     // Silent block to not disrupt the agent
   }
@@ -106,10 +138,73 @@ import { getStateSummary } from "./state.js";
 import { getLessonsForPrompt, getPerformanceSummary } from "./lessons.js";
 import { getDecisionSummary } from "./decision-log.js";
 
-// Supports OpenRouter (default) or any OpenAI-compatible endpoint (e.g. LM Studio, DashScope).
+// Supports OpenRouter (default) or any OpenAI-compatible endpoint (e.g. CLIProxy, DashScope).
 // Per-role endpoints can be set via screeningBaseUrl/screeningApiKey etc. in user-config.json.
-// Falls back to the global LLM_BASE_URL / LLM_API_KEY for any role without an override.
+// SCREENER can also define a provider-level fallback route.
 const _clientCache = new Map();
+function getClientForRoute(route) {
+  const cacheKey = `${route.role}:${route.routeKind}:${route.baseURL}:${route.apiKey ? "key" : "no-key"}`;
+  if (_clientCache.has(cacheKey)) return _clientCache.get(cacheKey);
+  const c = new OpenAI({ baseURL: route.baseURL, apiKey: route.apiKey || "NO_API_KEY", timeout: 5 * 60 * 1000 });
+  _clientCache.set(cacheKey, c);
+  return c;
+}
+
+function buildLlmRoute(agentType = "GENERAL", routeKind = "primary", modelOverride = null) {
+  const role = (agentType || "GENERAL").toUpperCase();
+  const llmCfg = config.llm;
+  const globalUrl = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
+  const globalKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
+
+  if (role === "SCREENER" && routeKind === "fallback" && llmCfg.screeningFallbackModel && llmCfg.screeningFallbackBaseUrl) {
+    return {
+      role,
+      routeKind,
+      model: llmCfg.screeningFallbackModel,
+      baseURL: llmCfg.screeningFallbackBaseUrl,
+      apiKey: llmCfg.screeningFallbackApiKey || globalKey,
+      reasoningEffort: null,
+    };
+  }
+
+  if (role === "SCREENER") {
+    return {
+      role,
+      routeKind: "primary",
+      model: modelOverride || llmCfg.screeningModel || process.env.LLM_MODEL || "openrouter/hunter-alpha",
+      baseURL: llmCfg.screeningBaseUrl || globalUrl,
+      apiKey: llmCfg.screeningApiKey || globalKey,
+      reasoningEffort: llmCfg.screeningReasoningEffort || null,
+    };
+  }
+
+  if (role === "MANAGER") {
+    return {
+      role,
+      routeKind: "primary",
+      model: modelOverride || llmCfg.managementModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
+      baseURL: llmCfg.managementBaseUrl || globalUrl,
+      apiKey: llmCfg.managementApiKey || globalKey,
+      // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
+      reasoningEffort: null,
+    };
+  }
+
+  return {
+    role,
+    routeKind: "primary",
+    model: modelOverride || llmCfg.generalModel || process.env.LLM_MODEL || "openrouter/healer-alpha",
+    baseURL: llmCfg.generalBaseUrl || globalUrl,
+    apiKey: llmCfg.generalApiKey || globalKey,
+    // MANAGER and GENERAL are dense non-reasoning routes; only SCREENER forwards reasoning_effort.
+    reasoningEffort: null,
+  };
+}
+
+function hasScreeningFallbackRoute() {
+  return Boolean(config.llm.screeningFallbackModel && config.llm.screeningFallbackBaseUrl);
+}
+
 function isOpenRouterBaseUrl(baseUrl) {
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
@@ -119,50 +214,42 @@ function isOpenRouterBaseUrl(baseUrl) {
   }
 }
 
-function getBaseUrlForRole(agentType = "GENERAL") {
-  const role = (agentType || "GENERAL").toUpperCase();
-  const llmCfg = config.llm;
-  const globalUrl = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
-  if (role === "SCREENER") return llmCfg.screeningBaseUrl || globalUrl;
-  if (role === "MANAGER") return llmCfg.managementBaseUrl || globalUrl;
-  return llmCfg.generalBaseUrl || globalUrl;
+function providerIgnoreForBaseUrl(baseUrl) {
+  return isOpenRouterBaseUrl(baseUrl) ? ["Parasail", "Nebius", "Together"] : [];
 }
 
-function isDeepSeekRoute(agentType = "GENERAL", model = "") {
-  return isDeepSeekBaseUrl(getBaseUrlForRole(agentType)) || isDeepSeekModel(model);
+function isDeepSeekRoute(route) {
+  return isDeepSeekBaseUrl(route?.baseURL) || isDeepSeekModel(route?.model);
 }
 
-function getDeepSeekThinkingType(agentType = "GENERAL") {
-  return (agentType || "GENERAL").toUpperCase() === "SCREENER" && config.llm.screeningThinkingEnabled ? "enabled" : "disabled";
-}
-
-function getClient(agentType = "GENERAL") {
-  const role = (agentType || "GENERAL").toUpperCase();
-  if (_clientCache.has(role)) return _clientCache.get(role);
-
-  const llmCfg = config.llm;
-  const globalUrl = process.env.LLM_BASE_URL || "https://openrouter.ai/api/v1";
-  const globalKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY;
-
-  let baseURL, apiKey;
-  if (role === "SCREENER") {
-    baseURL = llmCfg.screeningBaseUrl  || globalUrl;
-    apiKey  = llmCfg.screeningApiKey   || globalKey;
-  } else if (role === "MANAGER") {
-    baseURL = llmCfg.managementBaseUrl || globalUrl;
-    apiKey  = llmCfg.managementApiKey  || globalKey;
-  } else {
-    baseURL = llmCfg.generalBaseUrl    || globalUrl;
-    apiKey  = llmCfg.generalApiKey     || globalKey;
+function getDeepSeekThinkingForRoute(agentType, route) {
+  if (!isDeepSeekRoute(route)) return null;
+  if ((agentType || "").toUpperCase() === "SCREENER" && route.routeKind === "primary") {
+    return config.llm.screeningThinking === "enabled" ? "enabled" : "disabled";
   }
-
-  const timeout = role === "SCREENER" ? config.llm.screeningRequestTimeoutMs : 5 * 60 * 1000;
-  const c = new OpenAI({ baseURL, apiKey, timeout });
-  _clientCache.set(role, c);
-  return c;
+  return "disabled";
 }
 
-const DEFAULT_MODEL = process.env.LLM_MODEL || "openrouter/healer-alpha";
+function isDeepSeekThinkingRoute(agentType, route) {
+  return getDeepSeekThinkingForRoute(agentType, route) === "enabled";
+}
+
+function isTransientProviderError(error) {
+  const message = sanitizeErrorMessage(error);
+  const code = String(error?.code || error?.cause?.code || "");
+  const status = Number(error?.status || error?.response?.status || 0);
+  return (
+    status === 408 ||
+    status === 409 ||
+    status === 429 ||
+    status >= 500 ||
+    /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|timeout|timed out|socket hang up/i.test(`${code} ${message}`)
+  );
+}
+
+function isMalformedProviderResponse(response) {
+  return !response?.choices?.length;
+}
 
 const MUTATING_TOOL_INTENTS = /\b(deploy|open position|add liquidity|lp into|invest in|close|exit|withdraw|remove liquidity|claim|harvest|collect|swap|convert|sell|exchange|block|unblock|blacklist|add smart wallet|remove smart wallet|add wallet|remove wallet|pin|unpin|clear lesson|add lesson|set active strategy|remove strategy|add strategy|set |change |update |self.?update|pull latest|git pull|update yourself)\b/i;
 const LIVE_DATA_TOOL_INTENTS = /\b(balance|wallet|position|portfolio|pnl|yield|range|show positions|open positions|screen|candidate|find pool|search|research|analyze|check pool|token holders|narrative|study top|top lpers?|lp behavior|who.?s lping|performance|history|stats|report|list smart wallets|list blacklist|list blocked deployers|list lessons)\b/i;
@@ -210,6 +297,16 @@ function isToolChoiceRequiredError(error) {
   );
 }
 
+function buildAssistantHistoryMessage(msg) {
+  const historyMsg = {
+    role: msg.role || "assistant",
+    content: msg.content ?? null,
+  };
+  if (msg.reasoning_content) historyMsg.reasoning_content = msg.reasoning_content;
+  if (msg.tool_calls) historyMsg.tool_calls = msg.tool_calls;
+  return historyMsg;
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -253,26 +350,25 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
     log("agent", `Step ${step + 1}/${maxSteps}`);
 
     try {
-      const activeModel = model || DEFAULT_MODEL;
-
-      // Retry up to 3 times on transient provider errors (502, 503, 529)
+      // Retry transient provider failures; SCREENER can switch endpoint/model to a Qwen fallback route.
       const FALLBACK_MODEL = resolveFallbackModel(config.llm.fallbackModel);
       let response;
-      let usedModel = activeModel;
+      let activeRoute = buildLlmRoute(agentType, "primary", model);
+      let usedModel = activeRoute.model;
       // Force a tool call on step 0 for action intents — prevents the model from inventing deploy/close outcomes
       // GLM and similar models don't support tool_choice: "required" — use "auto" for those
       const ACTION_INTENTS = /\b(deploy|open|add liquidity|close|exit|withdraw|claim|swap|block|unblock)\b/i;
-      const modelSupportsRequiredToolChoice = !/glm|qwen|deepseek.*think/i.test(activeModel);
-      let toolChoice = (step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto";
-      let providerIgnore = isOpenRouterBaseUrl(getBaseUrlForRole(agentType))
-        ? ["Parasail", "Nebius", "Together"]
-        : [];
+      const omitToolChoice = isDeepSeekThinkingRoute(agentType, activeRoute);
+      const modelSupportsRequiredToolChoice = !omitToolChoice && !/glm|qwen|deepseek.*think/i.test(activeRoute.model);
+      let toolChoice = omitToolChoice ? undefined : ((step === 0 && modelSupportsRequiredToolChoice && (ACTION_INTENTS.test(goal) || mustUseRealTool)) ? "required" : "auto");
+      let providerIgnore = providerIgnoreForBaseUrl(activeRoute.baseURL);
+      let switchedToProviderFallback = false;
 
       for (let attempt = 0; attempt < 3; attempt++) {
         let startTime = Date.now();
         try {
           const callParams = {
-            model: usedModel,
+            model: activeRoute.model,
             messages,
             tools: getToolsForRole(agentType, goal),
             temperature: config.llm.temperature,
@@ -281,32 +377,40 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           };
           // Only include tool_choice if explicitly set — omitting it avoids DashScope thinking mode errors
           if (toolChoice !== undefined) callParams.tool_choice = toolChoice;
-          // DeepSeek V4 defaults thinking mode on; only SCREENER may opt into it.
-          if (isDeepSeekRoute(agentType, usedModel)) callParams.thinking = { type: getDeepSeekThinkingType(agentType) };
-          // Only SCREENER forwards reasoning_effort; MANAGER and GENERAL are dense non-reasoning routes.
-          if (agentType === "SCREENER" && config.llm.screeningReasoningEffort) {
-            callParams.reasoning_effort = config.llm.screeningReasoningEffort;
-          }
-          response = await getClient(agentType).chat.completions.create(callParams);
+          // DeepSeek V4 defaults thinking on; only SCREENER primary may opt into thinking.
+          const deepSeekThinking = getDeepSeekThinkingForRoute(agentType, activeRoute);
+          if (deepSeekThinking) callParams.thinking = { type: deepSeekThinking };
+          // Chat Completions uses reasoning_effort; Responses uses reasoning.effort.
+          if (activeRoute.reasoningEffort) callParams.reasoning_effort = activeRoute.reasoningEffort;
+          log("agent", `LLM route: role=${agentType} route=${activeRoute.routeKind} model=${activeRoute.model} host=${sanitizeBaseUrlHost(activeRoute.baseURL)} thinking=${deepSeekThinking || "n/a"} reasoning_effort=${activeRoute.reasoningEffort || "none"}`);
+          response = await getClientForRoute(activeRoute).chat.completions.create(callParams);
           logApiActivity({
-            agent: agentType,
-            model: usedModel,
-            reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null,
+            agent_role: agentType,
+            model: activeRoute.model,
+            base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
+            route_kind: activeRoute.routeKind,
+            thinking: deepSeekThinking || null,
+            reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "success",
-            tokens: response?.usage?.total_tokens || 0,
+            prompt_tokens: response?.usage?.prompt_tokens ?? null,
+            completion_tokens: response?.usage?.completion_tokens ?? null,
+            total_tokens: response?.usage?.total_tokens ?? null,
             cost: response?.usage?.cost || 0,
-            provider: response?.provider || "unknown"
+            provider: response?.provider || response?.system_fingerprint || "unknown",
           });
         } catch (error) {
           logApiActivity({
-            agent: agentType,
-            model: usedModel,
-            reasoning_effort: agentType === "SCREENER" ? (config.llm.screeningReasoningEffort || null) : null,
+            agent_role: agentType,
+            model: activeRoute.model,
+            base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
+            route_kind: activeRoute.routeKind,
+            thinking: getDeepSeekThinkingForRoute(agentType, activeRoute) || null,
+            reasoning_effort: activeRoute.reasoningEffort || null,
             duration_ms: Date.now() - startTime,
             status: "error",
-            error: String(error?.message || error?.error?.message || error),
-            provider: "unknown"
+            error: sanitizeErrorMessage(error),
+            provider: "unknown",
           });
           if (providerMode === "system" && isSystemRoleError(error)) {
             providerMode = "user_embedded";
@@ -329,13 +433,61 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
+          if (
+            agentType === "SCREENER" &&
+            activeRoute.routeKind === "primary" &&
+            hasScreeningFallbackRoute() &&
+            isTransientProviderError(error)
+          ) {
+            activeRoute = buildLlmRoute(agentType, "fallback");
+            usedModel = activeRoute.model;
+            providerIgnore = providerIgnoreForBaseUrl(activeRoute.baseURL);
+            switchedToProviderFallback = true;
+            log("agent", `SCREENER primary route failed (${sanitizeErrorMessage(error)}) — retrying via fallback ${activeRoute.model} on ${sanitizeBaseUrlHost(activeRoute.baseURL)}`);
+            attempt = -1;
+            continue;
+          }
           throw error;
         }
         if (response.choices?.length) break;
+        if (
+          agentType === "SCREENER" &&
+          activeRoute.routeKind === "primary" &&
+          hasScreeningFallbackRoute() &&
+          isMalformedProviderResponse(response)
+        ) {
+          logApiActivity({
+            agent_role: agentType,
+            model: activeRoute.model,
+            base_url_host: sanitizeBaseUrlHost(activeRoute.baseURL),
+            route_kind: activeRoute.routeKind,
+            thinking: getDeepSeekThinkingForRoute(agentType, activeRoute) || null,
+            reasoning_effort: activeRoute.reasoningEffort || null,
+            duration_ms: Date.now() - startTime,
+            status: "error",
+            error: "provider returned no choices",
+            provider: response?.provider || "unknown",
+          });
+          activeRoute = buildLlmRoute(agentType, "fallback");
+          usedModel = activeRoute.model;
+          providerIgnore = providerIgnoreForBaseUrl(activeRoute.baseURL);
+          switchedToProviderFallback = true;
+          log("agent", `SCREENER primary route returned no choices — retrying via fallback ${activeRoute.model}`);
+          attempt = -1;
+          continue;
+        }
         const errCode = response.error?.code;
         if (errCode === 502 || errCode === 503 || errCode === 529) {
           const wait = (attempt + 1) * 5000;
-          if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
+          if (agentType === "SCREENER" && activeRoute.routeKind === "primary" && hasScreeningFallbackRoute()) {
+            activeRoute = buildLlmRoute(agentType, "fallback");
+            usedModel = activeRoute.model;
+            providerIgnore = providerIgnoreForBaseUrl(activeRoute.baseURL);
+            switchedToProviderFallback = true;
+            log("agent", `SCREENER provider error ${errCode} — switching to fallback route ${activeRoute.model}`);
+            attempt = -1;
+          } else if (attempt === 1 && usedModel !== FALLBACK_MODEL) {
+            activeRoute = { ...activeRoute, model: FALLBACK_MODEL };
             usedModel = FALLBACK_MODEL;
             log("agent", `Switching to fallback model ${FALLBACK_MODEL}`);
           } else {
@@ -350,6 +502,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
       if (!response.choices?.length) {
         log("error", `Bad API response: ${JSON.stringify(response).slice(0, 200)}`);
         throw new Error(`API returned no choices: ${response.error?.message || JSON.stringify(response)}`);
+      }
+      if (switchedToProviderFallback) {
+        log("agent", `SCREENER response completed via fallback route ${activeRoute.model}`);
+      } else {
+        log("agent", `${agentType} response completed via primary route ${activeRoute.model}`);
       }
       const msg = response.choices[0].message;
       // Repair malformed tool call JSON before pushing to history —
@@ -371,7 +528,7 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           }
         }
       }
-      messages.push(msg);
+      messages.push(buildAssistantHistoryMessage(msg));
 
       // If the model didn't call any tools, it's done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
@@ -449,7 +606,8 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
           step,
         });
 
-        // Lock deploy_position after first attempt regardless of outcome — retrying is never right
+        // Lock deploy_position after first real attempt. Deterministic argument rejections
+        // can be corrected by the model without consuming the one useful deploy attempt.
         // For close/swap: only lock on success so genuine failures can be retried
         if (NO_RETRY_TOOLS.has(functionName) && result?.retryable_tool_args !== true) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);

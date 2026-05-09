@@ -1,30 +1,44 @@
 # Changelog
 
-## [upstream env + relay security hardening] — 2026-04-25 — envrypt loading and guarded relay signing — experimental
+## [relay guard evidence hardening] - 2026-04-25 - owner proof for guarded relay rollout
 
-### Security
-- Ported upstream envrypt-style env loading to `experimental`: `index.js`, `setup.js`, and `cli.js` now load through `envcrypt.js`; `.envrypt` is gitignored; `npm run env:encrypt` writes encrypted env values from `.env.raw`.
-- Relay-provided zap-out close/swap transactions now pass through a signing guard that requires expected static accounts, rejects unsafe owner SOL transfers, simulates before submit, enforces SOL debit limits, and blocks unrelated token debits.
-- Relay-provided zap-in deploy add-liquidity/swap transactions use the same guard so deploy-side relay transactions are verified before wallet signing.
-- Zap-out no longer falls back to local close after a relay submit attempt has started, avoiding duplicate close execution if a post-submit network error occurs.
+### Change: read-only guard exercise report
 
-### Verification
-- Added `scripts/verify-upstream-security-hardening.js`, a local-only synthetic proof for envrypt loading and relay signing guards.
-- `scripts/verify-patches.js` now includes the upstream env/relay proof alongside the early-dump cooldown proof.
-- Main runtime remains stopped; this is source parity only until an explicit main deploy/restart is requested.
+- Added `scripts/verify-relay-guard-evidence.js`, an owner-facing proof command that reports the live nanocap head, PM2 main/nanocap status, relay guard exercise status, and latest guard event time if any.
+- The relay status is explicit: `not_yet_exercised`, `guard_approved`, or `guard_rejected`; no real trade is forced just to produce evidence.
+- The proof command runs the `experimental` security verifier in a temporary checkout with installed dependencies linked, proving source-parity verifier execution without pulling or restarting main.
+- `scripts/verify-patches.js` now self-tests the relay guard evidence classifier.
 
 ---
 
-## [main early-dump cooldown fix] — 2026-04-24 — early dump is stop-loss-family
+## [upstream env + relay security hardening] — 2026-04-25 — envrypt loading and guarded relay signing — nanocap-v1
 
-### Fixed
-- Early-dump exits now preserve their original `Early dump: ...` close reason instead of being mislabeled as `Trailing TP: ...` in the direct PnL-poller close path.
-- `pool-memory.js` now treats early-dump close reasons as stop-loss-family cooldown events and writes both pool-level and base-mint/token cooldowns with the existing `stopLossCooldownHours` duration.
-- `/config` wording now says stop-loss bypasses the poll wait, clarifying that the fast close path bypasses the management/poller wait before close, not the post-close redeploy cooldown.
+### Change: port upstream security hardening without merging upstream wholesale
 
-### Verification
-- `scripts/verify-early-dump-cooldown.js` safely proves a synthetic legacy-prefixed early-dump close writes both cooldown records in a temporary pool-memory file.
-- `scripts/verify-patches.js` now includes that early-dump cooldown proof.
+- Added envrypt-style environment loading while preserving plain `.env` compatibility.
+- Added `.envrypt` ignore and `npm run env:encrypt` helper for optional local env obfuscation.
+- Wired `index.js`, `setup.js`, and `cli.js` through `envcrypt.js`; CLI keeps `~/.meridian/.env` support and can use `~/.meridian/.envrypt`.
+- Added relay transaction guard helpers that inspect static accounts, reject unsafe owner SOL transfers, simulate signed relay transactions, cap owner SOL debit, and reject unrelated token debits.
+- Hardened both zap-out close and zap-in deploy relay signing before submit; after a relay submit starts, close no longer falls back to the local close path for the same request.
+- Added synthetic proof in `scripts/verify-upstream-security-hardening.js`, wired into `scripts/verify-patches.js`.
+
+## [nanocap material-win metrics] — 2026-04-24 — Raw WR separated from Material WR — nanocap-v1
+
+### Change: Low-yield/dust closes no longer inflate strategy-health learning
+
+- Added `performance-metrics.js` as the canonical close-outcome classifier.
+- New performance records store `raw_win`, `material_outcome`, `material_win`,
+  `material_loss`, `neutral_reason`, and `close_reason_bucket`.
+- `getPerformanceSummary()`, `/thresholds`, morning briefing text, and pool memory now show
+  `Raw WR` beside `Material WR` and neutral/dust close counts.
+- Darwin signal recalculation uses material outcomes by default and excludes neutral
+  low-yield/operator/dust closes from learning samples.
+- Material outcome thresholds are live-tunable through operator-only `meridian config set`
+  and Telegram `/setcfg`; this changes reporting/Darwin learning classification only and
+  does not change stop-loss, TP, entry, sizing, routing, or GMGN policy.
+- Added read-only owner tools:
+  - `node scripts/verify-material-win-metrics.js`
+  - `node scripts/analyze-material-wins.js --actions logs --json`
 
 ---
 

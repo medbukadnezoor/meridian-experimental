@@ -13,7 +13,11 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
   if (!force) return { ok: true, args, repairs: [], forced: false };
 
   const deployAmountSol = finiteNumber(options.deployAmountSol);
-  const binsBelow = finiteNumber(options.binsBelow);
+  const binsBelowDefault = finiteNumber(options.binsBelow);
+  const binsBelowMin = finiteNumber(options.binsBelowMin);
+  const binsBelowMax = finiteNumber(options.binsBelowMax);
+  const targetStrategy = options.strategy || "bid_ask";
+  const targetBinsAbove = finiteNumber(options.binsAbove) ?? 0;
   const normalized = { ...args };
   const repairs = [];
 
@@ -32,18 +36,15 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
     normalized.amount_x = 0;
   }
 
-  if (normalized.strategy !== "bid_ask") {
-    withRepair(repairs, "strategy", normalized.strategy, "bid_ask", "forced SOL-only deploy strategy");
-    normalized.strategy = "bid_ask";
+  if (normalized.strategy !== targetStrategy) {
+    withRepair(repairs, "strategy", normalized.strategy, targetStrategy, "forced single-sided deploy strategy from active config");
+    normalized.strategy = targetStrategy;
   }
 
   const binsAbove = finiteNumber(normalized.bins_above);
-  if (binsAbove != null && binsAbove > 0) {
-    withRepair(repairs, "bins_above", normalized.bins_above, 0, "forced SOL-only bid_ask has no upside bins");
-    normalized.bins_above = 0;
-  } else if (normalized.bins_above !== 0) {
-    withRepair(repairs, "bins_above", normalized.bins_above, 0, "forced SOL-only bid_ask pins upper bin to active bin");
-    normalized.bins_above = 0;
+  if (binsAbove !== targetBinsAbove) {
+    withRepair(repairs, "bins_above", normalized.bins_above, targetBinsAbove, "forced single-sided deploy pins upside bins from active config");
+    normalized.bins_above = targetBinsAbove;
   }
 
   const upsidePct = finiteNumber(normalized.upside_pct);
@@ -67,7 +68,7 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
         "amount_y",
         suppliedAmount,
         deployAmountSol,
-        "forced SOL-only deploy uses the full computed deploy amount",
+        "forced single-sided deploy uses the full configured deploy amount",
       );
       normalized.amount_y = deployAmountSol;
       delete normalized.amount_sol;
@@ -78,9 +79,20 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
     }
   }
 
-  if (binsBelow != null && binsBelow > 0 && (normalized.bins_below == null || finiteNumber(normalized.bins_below) === 0)) {
-    withRepair(repairs, "bins_below", normalized.bins_below, binsBelow, "forced SOL-only deploy uses configured downside bins");
-    normalized.bins_below = binsBelow;
+  const suppliedBinsBelow = finiteNumber(normalized.bins_below);
+  let nextBinsBelow = suppliedBinsBelow;
+  if (nextBinsBelow == null || nextBinsBelow <= 0) {
+    nextBinsBelow = binsBelowDefault;
+  }
+  if (binsBelowMin != null && nextBinsBelow != null && nextBinsBelow < binsBelowMin) {
+    nextBinsBelow = binsBelowMin;
+  }
+  if (binsBelowMax != null && nextBinsBelow != null && nextBinsBelow > binsBelowMax) {
+    nextBinsBelow = binsBelowMax;
+  }
+  if (nextBinsBelow != null && nextBinsBelow > 0 && suppliedBinsBelow !== nextBinsBelow) {
+    withRepair(repairs, "bins_below", normalized.bins_below, nextBinsBelow, "forced single-sided deploy uses active strategy/config downside bins");
+    normalized.bins_below = nextBinsBelow;
   }
 
   return {

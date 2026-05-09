@@ -1,0 +1,61 @@
+{
+  "active": "nanocap_mean_reversion",
+  "strategies": {
+    "nanocap_mean_reversion": {
+      "id": "nanocap_mean_reversion",
+      "name": "Nanocap Mean Reversion Accumulator",
+      "author": "meridian-nanocap-v1",
+      "lp_strategy": "bid_ask",
+      "token_criteria": {
+        "mcap_range": "$30k-$600k",
+        "notes": "Nanocap and low microcap tokens that have recently dumped hard. Prefer tokens with real narrative and organic volume - not freshly launched, not near ATH. Token must have a DLMM pool on Meteora. Current live discovery is GMGN-first with direct Meteora Pool Discovery/detail validation before deploy. RSI(2) <= 30 on the 5-minute chart is required before deploy. Do NOT deploy into pumps or tokens near ATH. You are bottom-fishing: waiting for a V-shaped dump and catching the bounce as an LP."
+      },
+      "entry": {
+        "condition": "RSI(2) <= 30 on 5_MINUTE confirmed - deploy SOL-only into bins below current price",
+        "single_side": "sol",
+        "notes": "Deploy SOL only (amount_y, amount_x=0). All liquidity sits below the current price. As the token dumps further into your range, SOL is passively converted to token at progressively lower prices - DCA averaging. On the bounce, token converts back to SOL plus fees earned throughout the dip. Zero-slippage entry. Deploy only after a clear dump."
+      },
+      "range": {
+        "type": "default",
+        "bins_above": 0,
+        "bins_below": 85,
+        "notes": "Default 85 bins below, 0 above. Live deploys may clamp/adjust around this configured wide downside range while preserving SOL-only bid_ask shape. bins_above MUST stay 0 - SOL-only deployment."
+      },
+      "exit": {
+        "take_profit_pct": 25,
+        "trailing": true,
+        "trailing_trigger_pct": 6,
+        "trailing_drop_pct": 3,
+        "profit_giveback_trigger_pct": 6,
+        "profit_giveback_floor_pct": 2,
+        "stop_loss_pct": -8,
+        "hard_stop_loss_pct": -15,
+        "early_dump_pct": -8,
+        "notes": "Current live exits: absolute TP at 25%, trailing TP enabled at +6% with 3pp giveback, profit-giveback emergency enabled at peak >= 6% with floor 2%, soft stop-loss -8% with 15s confirmation, hard stop-loss -15%, early dump -8% within 20 minutes, low-yield close after 60m, and OOR hard-close/rebalance handling. Do not scale or tighten profit exits from this strategy text alone; use snapshot replay and a shadow/default-off canary first."
+      },
+      "best_for": "Nanocap mean-reversion: catching V-shaped bounces in $30k-$600k MCap tokens after RSI(2) <= 30 dumps with zero entry slippage via passive DLMM accumulation",
+      "added_at": "2026-04-13T11:00:00.000Z",
+      "updated_at": "2026-05-08T13:05:00.000Z"
+    },
+    "sol_dca_accumulator": {
+      "id": "sol_dca_accumulator",
+      "name": "SOL DCA Accumulator (fallback)",
+      "author": "meridian",
+      "lp_strategy": "bid_ask",
+      "token_criteria": {},
+      "entry": {
+        "single_side": "sol"
+      },
+      "range": {
+        "type": "default",
+        "bins_below": 85,
+        "bins_above": 0,
+        "notes": "85 bins below entry, 0 above - SOL-only accumulation"
+      },
+      "exit": {},
+      "best_for": "Accumulating a token on dips using SOL-only bid-ask while earning fees on every swap",
+      "added_at": "2026-04-13T11:00:00.000Z",
+      "updated_at": "2026-04-13T11:00:00.000Z"
+    }
+  }
+}
