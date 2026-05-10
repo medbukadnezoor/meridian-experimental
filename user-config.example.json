@@ -119,7 +119,7 @@
   "emergencyPriceDropPct": -15,
   "earlyDumpPct": -8,
   "earlyDumpMaxAgeMin": 20,
-  "stopLossCooldownHours": 2,
+  "stopLossCooldownHours": 1,
 
   "takeProfitPct": 25,
   "takeProfitFeePct": 2,
