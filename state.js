@@ -575,6 +575,28 @@ export function getTrackedPosition(position_address) {
   return state.positions[position_address] || null;
 }
 
+export function markOhlcvDrawdownShadowTriggersLogged(position_address, triggers = []) {
+  if (!Array.isArray(triggers) || triggers.length === 0) return false;
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos || pos.closed) return false;
+
+  const logged = pos.ohlcv_drawdown_shadow_logged && typeof pos.ohlcv_drawdown_shadow_logged === "object"
+    ? pos.ohlcv_drawdown_shadow_logged
+    : {};
+  let changed = false;
+  for (const trigger of triggers) {
+    if (!trigger?.ruleId || logged[trigger.ruleId]) continue;
+    logged[trigger.ruleId] = trigger.ts ?? new Date().toISOString();
+    changed = true;
+  }
+
+  if (!changed) return false;
+  pos.ohlcv_drawdown_shadow_logged = logged;
+  save(state);
+  return true;
+}
+
 /**
  * Summarize state for the agent system prompt.
  */
