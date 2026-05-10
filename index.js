@@ -14,7 +14,7 @@ import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike } from "./state.js";
-import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy } from "./strategy-library.js";
+import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy, computeDownsideBinsForPct } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -1910,8 +1910,22 @@ async function deployLatestCandidate(index) {
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
-  const binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
   const binsAbove = activeRangePolicy.binsAbove ?? 0;
+
+  // Compute bins_below: if strategy uses target_downside_pct, derive from pool bin_step
+  let binsBelow;
+  if (activeRangePolicy.targetDownsidePct != null && candidate.bin_step) {
+    const computed = computeDownsideBinsForPct(activeRangePolicy.targetDownsidePct, candidate.bin_step);
+    const minBins = config.strategy.minSingleSidedSolBins ?? 1;
+    const clamped = computed != null ? Math.max(minBins, computed) : null;
+    // Also clamp to strategy min/max if set
+    const clampedMin = activeRangePolicy.binsBelowMin != null ? Math.max(activeRangePolicy.binsBelowMin, clamped ?? 0) : clamped;
+    const clampedMax = activeRangePolicy.binsBelowMax != null && clampedMin != null ? Math.min(activeRangePolicy.binsBelowMax, clampedMin) : clampedMin;
+    binsBelow = clampedMax;
+    log("deploy", `[target_downside] bins_below=${binsBelow} computed from targetDownsidePct=${activeRangePolicy.targetDownsidePct}% bin_step=${candidate.bin_step} (min=${minBins})`);
+  } else {
+    binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
+  }
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,

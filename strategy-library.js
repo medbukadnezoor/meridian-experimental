@@ -203,13 +203,16 @@ export function getActiveStrategy() {
 
 export function resolveStrategyRangePolicy(strategy = null, runtimeConfig = {}) {
   const range = strategy?.range ?? {};
-  const binsBelowDefault = finiteNumber(range.bins_below) ?? finiteNumber(runtimeConfig?.strategy?.binsBelow);
-  const binsBelowMin = finiteNumber(range.bins_below_min) ?? null;
-  const binsBelowMax = finiteNumber(range.bins_below_max) ?? null;
-  const binsAbove = finiteNumber(range.bins_above);
+  // Compute targetDownsidePct first — if set, it takes precedence over fixed bins
   const targetDownsidePct = finiteNumber(range.target_downside_pct) ?? finiteNumber(runtimeConfig?.strategy?.targetDownsidePct);
   const targetDownsideMinPct = finiteNumber(range.target_downside_min_pct) ?? finiteNumber(runtimeConfig?.strategy?.targetDownsideMinPct);
   const targetDownsideMaxPct = finiteNumber(range.target_downside_max_pct) ?? finiteNumber(runtimeConfig?.strategy?.targetDownsideMaxPct);
+  // When targetDownsidePct is set and range has no explicit bins_below, do NOT fall through to config default.
+  // The bins will be computed per-pool from bin_step at deploy time.
+  const binsBelowDefault = finiteNumber(range.bins_below) ?? (targetDownsidePct != null ? null : finiteNumber(runtimeConfig?.strategy?.binsBelow));
+  const binsBelowMin = finiteNumber(range.bins_below_min) ?? null;
+  const binsBelowMax = finiteNumber(range.bins_below_max) ?? null;
+  const binsAbove = finiteNumber(range.bins_above);
   const lpStrategy = strategy?.lp_strategy || runtimeConfig?.strategy?.strategy || "bid_ask";
   const singleSide = String(strategy?.entry?.single_side || range.single_side || "").toLowerCase();
   const singleSidedSol = singleSide === "sol" || range.single_sided_sol === true;
@@ -241,7 +244,11 @@ export function describeRangePolicyForPrompt(policy = {}) {
   const parts = [];
   if (policy.lpStrategy) parts.push(`strategy=${policy.lpStrategy}`);
   if (policy.singleSidedSol) parts.push("single-sided SOL");
-  if (policy.binsBelowDefault != null) parts.push(`default bins_below=${policy.binsBelowDefault}`);
+  if (policy.binsBelowDefault != null && policy.targetDownsidePct == null) {
+    parts.push(`default bins_below=${policy.binsBelowDefault}`);
+  } else if (policy.targetDownsidePct != null && policy.binsBelowDefault == null) {
+    parts.push(`compute bins_below from target_downside and pool bin_step (do NOT use a fixed bins_below number)`);
+  }
   if (policy.binsBelowMin != null || policy.binsBelowMax != null) {
     parts.push(`bins_below bounds=[${policy.binsBelowMin ?? "none"}, ${policy.binsBelowMax ?? "none"}]`);
   }
