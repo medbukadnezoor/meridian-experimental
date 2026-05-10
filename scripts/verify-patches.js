@@ -27,6 +27,7 @@ const EARLY_DUMP_COOLDOWN_VERIFIER_PATH = join(__dirname, "verify-early-dump-coo
 const STOP_LOSS_TRIAL_BEHAVIOR_VERIFIER_PATH = join(__dirname, "verify-stop-loss-trial-behavior.js");
 const EMERGENCY_STOP_POLICY_VERIFIER_PATH = join(__dirname, "verify-emergency-stop-policy.js");
 const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolling-drawdown-exit-policy.js");
+const OHLCV_DRAWDOWN_SHADOW_VERIFIER_PATH = join(__dirname, "verify-ohlcv-drawdown-shadow.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
 const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap-single-side-bidask.js");
@@ -174,6 +175,22 @@ function runRollingDrawdownExitPolicyProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-rolling-drawdown-exit-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runOhlcvDrawdownShadowProof() {
+  const result = spawnSync(process.execPath, [OHLCV_DRAWDOWN_SHADOW_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-ohlcv-drawdown-shadow failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -527,6 +544,7 @@ function buildChecks() {
   const stopLossBehaviorProof = runStopLossTrialBehaviorProof();
   const emergencyStopProof = runEmergencyStopPolicyProof();
   const rollingDrawdownExitProof = runRollingDrawdownExitPolicyProof();
+  const ohlcvDrawdownShadowProof = runOhlcvDrawdownShadowProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
   const nanocapSingleSideBidAskProof = runNanocapSingleSideBidAskProof();
@@ -995,6 +1013,19 @@ function buildChecks() {
         src.includes("rollingDrawdownMinDropPct: u.rollingDrawdownMinDropPct ?? 4"),
     },
     {
+      file: "config-builder.js",
+      label: "[OHLCV drawdown shadow] shadow observation config maps into runtime config",
+      test: (src) =>
+        src.includes("ohlcvDrawdownShadowEnabled: u.ohlcvDrawdownShadowEnabled ?? true") &&
+        src.includes("ohlcvDrawdownShadowBotName") &&
+        src.includes("ohlcvDrawdownShadowAggregateMin: u.ohlcvDrawdownShadowAggregateMin ?? 1") &&
+        src.includes("ohlcvDrawdownShadowEntryDrawdownPct: u.ohlcvDrawdownShadowEntryDrawdownPct ?? -20") &&
+        src.includes("ohlcvDrawdownShadowHighDrawdownPct: u.ohlcvDrawdownShadowHighDrawdownPct ?? -25") &&
+        src.includes("ohlcvDrawdownShadowPnlDivergenceMinPnlPct: u.ohlcvDrawdownShadowPnlDivergenceMinPnlPct ?? -2") &&
+        src.includes("ohlcvDrawdownShadowCombinedPeakPct: u.ohlcvDrawdownShadowCombinedPeakPct ?? 2") &&
+        src.includes("ohlcvDrawdownShadowCombinedCurrentPnlPct: u.ohlcvDrawdownShadowCombinedCurrentPnlPct ?? 0"),
+    },
+    {
       file: "tools/executor.js",
       label: "[Rolling drawdown] update_config maps operator-tunable rolling drawdown fields",
       test: (src) =>
@@ -1003,6 +1034,20 @@ function buildChecks() {
         src.includes('rollingDrawdownMinPeakPct: ["management", "rollingDrawdownMinPeakPct"]') &&
         src.includes('rollingDrawdownCurrentPnlPct: ["management", "rollingDrawdownCurrentPnlPct"]') &&
         src.includes('rollingDrawdownMinDropPct: ["management", "rollingDrawdownMinDropPct"]'),
+    },
+    {
+      file: "tools/executor.js",
+      label: "[OHLCV drawdown shadow] update_config maps shadow observation fields only",
+      test: (src) =>
+        src.includes('ohlcvDrawdownShadowEnabled: ["management", "ohlcvDrawdownShadowEnabled"]') &&
+        src.includes('ohlcvDrawdownShadowBotName: ["management", "ohlcvDrawdownShadowBotName"]') &&
+        src.includes('ohlcvDrawdownShadowAggregateMin: ["management", "ohlcvDrawdownShadowAggregateMin"]') &&
+        src.includes('ohlcvDrawdownShadowEntryDrawdownPct: ["management", "ohlcvDrawdownShadowEntryDrawdownPct"]') &&
+        src.includes('ohlcvDrawdownShadowHighDrawdownPct: ["management", "ohlcvDrawdownShadowHighDrawdownPct"]') &&
+        src.includes('ohlcvDrawdownShadowPnlDivergenceMinPnlPct: ["management", "ohlcvDrawdownShadowPnlDivergenceMinPnlPct"]') &&
+        src.includes('ohlcvDrawdownShadowCombinedPeakPct: ["management", "ohlcvDrawdownShadowCombinedPeakPct"]') &&
+        src.includes('ohlcvDrawdownShadowCombinedCurrentPnlPct: ["management", "ohlcvDrawdownShadowCombinedCurrentPnlPct"]') &&
+        !src.includes("ohlcvDrawdownShadowCloseEnabled"),
     },
     {
       file: "config-builder.js",
@@ -1068,6 +1113,62 @@ function buildChecks() {
         src.includes("appendPnlSnapshot(result.wallet, p, exit)") &&
         src.includes('event: "pnl_snapshot"') &&
         src.includes("stopCandidate"),
+    },
+    {
+      file: "state.js",
+      label: "[OHLCV drawdown shadow] state helper dedupes first trigger per position/rule without returning an exit",
+      test: (src) =>
+        ohlcvDrawdownShadowProof?.success === true &&
+        src.includes("markOhlcvDrawdownShadowTriggersLogged") &&
+        src.includes("ohlcv_drawdown_shadow_logged") &&
+        !src.includes("action: \"OHLCV_DRAWDOWN\"") &&
+        !src.includes("action: \"COMBINED_PROFIT_OHLCV\""),
+    },
+    {
+      file: "ohlcv-drawdown-shadow.js",
+      label: "[OHLCV drawdown shadow] GeckoTerminal OHLCV rules emit shadow-only drawdown and combined guard rows",
+      test: (src) =>
+        ohlcvDrawdownShadowProof?.success === true &&
+        ohlcvDrawdownShadowProof?.shadowOnly === true &&
+        ohlcvDrawdownShadowProof?.combinedRows?.includes("ohlcv_entry_drawdown") &&
+        ohlcvDrawdownShadowProof?.combinedRows?.includes("ohlcv_high_drawdown") &&
+        ohlcvDrawdownShadowProof?.combinedRows?.includes("ohlcv_pnl_divergence") &&
+        ohlcvDrawdownShadowProof?.combinedRows?.includes("combined_profit_ohlcv_drawdown") &&
+        ohlcvDrawdownShadowProof?.entryOnlyRows?.join(",") === "ohlcv_entry_drawdown" &&
+        ohlcvDrawdownShadowProof?.disabledRows === 0 &&
+        ohlcvDrawdownShadowProof?.appendFailureRetry?.initialRows === 4 &&
+        ohlcvDrawdownShadowProof?.appendFailureRetry?.failureCaught === true &&
+        ohlcvDrawdownShadowProof?.appendFailureRetry?.rowsAfterFailure === 4 &&
+        ohlcvDrawdownShadowProof?.appendFailureRetry?.retryMarked === true &&
+        ohlcvDrawdownShadowProof?.appendFailureRetry?.rowsAfterRetry === 0 &&
+        ohlcvDrawdownShadowProof?.logRows === 9 &&
+        ohlcvDrawdownShadowProof?.tempStateFileCreated === true &&
+        ohlcvDrawdownShadowProof?.tempDirRemoved === true &&
+        src.includes("GeckoTerminal") &&
+        src.includes("combined_profit_ohlcv_drawdown") &&
+        src.includes("source: \"ohlcv-drawdown-shadow\"") &&
+        src.includes("shadowOnly: true") &&
+        !src.includes("close_position"),
+    },
+    {
+      file: "index.js",
+      label: "[OHLCV drawdown shadow] PnL update paths append async shadow rows without exit wiring",
+      test: (src) =>
+        src.includes("appendOhlcvDrawdownShadow") &&
+        src.includes("getOhlcvDrawdownShadowRows") &&
+        src.includes("appendOhlcvDrawdownShadowRows(rows") &&
+        src.includes("markOhlcvDrawdownShadowTriggersLogged(position.position, rows)") &&
+        src.includes("await appendOhlcvDrawdownShadow(livePositions?.wallet, p);") &&
+        src.includes("await appendOhlcvDrawdownShadow(result.wallet, p);") &&
+        src.includes("const exit = updatePnlAndCheckExits(p.position, p, config.management);"),
+    },
+    {
+      file: "ohlcv-drawdown-shadow-log.js",
+      label: "[OHLCV drawdown shadow] append-only JSONL writer uses daily ohlcv-drawdown-shadow logs",
+      test: (src) =>
+        src.includes("ohlcv-drawdown-shadow-${dateStr}.jsonl") &&
+        src.includes("appendFileSync") &&
+        src.includes("shadowOnly: true"),
     },
     {
       file: "state.js",
