@@ -296,6 +296,121 @@ export function buildFeeVelocityShadowRows(candidate = {}, screeningConfig = {},
       ? "requires post-close same-pool/base-mint revalidation before action"
       : "sameTickerSurfEnabled is false; shadow-only",
   };
+
+  // ─── Shadow Entry Indicator Signals ────────────────────────────────────────
+  // All 5 signals are shadow-only: they attach to fee_velocity_shadow in
+  // candidate metadata and get logged in action logs. They do NOT filter
+  // candidates, do NOT change screening behavior, do NOT affect position sizing.
+
+  // Signal 1: Price Direction Shadow
+  const priceChange1h = numberFromCandidate(candidate, [
+    "price_change_pct", "price_change_1h", "change_1h",
+    "stats_1h.price_change", "token_info.stats_1h.price_change",
+  ]);
+  const pumpThresholds = finiteNumberArray(screeningConfig.feeVelocityShadowPumpThresholds, [30, 50, 100]);
+  const price_direction_shadow = {
+    price_change_1h_pct: priceChange1h,
+    pump_risk: priceChange1h != null ? (
+      priceChange1h > 100 ? "extreme" :
+      priceChange1h > 50  ? "high" :
+      priceChange1h > 30  ? "moderate" :
+      priceChange1h > 0   ? "mild_up" :
+      priceChange1h > -20 ? "mild_down" : "dump"
+    ) : null,
+    threshold_verdicts: pumpThresholds.map((threshold) => ({
+      threshold_pct: threshold,
+      would_reject: priceChange1h != null ? priceChange1h > threshold : null,
+      label: `reject_if_1h_pump_gt_${threshold}pct`,
+    })),
+    note: "shadow_only — price direction check for post-pump entry risk",
+  };
+
+  // Signal 2: Sell Pressure Shadow
+  const sellVol = numberFromCandidate(candidate, [
+    "sell_vol", "stats_1h.sell_vol", "token_info.stats_1h.sell_vol",
+  ]);
+  const buyVol = numberFromCandidate(candidate, [
+    "buy_vol", "stats_1h.buy_vol", "token_info.stats_1h.buy_vol",
+  ]);
+  const sellBuyRatio = (sellVol != null && buyVol != null && buyVol > 0)
+    ? roundNumber(sellVol / buyVol, 3) : null;
+  const sellBuyThresholds = finiteNumberArray(screeningConfig.feeVelocityShadowSellBuyThresholds, [1.2, 1.5, 2.0]);
+  const sell_pressure_shadow = {
+    sell_vol: sellVol,
+    buy_vol: buyVol,
+    sell_buy_ratio: sellBuyRatio,
+    pressure_level: sellBuyRatio != null ? (
+      sellBuyRatio > 2.0 ? "heavy_sell" :
+      sellBuyRatio > 1.5 ? "moderate_sell" :
+      sellBuyRatio > 1.2 ? "mild_sell" :
+      sellBuyRatio > 0.8 ? "balanced" : "buy_pressure"
+    ) : null,
+    threshold_verdicts: sellBuyThresholds.map((threshold) => ({
+      threshold,
+      would_reject: sellBuyRatio != null ? sellBuyRatio > threshold : null,
+      label: `reject_if_sell_buy_gt_${String(threshold).replace(".", "_")}`,
+    })),
+    note: "shadow_only — sell pressure check for distribution vs accumulation",
+  };
+
+  // Signal 3: Volume/TVL Multiple Threshold Variants Shadow
+  const volTvlThresholds = finiteNumberArray(
+    screeningConfig.feeVelocityShadowVolTvlThresholds,
+    [3.5, 4.0, 4.5, 5.0, 6.0, 8.0],
+  );
+  const volume_tvl_threshold_shadow = {
+    volume_active_tvl_multiple: volumeActiveTvlMultiple,
+    threshold_verdicts: volTvlThresholds.map((threshold) => ({
+      threshold,
+      passes: volumeActiveTvlMultiple != null ? volumeActiveTvlMultiple >= threshold : null,
+      label: `passes_vol_tvl_gte_${String(threshold).replace(".", "_")}x`,
+    })),
+    note: "shadow_only — calibrate optimal minVolumeActiveTvlMultiple threshold",
+  };
+
+  // Signal 4: Fee Velocity Momentum Shadow
+  const tokenAgeHours = numberFromCandidate(candidate, [
+    "token_age_hours", "token_info.token_age_hours",
+  ]);
+  const feeVelocityPerHour = feeVelocityUsdPerMin != null ? roundNumber(feeVelocityUsdPerMin * 60, 2) : null;
+  const feeVelocityPerAgeHour = (feeVelocityPerHour != null && tokenAgeHours != null && tokenAgeHours > 0)
+    ? roundNumber(feeVelocityPerHour / tokenAgeHours, 4) : null;
+  const fee_velocity_momentum_shadow = {
+    fee_velocity_usd_per_min: feeVelocityUsdPerMin,
+    fee_velocity_usd_per_hour: feeVelocityPerHour,
+    token_age_hours: tokenAgeHours,
+    fee_velocity_per_age_hour: feeVelocityPerAgeHour,
+    age_risk: tokenAgeHours != null ? (
+      tokenAgeHours < 1  ? "very_young_lt_1h" :
+      tokenAgeHours < 6  ? "young_lt_6h" :
+      tokenAgeHours < 24 ? "recent_lt_24h" : "established"
+    ) : null,
+    note: "shadow_only — fee velocity relative to token age for pump-and-dump risk",
+  };
+
+  // Signal 5: Organic Score vs Fee Velocity Shadow
+  const organicScore = numberFromCandidate(candidate, [
+    "organic_score", "base.organic", "token_x.organic_score",
+  ]);
+  const feeActiveTvlRatio = numberFromCandidate(candidate, [
+    "fee_active_tvl_ratio", "fee_tvl_ratio",
+  ]);
+  const quality_vs_velocity_shadow = {
+    organic_score: organicScore,
+    fee_active_tvl_ratio: feeActiveTvlRatio,
+    volume_active_tvl_multiple: volumeActiveTvlMultiple,
+    quality_signal: organicScore != null ? (
+      organicScore >= 70 ? "high_quality" :
+      organicScore >= 50 ? "moderate_quality" :
+      organicScore >= 30 ? "low_quality" : "very_low_quality"
+    ) : null,
+    // Combined quality+velocity score: high organic + high fee velocity = best
+    combined_score: (organicScore != null && volumeActiveTvlMultiple != null)
+      ? roundNumber((organicScore / 100) * Math.min(volumeActiveTvlMultiple / 5, 2), 3)
+      : null,
+    note: "shadow_only — organic quality vs fee velocity for wash trading risk",
+  };
+
   return {
     downside_pct_variants: downsideVariants,
     take_profit_pct_variants: takeProfitVariants,
@@ -310,6 +425,12 @@ export function buildFeeVelocityShadowRows(candidate = {}, screeningConfig = {},
       target_downside_min_bins: computeDownsideBinsForPct(rangePolicy.targetDownsideMinPct, binStep),
       target_downside_max_bins: computeDownsideBinsForPct(rangePolicy.targetDownsideMaxPct, binStep),
     },
+    // Shadow entry indicator signals — shadow-only, no live filtering
+    price_direction_shadow,
+    sell_pressure_shadow,
+    volume_tvl_threshold_shadow,
+    fee_velocity_momentum_shadow,
+    quality_vs_velocity_shadow,
   };
 }
 

@@ -573,6 +573,19 @@ function buildChecks() {
         scoutFeeVelocityLiveCanaryProof?.guardedOperationalWordingAbsent === true,
     },
     {
+      file: "strategy-library.js",
+      label: "[Scout] Fee-velocity entry shadow indicators — 5 signals, shadow-only, no live filtering",
+      test: (src) =>
+        src.includes("price_direction_shadow") &&
+        src.includes("sell_pressure_shadow") &&
+        src.includes("volume_tvl_threshold_shadow") &&
+        src.includes("fee_velocity_momentum_shadow") &&
+        src.includes("quality_vs_velocity_shadow") &&
+        src.includes("shadow_only") &&
+        !src.includes('pushFilteredReason(filteredOut, p, "price_direction') &&
+        !src.includes('pushFilteredReason(filteredOut, p, "sell_pressure'),
+    },
+    {
       file: "scripts/verify-scout-dual-source-discovery.js",
       label: "[Scout dual-source discovery] both mode resolves GMGN and Meteora before shared gates",
       test: () =>

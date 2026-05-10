@@ -189,6 +189,25 @@ const gmgnSource = read("tools/gmgn.js");
 assert.ok(gmgnSource.includes("volume_active_tvl_multiple: computeVolumeActiveTvlMultiple(condensed)"), "GMGN condensed candidates carry volume/aTVL metadata");
 assert.ok(gmgnSource.includes("fee_velocity_usd_per_min: estimateFeeVelocityUsdPerMin(condensed, config.screening)"), "GMGN condensed candidates carry fee-velocity metadata");
 
+// New shadow signals must not affect live screening or deploy decisions
+const stratLib = fs.readFileSync(path.join(ROOT, "strategy-library.js"), "utf8");
+const shadowFnStart = stratLib.indexOf("function buildFeeVelocityShadowRows");
+const shadowFnEnd = stratLib.indexOf("\nexport function enrichFeeVelocityCandidate");
+const shadowFnBody = stratLib.slice(shadowFnStart, shadowFnEnd);
+
+// Shadow signals must not call close, deploy, or screening filter functions
+assert.ok(!shadowFnBody.includes("close_position"), "shadow signals do not call close_position");
+assert.ok(!shadowFnBody.includes("deploy_position"), "shadow signals do not call deploy_position");
+assert.ok(!shadowFnBody.includes("pushFilteredReason"), "shadow signals do not filter candidates");
+assert.ok(!shadowFnBody.includes("return null"), "shadow signals do not short-circuit screening");
+
+// All new shadow fields must be present in the return object
+assert.ok(shadowFnBody.includes("price_direction_shadow"), "price_direction_shadow present");
+assert.ok(shadowFnBody.includes("sell_pressure_shadow"), "sell_pressure_shadow present");
+assert.ok(shadowFnBody.includes("volume_tvl_threshold_shadow"), "volume_tvl_threshold_shadow present");
+assert.ok(shadowFnBody.includes("fee_velocity_momentum_shadow"), "fee_velocity_momentum_shadow present");
+assert.ok(shadowFnBody.includes("quality_vs_velocity_shadow"), "quality_vs_velocity_shadow present");
+
 console.log(JSON.stringify({
   success: true,
   defaults: {
