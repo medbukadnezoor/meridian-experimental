@@ -292,6 +292,13 @@ export function buildConfig(userConfig = {}, env = process.env) {
       trailingTakeProfit: u.trailingTakeProfit ?? true,
       trailingTriggerPct: u.trailingTriggerPct ?? 3,
       trailingDropPct: u.trailingDropPct ?? 1.5,
+      // When true: TP (Rule 2) and confirmed trailing TP close directly — no LLM,
+      // no relay, no poll cooldown — same fast path as stop-loss.
+      // When false (legacy): TP goes through runManagementCycle → LLM → close_position.
+      tpDirectCloseEnabled: u.tpDirectCloseEnabled ?? true,
+      // When true: direct TP close uses urgent=true (priority fees, 2 tx attempts).
+      // When false: urgent=false (no priority fee bump, 1 attempt).
+      tpDirectCloseUrgent: u.tpDirectCloseUrgent ?? false,
       profitGivebackEmergencyEnabled: u.profitGivebackEmergencyEnabled ?? isNanocapPreset,
       profitGivebackTriggerPct: u.profitGivebackTriggerPct ?? (isNanocapPreset ? 6 : null),
       profitGivebackFloorPct: u.profitGivebackFloorPct ?? (isNanocapPreset ? 2 : null),

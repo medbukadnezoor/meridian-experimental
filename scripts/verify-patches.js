@@ -1707,6 +1707,46 @@ function buildChecks() {
       label: "[Upstream] Jupiter v2 swap endpoint present",
       test: (src) => src.includes("v6") || src.includes("jup.ag") || src.includes("jupiter"),
     },
+    {
+      file: "config-builder.js",
+      label: "[TP direct close] tpDirectCloseEnabled config field present",
+      test: (src) => src.includes("tpDirectCloseEnabled: u.tpDirectCloseEnabled ?? true"),
+    },
+    {
+      file: "config-builder.js",
+      label: "[TP direct close] tpDirectCloseUrgent config field present",
+      test: (src) => src.includes("tpDirectCloseUrgent: u.tpDirectCloseUrgent ?? false"),
+    },
+    {
+      file: "index.js",
+      label: "[TP direct close] Rule 2 TP bypasses LLM when tpDirectCloseEnabled",
+      test: (src) => src.includes("isTpRule && config.management.tpDirectCloseEnabled"),
+    },
+    {
+      file: "index.js",
+      label: "[TP direct close] Trailing recheck bypasses management cycle when tpDirectCloseEnabled",
+      test: (src) =>
+        src.includes("config.management.tpDirectCloseEnabled") &&
+        src.includes("[Trailing recheck] Confirmed trailing exit") &&
+        src.includes("closing directly (no LLM, no relay)"),
+    },
+    {
+      file: "index.js",
+      label: "[TP direct close] Confirmed trailing TP in PnL poller closes directly",
+      test: (src) =>
+        src.includes("exit.action === \"TRAILING_TP\" && exit.confirmed_recheck") &&
+        src.includes("[PnL poll] Confirmed trailing TP"),
+    },
+    {
+      file: "user-config.example.json",
+      label: "[TP direct close] tpDirectCloseEnabled present in example config",
+      test: (src) => src.includes('"tpDirectCloseEnabled"'),
+    },
+    {
+      file: "user-config.example.json",
+      label: "[TP direct close] tpDirectCloseUrgent present in example config",
+      test: (src) => src.includes('"tpDirectCloseUrgent"'),
+    },
   ];
 }
 

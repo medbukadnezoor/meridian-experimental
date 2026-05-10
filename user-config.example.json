@@ -123,6 +123,8 @@
   "trailingTakeProfit": true,
   "trailingTriggerPct": 6,
   "trailingDropPct": 3,
+  "tpDirectCloseEnabled": true,
+  "tpDirectCloseUrgent": false,
   "profitGivebackEmergencyEnabled": true,
   "profitGivebackTriggerPct": 6,
   "profitGivebackFloorPct": 2,

@@ -246,8 +246,30 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
-        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
-        runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
+        const pair = result?.positions?.find((p) => p.position === positionAddress)?.pair ?? positionAddress.slice(0, 8);
+        if (config.management.tpDirectCloseEnabled) {
+          const urgent = config.management.tpDirectCloseUrgent === true;
+          log("state", `[Trailing recheck] Confirmed trailing exit for ${pair} — closing directly (no LLM, no relay)`);
+          _pollTriggeredAt = Date.now();
+          executeTool("close_position", {
+            position_address: positionAddress,
+            reason: resolved.reason,
+            urgent,
+          }).then((closeResult) => {
+            if (closeResult?.success) {
+              log("state", `[Trailing recheck] Direct trailing close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
+            } else {
+              log("state", `[Trailing recheck] Direct trailing close failed for ${pair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
+              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing fallback management failed: ${e.message}`));
+            }
+          }).catch((e) => {
+            log("cron_error", `Direct trailing close error for ${pair}: ${e.message}`);
+            runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Trailing fallback management failed: ${e2.message}`));
+          });
+        } else {
+          log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
+        }
       }
     } catch (error) {
       log("state_warn", `Trailing drop confirmation failed for ${positionAddress}: ${error.message}`);
@@ -1279,9 +1301,36 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
+          // Confirmed trailing TP (recheck window) — close directly if tpDirectCloseEnabled
+          if (exit.action === "TRAILING_TP" && exit.confirmed_recheck) {
+            if (config.management.tpDirectCloseEnabled) {
+              const urgent = config.management.tpDirectCloseUrgent === true;
+              log("state", `[PnL poll] Confirmed trailing TP: ${p.pair} — ${exit.reason} — closing directly (no LLM, no relay)`);
+              _pollTriggeredAt = Date.now();
+              (async () => {
+                try {
+                  const closeResult = await executeTool("close_position", {
+                    position_address: p.position,
+                    reason: exit.reason,
+                    urgent,
+                  });
+                  if (closeResult?.success) {
+                    log("state", `[PnL poll] Direct trailing close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
+                  } else {
+                    log("state", `[PnL poll] Direct trailing close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
+                    runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing fallback management failed: ${e.message}`));
+                  }
+                } catch (e) {
+                  log("cron_error", `Direct trailing close error: ${e.message}`);
+                  runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Trailing fallback management failed: ${e2.message}`));
+                }
+              })();
+              break;
+            }
+            // tpDirectCloseEnabled=false: fall through to management trigger below
+          }
           // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
           const isStopLoss = exit.action === "STOP_LOSS";
-          if (isStopLoss) {
             log("state", `[PnL poll] URGENT stop-loss: ${p.pair} — ${exit.reason} — closing directly (no cooldown, no LLM)`);
             _pollTriggeredAt = Date.now();
             (async () => {
@@ -1364,6 +1413,32 @@ Summarize the current portfolio health, total fees earned, and performance of al
               } catch (e) {
                 log("cron_error", `Direct deterministic stop-loss error: ${e.message}`);
                 runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              }
+            })();
+            break;
+          }
+          // Rule 2 (take profit) — bypass cooldown and LLM when tpDirectCloseEnabled
+          const isTpRule = closeRule.rule === 2;
+          if (isTpRule && config.management.tpDirectCloseEnabled) {
+            const urgent = config.management.tpDirectCloseUrgent === true;
+            log("state", `[PnL poll] Direct TP: ${p.pair} — Rule 2: ${closeRule.reason} — closing directly (no LLM, no relay)`);
+            _pollTriggeredAt = Date.now();
+            (async () => {
+              try {
+                const result = await executeTool("close_position", {
+                  position_address: p.position,
+                  reason: closeRule.reason,
+                  urgent,
+                });
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct TP close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("state", `[PnL poll] Direct TP close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `TP fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Direct TP close error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `TP fallback management failed: ${e2.message}`));
               }
             })();
             break;
