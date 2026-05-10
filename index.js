@@ -13,7 +13,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, getProfitProtectionShadowTriggers, markProfitProtectionShadowTriggersLogged } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, getProfitProtectionShadowTriggers, markProfitProtectionShadowTriggersLogged, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -30,6 +30,8 @@ import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 import { appendProfitProtectionShadowRows } from "./profit-protection-shadow-log.js";
+import { getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
+import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -87,6 +89,7 @@ const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 const PNL_SNAPSHOT_LOG_DIR = "./logs";
 let _pnlSnapshotWarningLogged = false;
 let _profitProtectionShadowWarningLogged = false;
+let _ohlcvDrawdownShadowWarningLogged = false;
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
@@ -173,6 +176,26 @@ function appendProfitProtectionShadow(wallet, position) {
     if (!_profitProtectionShadowWarningLogged) {
       _profitProtectionShadowWarningLogged = true;
       log("state_warn", `Profit-protection shadow logging failed: ${error.message}`);
+    }
+  }
+}
+
+async function appendOhlcvDrawdownShadow(wallet, position) {
+  try {
+    const tracked = getTrackedPosition(position.position);
+    const rows = await getOhlcvDrawdownShadowRows({
+      position,
+      tracked,
+      wallet,
+      mgmtConfig: config.management,
+    });
+    if (!rows.length) return;
+    appendOhlcvDrawdownShadowRows(rows, { wallet, logDir: PNL_SNAPSHOT_LOG_DIR });
+    markOhlcvDrawdownShadowTriggersLogged(position.position, rows);
+  } catch (error) {
+    if (!_ohlcvDrawdownShadowWarningLogged) {
+      _ohlcvDrawdownShadowWarningLogged = true;
+      log("state_warn", `OHLCV drawdown shadow logging failed: ${error.message}`);
     }
   }
 }
@@ -461,6 +484,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       }
       const exit = updatePnlAndCheckExits(p.position, p, config.management);
       appendProfitProtectionShadow(livePositions?.wallet, p);
+      await appendOhlcvDrawdownShadow(livePositions?.wallet, p);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
           if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
@@ -1115,6 +1139,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
         }
         const exit = updatePnlAndCheckExits(p.position, p, config.management);
         appendProfitProtectionShadow(result.wallet, p);
+        await appendOhlcvDrawdownShadow(result.wallet, p);
         appendPnlSnapshot(result.wallet, p, exit);
         if (exit) {
           if (exit.action === "STOP_LOSS_CANDIDATE" && exit.needs_confirmation) {
