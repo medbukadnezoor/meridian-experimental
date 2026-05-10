@@ -1331,6 +1331,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
           const isStopLoss = exit.action === "STOP_LOSS";
+          if (isStopLoss) {
             log("state", `[PnL poll] URGENT stop-loss: ${p.pair} — ${exit.reason} — closing directly (no cooldown, no LLM)`);
             _pollTriggeredAt = Date.now();
             (async () => {
@@ -1441,7 +1442,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
                 runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `TP fallback management failed: ${e2.message}`));
               }
             })();
-            break;
+            break; // eslint-disable-line no-unreachable -- break is outside the IIFE, inside the for loop
           }
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
           if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
