@@ -13,7 +13,7 @@ import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -28,7 +28,10 @@ import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
-import { activeBinOracleRecorder } from "./active-bin-oracle.js";
+import { ActiveBinOracleRecorder } from "./active-bin-oracle.js";
+import { createPoolLiquidityFlowProvider } from "./lp-withdrawal-shadow-provider.js";
+import { createLiquidityShapeProvider } from "./lptele2-shape-provider.js";
+import { createSwapPressureProvider } from "./lptele4-swap-pressure-provider.js";
 import { getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
 import {
@@ -49,6 +52,30 @@ startHiveMindBackgroundSync();
 
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
+const poolLiquidityFlowProvider = createPoolLiquidityFlowProvider({
+  rpcUrl: process.env.RPC_URL,
+  signatureLimit: config.oracle?.providers?.whaleEscape?.signatureLimit,
+  maxWindowMs: config.oracle?.providers?.whaleEscape?.maxWindowMs,
+  logger: log,
+});
+const lptele2LiquidityShapeProvider = createLiquidityShapeProvider({
+  rpcUrl: process.env.RPC_URL,
+  binsBelow: config.oracle?.providers?.liquidityShape?.binsBelow,
+  binsAbove: config.oracle?.providers?.liquidityShape?.binsAbove,
+  logger: log,
+});
+const lptele4SwapPressureProvider = createSwapPressureProvider({
+  rpcUrl: process.env.RPC_URL,
+  signatureLimit: config.oracle?.providers?.swapPressure?.signatureLimit,
+  sellThresholdUsd: config.oracle?.providers?.swapPressure?.sellThresholdUsd,
+  logger: log,
+});
+const activeBinOracleRecorder = new ActiveBinOracleRecorder({
+  lpteleProviderConfig: config.oracle?.providers,
+  getPoolLiquidityFlowFn: poolLiquidityFlowProvider,
+  getLptele2LiquidityShapeFn: lptele2LiquidityShapeProvider,
+  getLptele4SwapPressureFn: lptele4SwapPressureProvider,
+});
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -1135,7 +1162,11 @@ export async function runScreeningCycle({ silent = false } = {}) {
       ].filter(Boolean).join("\n");
 
       if (config.darwin?.enabled) {
-        stageSignals(pool.pool, pool.darwin_signal_snapshot || getCandidateSignalSnapshot(pool));
+        const baseMint = pool.base?.mint || pool.base_mint || ti?.mint || null;
+        stageSignals(pool.pool, {
+          ...(pool.darwin_signal_snapshot || getCandidateSignalSnapshot(pool)),
+          base_mint: baseMint,
+        });
       }
 
       return block;
@@ -1285,6 +1316,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
@@ -1991,7 +2023,11 @@ async function deployLatestCandidate(index) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
   if (config.darwin?.enabled && candidate.pool) {
-    stageSignals(candidate.pool, candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate));
+    const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
+    stageSignals(candidate.pool, {
+      ...(candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate)),
+      base_mint: baseMint,
+    });
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);

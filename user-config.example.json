@@ -8,6 +8,26 @@
   "llmModel": "deepseek-v4-flash",
   "dryRun": false,
 
+  "oracle": {
+    "providers": {
+      "whaleEscape": {
+        "enabled": false,
+        "signatureLimit": 50,
+        "maxWindowMs": 1800000
+      },
+      "liquidityShape": {
+        "enabled": false,
+        "binsBelow": 5,
+        "binsAbove": 3
+      },
+      "swapPressure": {
+        "enabled": false,
+        "signatureLimit": 50,
+        "sellThresholdUsd": 500
+      }
+    }
+  },
+
   "deployAmountSol": 1.5,
   "maxPositions": 2,
   "minSolToOpen": 0.5,

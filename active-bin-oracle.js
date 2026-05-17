@@ -14,6 +14,27 @@ const RANGE_PROXIMITY_ROLLING_MS = 60_000;
 const RANGE_EDGE_MIN_BINS = 2;
 const RANGE_EDGE_MAX_BINS = 6;
 const RANGE_EDGE_WIDTH_PCT = 0.10;
+const PROVIDER_DISABLED_SOURCE = "provider_disabled";
+const PROVIDER_UNWIRED_SOURCE = "provider_unwired";
+const PROVIDER_ERROR_SOURCE = "provider_error";
+
+const LPTELE_PROVIDER_DEFS = Object.freeze({
+  whaleEscape: {
+    healthKey: "whale_escape",
+    dataSourceField: "whale_escape_data_source",
+    fnName: "getPoolLiquidityFlowFn",
+  },
+  liquidityShape: {
+    healthKey: "lptele2_liquidity_shape",
+    dataSourceField: "lptele2_liquidity_shape_data_source",
+    fnName: "getLptele2LiquidityShapeFn",
+  },
+  swapPressure: {
+    healthKey: "lptele4_swap_pressure",
+    dataSourceField: "lptele4_swap_pressure_data_source",
+    fnName: "getLptele4SwapPressureFn",
+  },
+});
 
 export const WHALE_ESCAPE_NULL_FIELDS = Object.freeze({
   pool_lp_net_dep_usd_5m: null,
@@ -31,6 +52,7 @@ export const LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS = Object.freeze({
   token_reserves_in_active_bin_usd: null,
   adjacent_bin_liquidity_cliff_pct: null,
   your_share_of_active_bin_tvl_pct: null,
+  your_share_of_active_bin_tvl_pct_reason: null,
   lptele2_liquidity_shape_data_source: null,
 });
 
@@ -41,6 +63,7 @@ export const LPTELE4_SWAP_PRESSURE_NULL_FIELDS = Object.freeze({
   largest_single_sell_usd_5m: null,
   n_sells_over_threshold_5m: null,
   swap_slippage_p95_5m: null,
+  swap_slippage_p95_5m_reason: null,
   lptele4_swap_pressure_data_source: null,
 });
 
@@ -114,6 +137,28 @@ function normalizeWhaleEscapeDataSource(value) {
   return trimmed ? trimmed : null;
 }
 
+function normalizeLpteleProviderConfig(providerConfig = {}) {
+  const p = providerConfig && typeof providerConfig === "object" ? providerConfig : {};
+  return {
+    whaleEscape: {
+      enabled: p.whaleEscape?.enabled === true,
+    },
+    liquidityShape: {
+      enabled: p.liquidityShape?.enabled === true,
+    },
+    swapPressure: {
+      enabled: p.swapPressure?.enabled === true,
+    },
+  };
+}
+
+function annotateDataSource(fields, dataSourceField, source) {
+  return {
+    ...fields,
+    [dataSourceField]: source,
+  };
+}
+
 export function normalizeWhaleEscapeFlow(flow = {}) {
   if (!flow || typeof flow !== "object") return { ...WHALE_ESCAPE_NULL_FIELDS };
   return {
@@ -155,6 +200,9 @@ export function normalizeLptele2LiquidityShape(shape = {}) {
         ?? asNumber(shape.yourShareOfActiveBinTvlPct)
         ?? asNumber(shape.positionShareOfActiveBinTvlPct),
     ),
+    your_share_of_active_bin_tvl_pct_reason: normalizeWhaleEscapeDataSource(
+      shape.your_share_of_active_bin_tvl_pct_reason ?? shape.positionShareReason,
+    ),
     lptele2_liquidity_shape_data_source: normalizeWhaleEscapeDataSource(
       shape.lptele2_liquidity_shape_data_source ?? shape.dataSource,
     ),
@@ -175,6 +223,9 @@ export function normalizeLptele4SwapPressure(pressure = {}) {
     ),
     swap_slippage_p95_5m: roundNumber(
       asNumber(pressure.swap_slippage_p95_5m) ?? asNumber(pressure.swapSlippageP95_5m),
+    ),
+    swap_slippage_p95_5m_reason: normalizeWhaleEscapeDataSource(
+      pressure.swap_slippage_p95_5m_reason ?? pressure.slippageReason,
     ),
     lptele4_swap_pressure_data_source: normalizeWhaleEscapeDataSource(
       pressure.lptele4_swap_pressure_data_source ?? pressure.dataSource,
@@ -595,6 +646,7 @@ export class ActiveBinOracleRecorder {
     getPoolLiquidityFlowFn = null,
     getLptele2LiquidityShapeFn = null,
     getLptele4SwapPressureFn = null,
+    lpteleProviderConfig = {},
   } = {}) {
     this.connection = connection;
     this.rpcUrl = rpcUrl;
@@ -611,6 +663,7 @@ export class ActiveBinOracleRecorder {
     this.getPoolLiquidityFlowFn = typeof getPoolLiquidityFlowFn === "function" ? getPoolLiquidityFlowFn : null;
     this.getLptele2LiquidityShapeFn = typeof getLptele2LiquidityShapeFn === "function" ? getLptele2LiquidityShapeFn : null;
     this.getLptele4SwapPressureFn = typeof getLptele4SwapPressureFn === "function" ? getLptele4SwapPressureFn : null;
+    this.lpteleProviderConfig = normalizeLpteleProviderConfig(lpteleProviderConfig);
     this.positionsByPool = new Map();
     this.subscriptions = new Map();
     this.pendingSubscriptions = new Set();
@@ -622,6 +675,49 @@ export class ActiveBinOracleRecorder {
 
   getLogFile(now = this.now()) {
     return path.join(this.logDir, `active-bin-oracle-${todayIso(now)}.jsonl`);
+  }
+
+  getProviderHealthLogFile(now = this.now()) {
+    return path.join(this.logDir, `lptele-provider-health-${todayIso(now)}.jsonl`);
+  }
+
+  getProviderState(providerKey) {
+    const definition = LPTELE_PROVIDER_DEFS[providerKey];
+    const enabled = this.lpteleProviderConfig[providerKey]?.enabled === true;
+    const fn = this[definition.fnName];
+    if (!enabled) {
+      return {
+        provider_key: providerKey,
+        provider: definition.healthKey,
+        status: "disabled",
+        data_source: PROVIDER_DISABLED_SOURCE,
+      };
+    }
+    if (typeof fn !== "function") {
+      return {
+        provider_key: providerKey,
+        provider: definition.healthKey,
+        status: "unwired",
+        data_source: PROVIDER_UNWIRED_SOURCE,
+      };
+    }
+    return {
+      provider_key: providerKey,
+      provider: definition.healthKey,
+      status: "wired",
+      data_source: null,
+    };
+  }
+
+  appendProviderHealth({ observedAt, pool, activeBin, positions, providerHealth }) {
+    appendJsonl(this.getProviderHealthLogFile(observedAt), {
+      timestamp: observedAt.toISOString(),
+      pool,
+      active_bin: activeBin,
+      position_count: Array.isArray(positions) ? positions.length : 0,
+      providers: providerHealth,
+      source: "lptele_provider_health",
+    });
   }
 
   setEmergencyExitHandler(handler, {
@@ -766,30 +862,71 @@ export class ActiveBinOracleRecorder {
       positions,
       history,
     };
-    let whaleEscapeFlow = { ...WHALE_ESCAPE_NULL_FIELDS };
-    if (this.getPoolLiquidityFlowFn) {
+    const providerHealth = {
+      whale_escape: this.getProviderState("whaleEscape"),
+      lptele2_liquidity_shape: this.getProviderState("liquidityShape"),
+      lptele4_swap_pressure: this.getProviderState("swapPressure"),
+    };
+    let whaleEscapeFlow = annotateDataSource(
+      WHALE_ESCAPE_NULL_FIELDS,
+      "whale_escape_data_source",
+      providerHealth.whale_escape.data_source,
+    );
+    if (providerHealth.whale_escape.status === "wired") {
       try {
         whaleEscapeFlow = normalizeWhaleEscapeFlow(await this.getPoolLiquidityFlowFn(telemetryContext));
+        providerHealth.whale_escape.data_source = whaleEscapeFlow.whale_escape_data_source;
       } catch (error) {
+        whaleEscapeFlow = annotateDataSource(WHALE_ESCAPE_NULL_FIELDS, "whale_escape_data_source", PROVIDER_ERROR_SOURCE);
+        providerHealth.whale_escape.status = "error";
+        providerHealth.whale_escape.data_source = PROVIDER_ERROR_SOURCE;
+        providerHealth.whale_escape.error = error.message;
         this.logger("active_bin_oracle_warn", `Whale Escape flow unavailable for ${pool.slice(0, 8)}: ${error.message}`);
       }
     }
-    let lptele2LiquidityShape = { ...LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS };
-    if (this.getLptele2LiquidityShapeFn) {
+    let lptele2LiquidityShape = annotateDataSource(
+      LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS,
+      "lptele2_liquidity_shape_data_source",
+      providerHealth.lptele2_liquidity_shape.data_source,
+    );
+    if (providerHealth.lptele2_liquidity_shape.status === "wired") {
       try {
         lptele2LiquidityShape = normalizeLptele2LiquidityShape(await this.getLptele2LiquidityShapeFn(telemetryContext));
+        providerHealth.lptele2_liquidity_shape.data_source = lptele2LiquidityShape.lptele2_liquidity_shape_data_source;
       } catch (error) {
+        lptele2LiquidityShape = annotateDataSource(
+          LPTELE2_LIQUIDITY_SHAPE_NULL_FIELDS,
+          "lptele2_liquidity_shape_data_source",
+          PROVIDER_ERROR_SOURCE,
+        );
+        providerHealth.lptele2_liquidity_shape.status = "error";
+        providerHealth.lptele2_liquidity_shape.data_source = PROVIDER_ERROR_SOURCE;
+        providerHealth.lptele2_liquidity_shape.error = error.message;
         this.logger("active_bin_oracle_warn", `LPTELE-2 liquidity shape unavailable for ${pool.slice(0, 8)}: ${error.message}`);
       }
     }
-    let lptele4SwapPressure = { ...LPTELE4_SWAP_PRESSURE_NULL_FIELDS };
-    if (this.getLptele4SwapPressureFn) {
+    let lptele4SwapPressure = annotateDataSource(
+      LPTELE4_SWAP_PRESSURE_NULL_FIELDS,
+      "lptele4_swap_pressure_data_source",
+      providerHealth.lptele4_swap_pressure.data_source,
+    );
+    if (providerHealth.lptele4_swap_pressure.status === "wired") {
       try {
         lptele4SwapPressure = normalizeLptele4SwapPressure(await this.getLptele4SwapPressureFn(telemetryContext));
+        providerHealth.lptele4_swap_pressure.data_source = lptele4SwapPressure.lptele4_swap_pressure_data_source;
       } catch (error) {
+        lptele4SwapPressure = annotateDataSource(
+          LPTELE4_SWAP_PRESSURE_NULL_FIELDS,
+          "lptele4_swap_pressure_data_source",
+          PROVIDER_ERROR_SOURCE,
+        );
+        providerHealth.lptele4_swap_pressure.status = "error";
+        providerHealth.lptele4_swap_pressure.data_source = PROVIDER_ERROR_SOURCE;
+        providerHealth.lptele4_swap_pressure.error = error.message;
         this.logger("active_bin_oracle_warn", `LPTELE-4 swap pressure unavailable for ${pool.slice(0, 8)}: ${error.message}`);
       }
     }
+    this.appendProviderHealth({ observedAt, pool, activeBin, positions, providerHealth });
     const rows = positions.map((position) => {
       const classification = classifyActiveBin(
         position,
@@ -876,5 +1013,3 @@ export class ActiveBinOracleRecorder {
     this.timers.clear();
   }
 }
-
-export const activeBinOracleRecorder = new ActiveBinOracleRecorder();
