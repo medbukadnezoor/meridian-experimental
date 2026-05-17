@@ -417,6 +417,28 @@ export function buildConfig(userConfig = {}, env = process.env) {
       lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
     },
 
+    oracle: {
+      providers: {
+        whaleEscape: {
+          enabled: u.oracle?.providers?.whaleEscape?.enabled === true,
+          signatureLimit: normalizePositiveInteger(u.oracle?.providers?.whaleEscape?.signatureLimit, 50),
+          maxWindowMs: normalizePositiveInteger(u.oracle?.providers?.whaleEscape?.maxWindowMs, 1_800_000),
+        },
+        liquidityShape: {
+          enabled: u.oracle?.providers?.liquidityShape?.enabled === true,
+          binsBelow: normalizePositiveInteger(u.oracle?.providers?.liquidityShape?.binsBelow, 5),
+          binsAbove: normalizePositiveInteger(u.oracle?.providers?.liquidityShape?.binsAbove, 3),
+        },
+        swapPressure: {
+          enabled: u.oracle?.providers?.swapPressure?.enabled === true,
+          signatureLimit: normalizePositiveInteger(u.oracle?.providers?.swapPressure?.signatureLimit, 50),
+          sellThresholdUsd: Number.isFinite(Number(u.oracle?.providers?.swapPressure?.sellThresholdUsd))
+            ? Number(u.oracle.providers.swapPressure.sellThresholdUsd)
+            : 500,
+        },
+      },
+    },
+
     jupiter: {
       apiKey: firstNonEmptyString(env.JUPITER_API_KEY) ?? "",
       referralAccount:
