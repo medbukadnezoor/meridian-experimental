@@ -1,4 +1,5 @@
-const GECKOTERMINAL_SOLANA_POOL_OHLCV = "https://api.geckoterminal.com/api/v2/networks/solana/pools";
+const BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv";
+const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY || "";
 const CACHE_TTL_MS = 25_000;
 const REQUEST_TIMEOUT_MS = 4_000;
 
@@ -39,33 +40,51 @@ function normalizeRows(payload) {
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
-async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+async function fetchBirdeyeOhlcv(baseMint, pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
   const aggregate = clampAggregate(aggregateMin);
   const before = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
-  const cacheKey = `${pool}:${aggregate}:${Math.floor(before / 30)}`;
+  const tokenAddress = baseMint || pool;
+  const cacheKey = `${tokenAddress}:${aggregate}:${Math.floor(before / 30)}`;
   const cached = ohlcvCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
 
-  const url = new URL(`${GECKOTERMINAL_SOLANA_POOL_OHLCV}/${pool}/ohlcv/minute`);
-  url.searchParams.set("aggregate", String(aggregate));
-  url.searchParams.set("before_timestamp", String(before));
-  url.searchParams.set("limit", "1000");
-  url.searchParams.set("currency", "usd");
-  url.searchParams.set("token", "base");
+  const typeMap = { 1: "1m", 5: "5m", 15: "15m" };
+  const timeFrom = before - (aggregate * 60 * 1000);
+  const url = new URL(BIRDEYE_OHLCV_URL);
+  url.searchParams.set("address", tokenAddress);
+  url.searchParams.set("type", typeMap[aggregate] || "1m");
+  url.searchParams.set("time_from", String(before - 86400));
+  url.searchParams.set("time_to", String(before));
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    const res = await fetch(url, {
+      headers: { accept: "application/json", "X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana" },
+      signal: controller.signal,
+    });
     const text = await res.text();
-    if (!res.ok) throw new Error(`GeckoTerminal OHLCV ${res.status}: ${text.slice(0, 160)}`);
+    if (!res.ok) throw new Error(`Birdeye OHLCV ${res.status}: ${text.slice(0, 160)}`);
     const payload = JSON.parse(text);
+    const items = payload?.data?.items || [];
+    const rows = items
+      .map((item) => ({
+        timestamp: Number(item.unixTime),
+        iso: Number.isFinite(Number(item.unixTime)) ? new Date(Number(item.unixTime) * 1000).toISOString() : null,
+        open: finiteNumberOrNull(item.o),
+        high: finiteNumberOrNull(item.h),
+        low: finiteNumberOrNull(item.l),
+        close: finiteNumberOrNull(item.c),
+        volumeUsd: finiteNumberOrNull(item.v),
+      }))
+      .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
+      .sort((a, b) => a.timestamp - b.timestamp);
     const value = {
-      source: "geckoterminal",
+      source: "birdeye",
       url: url.toString(),
       aggregateMin: aggregate,
-      rows: normalizeRows(payload),
-      meta: payload?.meta ?? null,
+      rows,
+      meta: null,
     };
     ohlcvCache.set(cacheKey, { cachedAt: Date.now(), value });
     return value;
@@ -73,7 +92,6 @@ async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp
     clearTimeout(timer);
   }
 }
-
 function selectEntryReference(rows, deployedAtMs) {
   if (!rows.length || !Number.isFinite(deployedAtMs)) return null;
   const deployedSec = Math.floor(deployedAtMs / 1000);
@@ -229,7 +247,8 @@ export async function getOhlcvDrawdownShadowRows({
   if (!Number.isFinite(deployedAtMs)) return [];
 
   const aggregateMin = mgmtConfig.ohlcvDrawdownShadowAggregateMin ?? 1;
-  const ohlcv = await fetchGeckoTerminalOhlcv(pool, {
+  const baseMint = position.base_mint ?? tracked?.base_mint ?? null;
+  const ohlcv = await fetchBirdeyeOhlcv(baseMint, pool, {
     aggregateMin,
     beforeTimestamp: Math.floor(nowMs / 1000),
   });
