@@ -20,14 +20,20 @@ assert.ok(source.includes("maxElapsedMs: 45_000"), "open-position relay should u
 assert.ok(source.includes("perAttemptTimeoutMs: 20_000"), "open-position relay should use a 20s per-attempt timeout");
 assert.ok(source.includes("maxAttempts: 2"), "open-position relay should make at most two attempts");
 assert.ok(
-  source.includes("Agent Meridian relay retry evidence enabled: open-position budget=45000ms perAttempt=20000ms maxAttempts=2"),
+  source.includes("Agent Meridian raw relay retry evidence enabled: open-position budget=45000ms perAttempt=20000ms maxAttempts=2"),
   "runtime logs should include a one-time deploy marker for the evidence patch",
 );
 assert.ok(
   source.includes("describeRetryEvidence(error)") &&
-    source.includes("Agent Meridian relay failed; trying LPAgent.io direct:"),
+    source.includes("Agent Meridian raw relay failed; trying LPAgent.io direct:"),
   "relay fallback warning should include retry evidence while preserving LPAgent fallback",
 );
+assert.ok(source.includes("/positions/open/raw?"), "relay open-position path should use raw LPAgent endpoint");
+assert.ok(source.includes("POSITION_OWNER_CACHE_TTL_MS = 10 * 60 * 1000"), "position owner verification should cache fresh reads for 10 minutes");
+assert.ok(source.includes("POSITION_OWNER_STALE_ON_429_TTL_MS = 60 * 60 * 1000"), "position owner verification should reuse stale cache during RPC 429 pressure");
+assert.ok(source.includes("function isRpcRateLimitReason(reason)"), "position owner guard should classify RPC rate-limit errors");
+assert.ok(source.includes("cached owner verification after RPC rate limit"), "position owner guard should fall back to cached ownership during RPC rate limits");
+assert.ok(source.includes("shouldLogPositionOwnerWarning(sourceLabel, positionAddress, ownership.reason)"), "position owner warning logs should be throttled");
 assert.ok(
   source.includes("isRetryableError(error)") &&
     source.includes('message.includes("aborted")'),
@@ -36,11 +42,11 @@ assert.ok(
 
 console.log(JSON.stringify({
   ok: true,
-  checks: 13,
+  checks: 18,
   relayOpenPositionBudget: {
     maxElapsedMs: 45_000,
     perAttemptTimeoutMs: 20_000,
     maxAttempts: 2,
   },
-  logMarker: "Agent Meridian relay retry evidence enabled",
+  logMarker: "Agent Meridian raw relay retry evidence enabled",
 }));

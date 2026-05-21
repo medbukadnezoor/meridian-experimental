@@ -35,6 +35,10 @@ import {
   computeVolumeActiveTvlMultiple,
   estimateFeeVelocityUsdPerMin,
 } from "../strategy-library.js";
+import {
+  fetchTopMeteoraDlmmPoolsForMint as fetchSharedMeteoraDlmmPoolsForMint,
+  pickBestMeteoraDlmmPool,
+} from "./meteora-pool-resolver.js";
 
 setDefaultResultOrder("ipv4first");
 
@@ -657,7 +661,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
         filtered.push({ stage: "gmgn_holders_traders", name: token.symbol || mint, reason: `smart wallets ${holdersCheck.smartHolding + holdersCheck.smartAccumulating} < ${g.minSmartDegenCount}` });
         continue;
       }
-      const topPools = await fetchTopMeteoraDlmmPoolsForMint(mint, minTvl, 2);
+      const topPools = await fetchSharedMeteoraDlmmPoolsForMint(mint, minTvl, 2);
       if (topPools.length === 0) {
         filtered.push({ stage: "gmgn_meteora_pool_map", name: token.symbol || mint, reason: `no SOL DLMM pool above tvl>${minTvl}` });
         continue;
@@ -674,7 +678,7 @@ export async function discoverGmgnPools({ limit = 10 } = {}) {
   for (const { token, info, infoCheck, holdersCheck, topPools, mint } of s3) {
     if (pools.length >= limit) break;
     try {
-      const { pool, detail: poolDetail } = await pickBestPool(topPools);
+      const { pool, detail: poolDetail } = await pickBestMeteoraDlmmPool(topPools);
       if (!pool) {
         filtered.push({ stage: "gmgn_candidate_shape", name: token.symbol || mint, reason: "pool selection failed" });
         continue;
