@@ -35,6 +35,7 @@ const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
+const POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH = join(__dirname, "verify-post-close-autoswap-logging.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -42,6 +43,10 @@ const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-b
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
 const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracle.js");
+const WHALE_ESCAPE_PROVIDER_WIRING_VERIFIER_PATH = join(__dirname, "verify-whale-escape-provider-wiring.js");
+const LP_WITHDRAWAL_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lp-withdrawal-provider.js");
+const LPTELE2_SHAPE_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lptele2-shape-provider.js");
+const LPTELE4_SWAP_PRESSURE_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lptele4-swap-pressure-provider.js");
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
@@ -307,6 +312,21 @@ function runRelayRetryEvidenceProof() {
   return JSON.parse(result.stdout);
 }
 
+function runPostCloseAutoswapLoggingProof() {
+  const result = spawnSync(process.execPath, [POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-post-close-autoswap-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runGpt54RiskReportSelfTest() {
   const result = spawnSync(process.execPath, [GPT54_RISK_REPORT_PATH, "--self-test"], {
     cwd: ROOT,
@@ -435,6 +455,70 @@ function runActiveBinOracleProof() {
   return JSON.parse(result.stdout);
 }
 
+function runWhaleEscapeProviderWiringProof() {
+  const result = spawnSync(process.execPath, [WHALE_ESCAPE_PROVIDER_WIRING_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-whale-escape-provider-wiring failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runLpWithdrawalProviderProof() {
+  const result = spawnSync(process.execPath, [LP_WITHDRAWAL_PROVIDER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-lp-withdrawal-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runLptele2ShapeProviderProof() {
+  const result = spawnSync(process.execPath, [LPTELE2_SHAPE_PROVIDER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-lptele2-shape-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runLptele4SwapPressureProviderProof() {
+  const result = spawnSync(process.execPath, [LPTELE4_SWAP_PRESSURE_PROVIDER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-lptele4-swap-pressure-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runAdaptiveCloseModeProof() {
   const result = spawnSync(process.execPath, [ADAPTIVE_CLOSE_MODE_VERIFIER_PATH], {
     cwd: ROOT,
@@ -535,6 +619,7 @@ function buildChecks() {
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
+  const postCloseAutoswapLoggingProof = runPostCloseAutoswapLoggingProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -542,6 +627,10 @@ function buildChecks() {
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
   const activeBinOracleProof = runActiveBinOracleProof();
+  const whaleEscapeProviderWiringProof = runWhaleEscapeProviderWiringProof();
+  const lpWithdrawalProviderProof = runLpWithdrawalProviderProof();
+  const lptele2ShapeProviderProof = runLptele2ShapeProviderProof();
+  const lptele4SwapPressureProviderProof = runLptele4SwapPressureProviderProof();
   const oorRepositionProof = runOorRepositionProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
@@ -622,6 +711,68 @@ function buildChecks() {
         activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
         activeBinOracleProof?.checks?.noRangeProximityExecutionConsumers === true &&
         activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
+    },
+    {
+      file: "scripts/verify-whale-escape-provider-wiring.js",
+      label: "[Whale Escape provider wiring] explicit disabled scaffold and health guard are detectable",
+      test: () =>
+        whaleEscapeProviderWiringProof?.success === true &&
+        whaleEscapeProviderWiringProof?.classification === "disabled_provider_scaffold" &&
+        whaleEscapeProviderWiringProof?.production_wiring?.production_constructor_has_explicit_args === true &&
+        whaleEscapeProviderWiringProof?.production_wiring?.production_uses_provider_config === true &&
+        whaleEscapeProviderWiringProof?.production_wiring?.whale_escape_provider_module_wired === true &&
+        whaleEscapeProviderWiringProof?.production_wiring?.lptele2_provider_module_wired === true &&
+        whaleEscapeProviderWiringProof?.production_wiring?.lptele4_provider_module_wired === true &&
+        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.whale_escape === "disabled" &&
+        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.lptele2_liquidity_shape === "disabled" &&
+        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.lptele4_swap_pressure === "disabled" &&
+        whaleEscapeProviderWiringProof?.health_guard?.provider_health?.hasHealthLogFile === true &&
+        whaleEscapeProviderWiringProof?.health_guard?.provider_data_sources?.providerDisabledSource === true &&
+        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.whale_escape_fields_preserved === true &&
+        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.lptele2_fields_preserved === true &&
+        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.lptele4_fields_preserved === true &&
+        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.disabled_health_rows_written === true &&
+        whaleEscapeProviderWiringProof?.execution_consumers?.has_whale_escape_or_lptele_execution_consumers === false,
+    },
+    {
+      file: "scripts/verify-lp-withdrawal-provider.js",
+      label: "[Whale Escape provider] LP add/remove TX decode provider is wired and shadow-only",
+      test: () =>
+        lpWithdrawalProviderProof?.success === true &&
+        lpWithdrawalProviderProof?.checks?.includes("mock LP remove counted") &&
+        lpWithdrawalProviderProof?.checks?.includes("bot wallet signer excluded") &&
+        lpWithdrawalProviderProof?.checks?.includes("mock swap ignored") &&
+        lpWithdrawalProviderProof?.checks?.includes("quiet pool returns zeros") &&
+        lpWithdrawalProviderProof?.checks?.includes("rate-limit source is explicit") &&
+        lpWithdrawalProviderProof?.checks?.includes("uses shared tx decode cache") &&
+        lpWithdrawalProviderProof?.checks?.includes("index wires pool liquidity provider"),
+    },
+    {
+      file: "scripts/verify-lptele2-shape-provider.js",
+      label: "[LPTELE-2 provider] bin-state liquidity shape provider is wired and shadow-only",
+      test: () =>
+        lptele2ShapeProviderProof?.success === true &&
+        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes active quote reserve") &&
+        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes below support") &&
+        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes liquidity cliff") &&
+        lptele2ShapeProviderProof?.checks?.includes("position share unavailable is explicit") &&
+        lptele2ShapeProviderProof?.checks?.includes("quiet bins return zeros") &&
+        lptele2ShapeProviderProof?.checks?.includes("error source is explicit") &&
+        lptele2ShapeProviderProof?.checks?.includes("index wires LPTELE-2 provider"),
+    },
+    {
+      file: "scripts/verify-lptele4-swap-pressure-provider.js",
+      label: "[LPTELE-4 provider] swap-pressure provider is wired and shadow-only",
+      test: () =>
+        lptele4SwapPressureProviderProof?.success === true &&
+        lptele4SwapPressureProviderProof?.checks?.includes("mock sell swap increases sell pressure") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("mock buy swap increases buy pressure") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("large sell threshold counted") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("LP events do not leak into swap pressure") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("slippage p95 deferred with explicit reason") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("quiet swaps return zeros") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("error source is explicit") &&
+        lptele4SwapPressureProviderProof?.checks?.includes("index wires LPTELE-4 provider"),
     },
     {
       file: "scripts/verify-adaptive-close-mode.js",
@@ -725,7 +876,18 @@ function buildChecks() {
         relayRetryEvidenceProof?.relayOpenPositionBudget?.maxElapsedMs === 45_000 &&
         relayRetryEvidenceProof?.relayOpenPositionBudget?.perAttemptTimeoutMs === 20_000 &&
         relayRetryEvidenceProof?.relayOpenPositionBudget?.maxAttempts === 2 &&
-        relayRetryEvidenceProof?.logMarker === "Agent Meridian relay retry evidence enabled",
+        relayRetryEvidenceProof?.logMarker === "Agent Meridian raw relay retry evidence enabled",
+    },
+    {
+      file: "scripts/verify-post-close-autoswap-logging.js",
+      label: "[Runtime] post-close autoswap cannot fail silently or log false success",
+      test: () =>
+        postCloseAutoswapLoggingProof?.success === true &&
+        postCloseAutoswapLoggingProof?.checks?.includes("swapToken failure return is gated before auto_swapped true") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("failed post-close autoswap records explicit residual metadata") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("successful post-close autoswap records SOL received") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("deploy is blocked by residual non-SOL token value") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("close action summary includes post-close swap truth fields"),
     },
     {
       file: "config-builder.js",

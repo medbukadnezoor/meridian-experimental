@@ -353,14 +353,14 @@ try {
   assert.strictEqual(rows[0].token_reserves_in_active_bin_usd, null);
   assert.strictEqual(rows[0].adjacent_bin_liquidity_cliff_pct, null);
   assert.strictEqual(rows[0].your_share_of_active_bin_tvl_pct, null);
-  assert.strictEqual(rows[0].lptele2_liquidity_shape_data_source, null);
+  assert.strictEqual(rows[0].lptele2_liquidity_shape_data_source, "provider_disabled");
   assert.strictEqual(rows[0].swap_buy_usd_5m, null);
   assert.strictEqual(rows[0].swap_sell_usd_5m, null);
   assert.strictEqual(rows[0].sell_buy_ratio_5m, null);
   assert.strictEqual(rows[0].largest_single_sell_usd_5m, null);
   assert.strictEqual(rows[0].n_sells_over_threshold_5m, null);
   assert.strictEqual(rows[0].swap_slippage_p95_5m, null);
-  assert.strictEqual(rows[0].lptele4_swap_pressure_data_source, null);
+  assert.strictEqual(rows[0].lptele4_swap_pressure_data_source, "provider_disabled");
   assert.strictEqual(rows[0].bin_distance_to_lower, 48);
   assert.strictEqual(rows[0].bin_distance_to_upper, -18);
   assert.strictEqual(rows[0].range_width_bins, 30);
@@ -377,8 +377,17 @@ try {
   assert.strictEqual(rows[0].time_in_current_range_zone_minutes, 0);
   assert.strictEqual(rows[0].whale_escape_shadow_signal, null);
   assert.strictEqual(rows[0].whale_escape_shadow_reason, null);
-  assert.strictEqual(rows[0].whale_escape_data_source, null);
+  assert.strictEqual(rows[0].whale_escape_data_source, "provider_disabled");
   assert.ok(rows[0].would_close_reason.includes("shadow_only_active_bin_above_range"));
+  const healthFile = join(tempDir, "lptele-provider-health-2026-04-29.jsonl");
+  assert.ok(existsSync(healthFile), "LPTELE provider health log was written");
+  const healthRows = readFileSync(healthFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.strictEqual(healthRows.length, 1);
+  assert.strictEqual(healthRows[0].source, "lptele_provider_health");
+  assert.strictEqual(healthRows[0].providers.whale_escape.status, "disabled");
+  assert.strictEqual(healthRows[0].providers.whale_escape.data_source, "provider_disabled");
+  assert.strictEqual(healthRows[0].providers.lptele2_liquidity_shape.status, "disabled");
+  assert.strictEqual(healthRows[0].providers.lptele4_swap_pressure.status, "disabled");
 
   const whaleTempDir = mkdtempSync(join(tmpdir(), "meridian-whale-escape-"));
   const whaleConnection = new FakeConnection();
@@ -389,6 +398,11 @@ try {
     connection: whaleConnection,
     debounceMs: 10,
     logDir: whaleTempDir,
+    lpteleProviderConfig: {
+      whaleEscape: { enabled: true },
+      liquidityShape: { enabled: true },
+      swapPressure: { enabled: true },
+    },
     getActiveBinFn: async () => ({ binId: 104, price: 1.04, pricePerLamport: "1040000000" }),
     getPoolLiquidityFlowFn: async (context) => {
       whaleRowsSeen.push(context.pool);
@@ -659,6 +673,7 @@ try {
       whaleEscapeFieldsPreservedInRows: true,
       lptele2FieldsPreservedInRows: true,
       lptele4FieldsPreservedInRows: true,
+      lpteleProviderDisabledHealthRows: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
       liveEmergencyTriggersExtremeOnly: true,
@@ -675,6 +690,7 @@ try {
       unsubscribeRemovedPools: true,
     },
     sampleLogFile: logFile,
+    providerHealthLogPattern: "logs/lptele-provider-health-YYYY-MM-DD.jsonl",
     productionLogPattern: "logs/active-bin-oracle-YYYY-MM-DD.jsonl",
   };
 } catch (error) {
