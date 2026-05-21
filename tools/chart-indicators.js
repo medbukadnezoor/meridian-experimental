@@ -47,10 +47,12 @@ export function buildSignalSummary(payload) {
   };
 }
 
-function evaluatePreset(side, preset, payload) {
+export function evaluatePreset(side, preset, payload) {
   const summary = buildSignalSummary(payload);
   const oversold = Number(config.indicators.rsiOversold ?? 30);
   const overbought = Number(config.indicators.rsiOverbought ?? 80);
+  const momentumMin = Number(config.indicators.rsiMomentumMin ?? overbought);
+  const momentumMax = Number(config.indicators.rsiMomentumMax ?? oversold);
   const close = summary.close;
   const lowerBand = summary.lowerBand;
   const upperBand = summary.upperBand;
@@ -81,6 +83,18 @@ function evaluatePreset(side, preset, payload) {
         : {
             confirmed: rsi != null && rsi >= overbought,
             reason: `RSI ${rsi ?? "n/a"} >= overbought ${overbought}`,
+            signal: summary,
+          };
+    case "rsi_momentum":
+      return side === "entry"
+        ? {
+            confirmed: rsi != null && rsi >= momentumMin,
+            reason: `RSI ${rsi ?? "n/a"} >= momentum min ${momentumMin}`,
+            signal: summary,
+          }
+        : {
+            confirmed: rsi != null && rsi <= momentumMax,
+            reason: `RSI ${rsi ?? "n/a"} <= momentum max ${momentumMax}`,
             signal: summary,
           };
     case "bollinger_reversion":
