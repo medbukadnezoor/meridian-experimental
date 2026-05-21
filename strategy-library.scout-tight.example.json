@@ -29,6 +29,35 @@
       "raw": "Owner-approved scout tight-bin strategy-library profile; strategy-specific numbers live in JSON/config, not generic deploy code.",
       "added_at": "2026-05-06T09:26:00.000Z",
       "updated_at": "2026-05-06T09:26:00.000Z"
+    },
+    "fnmf_hot_fee_scalp": {
+      "id": "fnmf_hot_fee_scalp",
+      "name": "FNmf Hot Fee Scalp",
+      "author": "meridian-phase2a",
+      "lp_strategy": "bid_ask",
+      "token_criteria": {
+        "notes": "Scout-only opt-in profile skeleton derived from FNmf wallet reverse engineering. Runtime behavior is controlled by user-config.oracle-scout.template.json / user-config.json fields, not by hardcoded code paths."
+      },
+      "entry": {
+        "condition": "SOL-quoted Meteora DLMM hot-flow candidate with high bounded RSI, positive pre-entry return, and volume expansion.",
+        "single_side": "sol",
+        "notes": "Use chartIndicators.entryPreset=rsi_momentum plus screening.preEntryMomentumGates in Scout config."
+      },
+      "range": {
+        "type": "wide_hot_fee_scalp",
+        "bins_below": 70,
+        "bins_below_min": 60,
+        "bins_below_max": 90,
+        "bins_above": 0,
+        "notes": "Approximate FNmf median bin span 70, single-sided SOL bid_ask range below active price."
+      },
+      "exit": {
+        "notes": "Use configurable management.feeExitPolicy for fee harvest, no-fee abort, fee-conditional abort, emergency failsafe, and max-hold timeout. Start shadowOnly=true on Scout."
+      },
+      "best_for": "Scout-only FNmf-style hot momentum / fee-harvest canary at 0.15 SOL and max 3 positions after owner-approved runtime config.",
+      "raw": "Derived from 2026-05-21 FNmf wallet Planpack critique and local threshold comparison. This profile is inactive by default.",
+      "added_at": "2026-05-21T00:00:00.000Z",
+      "updated_at": "2026-05-21T00:00:00.000Z"
     }
   }
 }

@@ -1,6 +1,6 @@
 {
-  "_note": "Phase 2A oracle scout template. Copy to user-config.json on the scout VPS directory and fill only the placeholders. Do not add LPAGENT_API_KEY or Telegram env vars for this scout.",
-  "preset": "phase2a-oracle-scout",
+  "_note": "Phase 2A oracle scout template with optional FNmf hot-fee-scalp settings. Copy to user-config.json on the scout VPS directory and fill only the placeholders. Do not add LPAGENT_API_KEY or Telegram env vars for this scout.",
+  "preset": "phase2a-oracle-scout-fnmf-hot-fee-scalp",
   "walletKey": "FILL_BASE58_SCOUT_PRIVATE_KEY",
   "rpcUrl": "FILL_DEDICATED_HELIUS_RPC_URL",
   "llmBaseUrl": "https://api.deepseek.com",
@@ -9,14 +9,14 @@
   "dryRun": false,
 
   "deployAmountSol": 0.15,
-  "maxPositions": 1,
+  "maxPositions": 3,
   "minSolToOpen": 0.12,
-  "maxDeployAmount": 0.25,
+  "maxDeployAmount": 0.15,
   "gasReserve": 0.08,
   "positionSizePct": 0.5,
 
   "strategy": "bid_ask",
-  "binsBelow": 85,
+  "binsBelow": 70,
   "forceSingleSidedSolBidAsk": true,
   "minSingleSidedSolBins": 25,
   "minSingleSidedSolDownsidePct": 0.5,
@@ -30,21 +30,62 @@
 
   "minTvl": 5000,
   "maxTvl": 500000,
-  "minVolume": 500,
+  "minVolume": 3000,
   "minOrganic": 45,
   "minQuoteOrganic": 40,
   "minHolders": 75,
   "minMcap": 15000,
-  "maxMcap": 1000000,
-  "minBinStep": 40,
+  "maxMcap": 3000000,
+  "minBinStep": 80,
   "maxBinStep": 300,
-  "minFeeActiveTvlRatio": 0.01,
-  "minTokenFeesSol": 2,
+  "minFeeActiveTvlRatio": 0.06,
+  "minTokenFeesSol": 5,
+  "screening": {
+    "preEntryMomentumGates": {
+      "enabled": true,
+      "minReturnPct": 0,
+      "maxReturnPct": 250,
+      "minVolumeRatio": 1.0,
+      "maxVolumeRatio": 5.0,
+      "missingDataPolicy": "warn"
+    }
+  },
 
   "avoidPvpSymbols": false,
   "blockPvpSymbols": false,
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
+  "okxDiscovery": {
+    "enabled": false,
+    "shadowMode": true,
+    "pollMs": 60000,
+    "mintCooldownMins": 60,
+    "watchlistTtlMins": 180,
+    "maxWatchMints": 120,
+    "maxCandidatesPerPoll": 4,
+    "seedLimit": 100,
+    "timeFrame": "1",
+    "rankBy": "5",
+    "includeBundleInfo": false,
+    "baseline": {
+      "minHolders": 100,
+      "minLiquidityUsd": 5000,
+      "minMcapUsd": 0,
+      "maxMcapUsd": 0,
+      "maxTop10HolderRate": 0.5,
+      "maxRugRatio": 0.3,
+      "maxBundlerRate": 0.5,
+      "maxBotRate": 0.5,
+      "maxCreatorBalanceRate": 0.2,
+      "requireNotWashTrading": true
+    },
+    "trigger": {
+      "minScans": 2,
+      "minHolderGrowthPct": 3,
+      "maxLiquidityDropPct": 30,
+      "minBuySellRatio": 1.1
+    }
+  },
 
   "maxBundlePct": 50,
   "maxBotHoldersPct": 60,
@@ -53,7 +94,7 @@
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],
   "minTokenAgeHours": 0.25,
-  "maxTokenAgeHours": 240,
+  "maxTokenAgeHours": 48,
   "athFilterPct": null,
   "fallingKnifeVetoEnabled": true,
   "fallingKnifeMaxPriceChange1hPct": -40,
@@ -65,8 +106,8 @@
   "minClaimAmount": 1,
   "autoSwapAfterClaim": true,
   "outOfRangeBinsToClose": 50,
-  "outOfRangeWaitMinutes": 30,
-  "outOfRangeHardCloseMinutes": 90,
+  "outOfRangeWaitMinutes": 15,
+  "outOfRangeHardCloseMinutes": 40,
   "oorCooldownTriggerCount": 2,
   "oorCooldownHours": 1,
   "minVolumeToRebalance": 250,
@@ -117,10 +158,38 @@
   "pnlSnapshotDebug": false,
   "pnlSnapshotBotName": "meridian-oracle-scout",
   "solMode": true,
+  "feeExitPolicy": {
+    "enabled": true,
+    "shadowOnly": true,
+    "dustFloor": 0.000001,
+    "feeHarvestEnabled": true,
+    "feeHarvestMinHoldMinutes": 0.5,
+    "feeHarvestMinFeePctOfEntry": 0.5,
+    "feeHarvestMinNetPnlPct": -3,
+    "noFeeAbortEnabled": true,
+    "noFeeAbortMaxHoldMinutes": 1,
+    "noFeeAbortMaxFeePctOfEntry": 0.05,
+    "noFeeAbortMaxNetPnlPct": 1,
+    "feeConditionalAbortEnabled": true,
+    "feeConditionalAbortMinHoldMinutes": 1,
+    "feeConditionalAbortMaxFeePctOfEntry": 0.1,
+    "feeConditionalAbortMaxNetPnlPct": 0,
+    "feeConditionalAbortMinLossPct": 5,
+    "emergencyFailsafeEnabled": true,
+    "emergencyFailsafeMinHoldMinutes": 0,
+    "emergencyFailsafeMaxFeePctOfEntry": 0.5,
+    "emergencyFailsafeMinLossPct": 12,
+    "maxHoldTimeoutEnabled": true,
+    "maxHoldTimeoutMinutes": 10,
+    "maxHoldTimeoutMinNetPnlPct": -2
+  },
 
   "managementIntervalMin": 3,
   "screeningIntervalMin": 5,
   "healthCheckIntervalMin": 30,
+  "monitoring": {
+    "pnlPollIntervalMs": 15000
+  },
 
   "temperature": 0.373,
   "maxTokens": 4096,
@@ -150,12 +219,14 @@
 
   "chartIndicators": {
     "enabled": true,
-    "entryPreset": "rsi_reversal",
+    "entryPreset": "rsi_momentum",
     "exitPreset": null,
-    "rsiLength": 2,
-    "intervals": ["5_MINUTE"],
+    "rsiLength": 14,
+    "intervals": ["15_MINUTE"],
     "requireAllIntervals": false,
     "rsiOversold": 35,
-    "rsiOverbought": 80
+    "rsiOverbought": 80,
+    "rsiMomentumMin": 60,
+    "rsiMomentumMax": 90
   }
 }

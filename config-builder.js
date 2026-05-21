@@ -12,7 +12,7 @@ export function normalizeOptionalString(value) {
 }
 
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
-const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"]);
+const SCREENING_SOURCES = new Set(["meteora", "gmgn", "okx", "both", "all", "gmgn+okx", "meteora+okx"]);
 
 export function normalizeScreeningReasoningEffort(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
@@ -35,9 +35,99 @@ export function normalizePositiveInteger(value, fallback) {
   return Math.floor(parsed);
 }
 
+function normalizeNullableNumber(value, fallback = null) {
+  if (value == null || value === "") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 export function normalizeScreeningSource(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
+}
+
+function buildOkxDiscoveryConfig(userConfig = {}) {
+  const o = userConfig.screening?.okxDiscovery ?? userConfig.okxDiscovery ?? {};
+  return {
+    enabled: o.enabled ?? false,
+    shadowMode: o.shadowMode ?? true,
+    pollMs: o.pollMs ?? 60_000,
+    mintCooldownMins: o.mintCooldownMins ?? 60,
+    watchlistTtlMins: o.watchlistTtlMins ?? 180,
+    maxWatchMints: o.maxWatchMints ?? 120,
+    maxCandidatesPerPoll: o.maxCandidatesPerPoll ?? 4,
+    seedLimit: o.seedLimit ?? 100,
+    timeFrame: o.timeFrame ?? "1",
+    rankBy: o.rankBy ?? "5",
+    includeBundleInfo: o.includeBundleInfo ?? false,
+    baseline: {
+      minHolders: o.baseline?.minHolders ?? 100,
+      minLiquidityUsd: o.baseline?.minLiquidityUsd ?? 5000,
+      minMcapUsd: o.baseline?.minMcapUsd ?? 0,
+      maxMcapUsd: o.baseline?.maxMcapUsd ?? 0,
+      maxTop10HolderRate: o.baseline?.maxTop10HolderRate ?? 0.5,
+      maxRugRatio: o.baseline?.maxRugRatio ?? 0.3,
+      maxBundlerRate: o.baseline?.maxBundlerRate ?? 0.5,
+      maxBotRate: o.baseline?.maxBotRate ?? 0.5,
+      maxCreatorBalanceRate: o.baseline?.maxCreatorBalanceRate ?? 0.2,
+      requireNotWashTrading: o.baseline?.requireNotWashTrading ?? true,
+    },
+    trigger: {
+      minScans: o.trigger?.minScans ?? 2,
+      minHolderGrowthPct: o.trigger?.minHolderGrowthPct ?? 3,
+      maxLiquidityDropPct: o.trigger?.maxLiquidityDropPct ?? 30,
+      minBuySellRatio: o.trigger?.minBuySellRatio ?? 1.1,
+    },
+  };
+}
+
+function normalizeMissingDataPolicy(value, fallback = "skip") {
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return ["reject", "skip", "warn"].includes(normalized) ? normalized : fallback;
+}
+
+function buildPreEntryMomentumGatesConfig(userConfig = {}) {
+  const gate = userConfig.screening?.preEntryMomentumGates ?? userConfig.preEntryMomentumGates ?? {};
+  return {
+    enabled: gate.enabled === true,
+    minReturnPct: normalizeNullableNumber(gate.minReturnPct),
+    maxReturnPct: normalizeNullableNumber(gate.maxReturnPct),
+    minVolumeRatio: normalizeNullableNumber(gate.minVolumeRatio),
+    maxVolumeRatio: normalizeNullableNumber(gate.maxVolumeRatio),
+    missingDataPolicy: normalizeMissingDataPolicy(gate.missingDataPolicy, "skip"),
+  };
+}
+
+function buildFeeExitPolicyConfig(userConfig = {}) {
+  const policy = userConfig.management?.feeExitPolicy ?? userConfig.feeExitPolicy ?? userConfig.fnmfFeeExitPolicy ?? {};
+  return {
+    enabled: policy.enabled === true,
+    shadowOnly: policy.shadowOnly !== false,
+    dustFloor: normalizeNullableNumber(policy.dustFloor, 0),
+    feeHarvestEnabled: policy.feeHarvestEnabled === true,
+    feeHarvestMinHoldMinutes: normalizeNullableNumber(policy.feeHarvestMinHoldMinutes),
+    feeHarvestMinFeePctOfEntry: normalizeNullableNumber(policy.feeHarvestMinFeePctOfEntry),
+    feeHarvestMinFeeAmount: normalizeNullableNumber(policy.feeHarvestMinFeeAmount),
+    feeHarvestMinNetPnlPct: normalizeNullableNumber(policy.feeHarvestMinNetPnlPct),
+    noFeeAbortEnabled: policy.noFeeAbortEnabled === true,
+    noFeeAbortMaxHoldMinutes: normalizeNullableNumber(policy.noFeeAbortMaxHoldMinutes),
+    noFeeAbortMaxFeePctOfEntry: normalizeNullableNumber(policy.noFeeAbortMaxFeePctOfEntry),
+    noFeeAbortMaxFeeAmount: normalizeNullableNumber(policy.noFeeAbortMaxFeeAmount),
+    noFeeAbortMaxNetPnlPct: normalizeNullableNumber(policy.noFeeAbortMaxNetPnlPct),
+    feeConditionalAbortEnabled: policy.feeConditionalAbortEnabled === true,
+    feeConditionalAbortMinHoldMinutes: normalizeNullableNumber(policy.feeConditionalAbortMinHoldMinutes),
+    feeConditionalAbortMaxFeePctOfEntry: normalizeNullableNumber(policy.feeConditionalAbortMaxFeePctOfEntry),
+    feeConditionalAbortMaxFeeAmount: normalizeNullableNumber(policy.feeConditionalAbortMaxFeeAmount),
+    feeConditionalAbortMaxNetPnlPct: normalizeNullableNumber(policy.feeConditionalAbortMaxNetPnlPct),
+    feeConditionalAbortMinLossPct: normalizeNullableNumber(policy.feeConditionalAbortMinLossPct),
+    emergencyFailsafeEnabled: policy.emergencyFailsafeEnabled === true,
+    emergencyFailsafeMinHoldMinutes: normalizeNullableNumber(policy.emergencyFailsafeMinHoldMinutes),
+    emergencyFailsafeMaxFeePctOfEntry: normalizeNullableNumber(policy.emergencyFailsafeMaxFeePctOfEntry),
+    emergencyFailsafeMinLossPct: normalizeNullableNumber(policy.emergencyFailsafeMinLossPct),
+    maxHoldTimeoutEnabled: policy.maxHoldTimeoutEnabled === true,
+    maxHoldTimeoutMinutes: normalizeNullableNumber(policy.maxHoldTimeoutMinutes),
+    maxHoldTimeoutMinNetPnlPct: normalizeNullableNumber(policy.maxHoldTimeoutMinNetPnlPct),
+  };
 }
 
 export function normalizeDeepSeekThinking(value) {
@@ -197,6 +287,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
       suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
       suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
+      preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
+      okxDiscovery: buildOkxDiscoveryConfig(u),
     },
 
     gmgn: {
@@ -320,6 +412,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       pnlSnapshotBotName: u.pnlSnapshotBotName ?? (String(u.preset ?? "").toLowerCase().includes("nanocap") ? "nanocap" : "meridian"),
       earlyDumpPct: u.earlyDumpPct ?? null,
       earlyDumpMaxAgeMin: u.earlyDumpMaxAgeMin ?? 30,
+      feeExitPolicy: buildFeeExitPolicyConfig(u),
       solMode: u.solMode ?? false,
     },
 
@@ -336,6 +429,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       managementIntervalMin: u.managementIntervalMin ?? 10,
       screeningIntervalMin: u.screeningIntervalMin ?? 30,
       healthCheckIntervalMin: u.healthCheckIntervalMin ?? 60,
+      pnlPollIntervalMs: normalizePositiveInteger(u.monitoring?.pnlPollIntervalMs ?? u.pnlPollIntervalMs, 30_000),
     },
 
     llm: {
@@ -458,6 +552,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       candles: indicatorUserConfig.candles ?? 298,
       rsiOversold: indicatorUserConfig.rsiOversold ?? 30,
       rsiOverbought: indicatorUserConfig.rsiOverbought ?? 80,
+      rsiMomentumMin: indicatorUserConfig.rsiMomentumMin ?? indicatorUserConfig.rsiOverbought ?? 80,
+      rsiMomentumMax: indicatorUserConfig.rsiMomentumMax ?? indicatorUserConfig.rsiOversold ?? 30,
       requireAllIntervals: indicatorUserConfig.requireAllIntervals ?? false,
     },
   };

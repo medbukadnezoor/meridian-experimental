@@ -28,6 +28,7 @@ import { confirmIndicatorPreset } from "./tools/chart-indicators.js";
 import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
+import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
 import { ActiveBinOracleRecorder } from "./active-bin-oracle.js";
 import { createPoolLiquidityFlowProvider } from "./lp-withdrawal-shadow-provider.js";
 import { createLiquidityShapeProvider } from "./lptele2-shape-provider.js";
@@ -415,6 +416,61 @@ async function closeEmergencyDirect(position, exit, source = "management") {
     log("cron_error", `[${source}] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
   }
   return result;
+}
+
+function appendFeeExitPolicyDecision(position, evaluation) {
+  const decision = evaluation?.decision;
+  if (!decision) return;
+  appendDecisionContext({
+    ts: new Date().toISOString(),
+    stage: "fee_exit_policy",
+    actor: "POLICY",
+    pool: position?.pool ?? position?.pool_address ?? null,
+    poolName: position?.pair ?? position?.pool_name ?? null,
+    baseMint: position?.base_mint ?? null,
+    position: position?.position ?? null,
+    reason: decision.reason,
+    metrics: {
+      rule: decision.rule,
+      shadow_only: decision.shadowOnly,
+      urgent: decision.urgent,
+      ...decision.metrics,
+    },
+    source: "management.feeExitPolicy",
+  });
+}
+
+async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL poll") {
+  const decision = evaluation?.decision;
+  if (!decision) return false;
+
+  appendFeeExitPolicyDecision(position, evaluation);
+  const label = decision.shadowOnly ? "SHADOW" : "LIVE";
+  log(
+    "state",
+    `[${source}] ${label} fee-exit policy: ${position?.pair ?? position?.position ?? "position"} — ${decision.rule}: ${decision.reason}`,
+  );
+
+  if (decision.shadowOnly) return false;
+
+  _pollTriggeredAt = Date.now();
+  try {
+    const result = await executeTool("close_position", {
+      position_address: position.position,
+      reason: decision.reason,
+      urgent: decision.urgent === true,
+    });
+    if (result?.success) {
+      log("state", `[${source}] Fee-exit close succeeded: ${position.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+    } else {
+      log("state", `[${source}] Fee-exit close failed for ${position.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+      runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fee-exit fallback management failed: ${e.message}`));
+    }
+  } catch (error) {
+    log("cron_error", `Fee-exit direct close error: ${error.message}`);
+    runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fee-exit fallback management failed: ${e.message}`));
+  }
+  return true;
 }
 
 function appendOorRepositionDecision(entry) {
@@ -1312,7 +1368,8 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
-  // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
+  // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
+  const pnlPollIntervalMs = Math.max(5_000, Number(config.schedule.pnlPollIntervalMs ?? 30_000));
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
@@ -1444,6 +1501,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
+        const feeExitEvaluation = evaluateFeeExitPolicy({
+          position: p,
+          tracked: getTrackedPosition(p.position),
+          managementConfig: config.management,
+        });
+        if (feeExitEvaluation.decision) {
+          const closed = await handleFeeExitPolicyDecision(p, feeExitEvaluation, "PnL poll");
+          if (closed) break;
+        }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
@@ -1530,7 +1596,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     } finally {
       _pnlPollBusy = false;
     }
-  }, 30_000);
+  }, pnlPollIntervalMs);
 
   _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
   // Store interval ref so stopCronJobs can clear it

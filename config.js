@@ -90,5 +90,9 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+    if (fresh.okxDiscovery !== undefined) s.okxDiscovery = fresh.okxDiscovery;
+    if (fresh.screening?.okxDiscovery !== undefined) s.okxDiscovery = fresh.screening.okxDiscovery;
+    if (fresh.preEntryMomentumGates !== undefined) s.preEntryMomentumGates = fresh.preEntryMomentumGates;
+    if (fresh.screening?.preEntryMomentumGates !== undefined) s.preEntryMomentumGates = fresh.screening.preEntryMomentumGates;
   } catch { /* ignore */ }
 }
