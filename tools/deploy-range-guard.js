@@ -91,7 +91,7 @@ export function validateSingleSidedSolBidAskRange({
   rangeCoverage = {},
   guardConfig = {},
 }) {
-  if (!(isSingleSidedSol && activeStrategy === "bid_ask")) {
+  if (!(isSingleSidedSol && (activeStrategy === "bid_ask" || activeStrategy === "spot"))) {
     return { ok: true, reason: null, details: null };
   }
 
@@ -110,7 +110,7 @@ export function validateSingleSidedSolBidAskRange({
     reasons.push(`bins_below ${activeBinsBelow} is below configured minimum ${minBins}`);
   }
   if (activeBinsAbove !== 0) {
-    reasons.push(`bins_above ${activeBinsAbove} must be 0 for single-side SOL bid_ask`);
+    reasons.push(`bins_above ${activeBinsAbove} must be 0 for single-side SOL ${activeStrategy}`);
   }
   if (
     minDownsidePct != null &&
@@ -143,7 +143,7 @@ export function validateSingleSidedSolBidAskRange({
 
   return {
     ok: false,
-    reason: `Narrow single-side SOL bid_ask deploy rejected: ${reasons.join("; ")}`,
+    reason: `Narrow single-side SOL ${activeStrategy} deploy rejected: ${reasons.join("; ")}`,
     details,
   };
 }

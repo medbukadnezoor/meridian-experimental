@@ -35,6 +35,7 @@ const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
+const POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH = join(__dirname, "verify-post-close-autoswap-logging.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -45,10 +46,12 @@ const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracl
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
+const SCOUT_DIRECT_SPOT_VERIFIER_PATH = join(__dirname, "verify-scout-direct-spot-single-sided-sol.js");
 const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-gmgn-first-discovery.js");
 const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-discovery-shadow.js");
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
+const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -308,6 +311,22 @@ function runRelayRetryEvidenceProof() {
   return JSON.parse(result.stdout);
 }
 
+function runPostCloseAutoswapLoggingProof() {
+  const result = spawnSync(process.execPath, [POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-post-close-autoswap-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runGpt54RiskReportSelfTest() {
   const result = spawnSync(process.execPath, [GPT54_RISK_REPORT_PATH, "--self-test"], {
     cwd: ROOT,
@@ -468,6 +487,22 @@ function runScoutStrategyLibraryConfigProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutDirectSpotProof() {
+  const result = spawnSync(process.execPath, [SCOUT_DIRECT_SPOT_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-direct-spot-single-sided-sol failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runScoutGmgnFirstDiscoveryProof() {
   const result = spawnSync(process.execPath, [SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH], {
     cwd: ROOT,
@@ -532,6 +567,22 @@ function runScoutFeeVelocityLiveCanaryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runTwoLaneGateProof() {
+  const result = spawnSync(process.execPath, [TWO_LANE_GATE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-two-lane-gate failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -552,6 +603,7 @@ function buildChecks() {
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
+  const postCloseAutoswapLoggingProof = runPostCloseAutoswapLoggingProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -562,12 +614,29 @@ function buildChecks() {
   const oorRepositionProof = runOorRepositionProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
+  const scoutDirectSpotProof = runScoutDirectSpotProof();
   const scoutGmgnFirstDiscoveryProof = runScoutGmgnFirstDiscoveryProof();
   const scoutDiscoveryShadowProof = runScoutDiscoveryShadowProof();
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
+  const twoLaneGateProof = runTwoLaneGateProof();
 
   return [
+    {
+      file: "scripts/verify-two-lane-gate.js",
+      label: "[Scout two-lane gate] T1 is pure shadow and preserves live candidate acceptance",
+      test: () =>
+        twoLaneGateProof?.success === true &&
+        twoLaneGateProof?.acceptanceParity === true &&
+        twoLaneGateProof?.belowLiveFloorRejected === true &&
+        twoLaneGateProof?.looseSupplementalVetoShadowOnly === true &&
+        twoLaneGateProof?.primaryAccepted === true &&
+        twoLaneGateProof?.futureHardGateNotOverridden === true &&
+        twoLaneGateProof?.sourceGuardNoDeployConsumers === true &&
+        twoLaneGateProof?.decisionContextFields?.feeLane === "loose" &&
+        twoLaneGateProof?.decisionContextFields?.looseLaneQualified === false &&
+        twoLaneGateProof?.decisionContextFields?.hasLooseLaneVeto === true,
+    },
     {
       file: "scripts/verify-scout-fee-velocity-live-canary.js",
       label: "[Scout fee-velocity canary] code-only H2 gate and H1/H3/H4/H5 shadow metadata are deterministic",
@@ -643,9 +712,10 @@ function buildChecks() {
     },
     {
       file: "scripts/verify-scout-strategy-library-config.js",
-      label: "[Scout strategy library] tight-bin range is strategy/config-driven and clamps deploy args",
+      label: "[Scout strategy library] direct Spot runtime and tracked bid_ask example are strategy/config-driven",
       test: () =>
         scoutStrategyLibraryConfigProof?.success === true &&
+        scoutStrategyLibraryConfigProof?.spot_strategy_verified === true &&
         scoutStrategyLibraryConfigProof?.range_policy_from_json === true &&
         scoutStrategyLibraryConfigProof?.clamps_low_bins_to_min === true &&
         scoutStrategyLibraryConfigProof?.clamps_high_bins_to_max === true &&
@@ -654,7 +724,24 @@ function buildChecks() {
         scoutStrategyLibraryConfigProof?.no_prompt_formula === true &&
         scoutStrategyLibraryConfigProof?.no_index_formula === true &&
         scoutStrategyLibraryConfigProof?.tracked_example_matches_runtime_shape === true &&
+        scoutStrategyLibraryConfigProof?.tracked_example_contains_spot_strategy === true &&
+        scoutStrategyLibraryConfigProof?.spot_repair_preserves_spot === true &&
         scoutStrategyLibraryConfigProof?.no_executor_strategy_id === true,
+    },
+    {
+      file: "scripts/verify-scout-direct-spot-single-sided-sol.js",
+      label: "[Scout direct spot] true Spot strategy deploys without bid_ask reversion, max-hold exits, range guard validates",
+      test: () =>
+        scoutDirectSpotProof?.success === true &&
+        scoutDirectSpotProof?.strategy_resolution === true &&
+        scoutDirectSpotProof?.prompt_guidance === true &&
+        scoutDirectSpotProof?.guard_preserves_spot === true &&
+        scoutDirectSpotProof?.deploy_range_guard === true &&
+        scoutDirectSpotProof?.relay_payload === true &&
+        scoutDirectSpotProof?.target_downside_bins === true &&
+        scoutDirectSpotProof?.no_bidask_fallback === true &&
+        scoutDirectSpotProof?.max_hold === true &&
+        scoutDirectSpotProof?.tail_loss_agnostic === true,
     },
     {
       file: "scripts/verify-active-bin-oracle.js",
@@ -672,6 +759,12 @@ function buildChecks() {
         activeBinOracleProof?.checks?.whaleEscapeWatchSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeCandidateSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeFieldsPreservedInRows === true &&
+        activeBinOracleProof?.checks?.initialSampleWrittenAfterSubscribe === true &&
+        activeBinOracleProof?.checks?.initialSampleDoesNotTriggerEmergency === true &&
+        activeBinOracleProof?.checks?.coverageGapReportFlagsMissingOracleRows === true &&
+        activeBinOracleProof?.checks?.coverageGapReportIgnoresCoveredPositions === true &&
+        activeBinOracleProof?.checks?.coverageGapReportIgnoresMalformedInputs === true &&
+        activeBinOracleProof?.checks?.coverageGapReportHonorsGraceWindow === true &&
         activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
         activeBinOracleProof?.checks?.noRangeProximityExecutionConsumers === true &&
         activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
@@ -778,7 +871,18 @@ function buildChecks() {
         relayRetryEvidenceProof?.relayOpenPositionBudget?.maxElapsedMs === 45_000 &&
         relayRetryEvidenceProof?.relayOpenPositionBudget?.perAttemptTimeoutMs === 20_000 &&
         relayRetryEvidenceProof?.relayOpenPositionBudget?.maxAttempts === 2 &&
-        relayRetryEvidenceProof?.logMarker === "Agent Meridian relay retry evidence enabled",
+        relayRetryEvidenceProof?.logMarker === "Agent Meridian raw relay retry evidence enabled",
+    },
+    {
+      file: "scripts/verify-post-close-autoswap-logging.js",
+      label: "[Runtime] post-close autoswap cannot fail silently or log false success",
+      test: () =>
+        postCloseAutoswapLoggingProof?.success === true &&
+        postCloseAutoswapLoggingProof?.checks?.includes("swapToken failure return is gated before auto_swapped true") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("failed post-close autoswap records explicit residual metadata") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("successful post-close autoswap records SOL received") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("deploy is blocked by residual non-SOL token value") &&
+        postCloseAutoswapLoggingProof?.checks?.includes("close action summary includes post-close swap truth fields"),
     },
     {
       file: "config-builder.js",

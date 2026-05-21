@@ -1,3 +1,4 @@
+// Despite the name, this guard preserves whatever options.strategy is supplied; it does not force bid_ask.
 function finiteNumber(value) {
   if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
@@ -28,7 +29,7 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
       ok: false,
       retryableToolArgs: true,
       forced: true,
-      reason: "Forced SOL-only bid_ask deploy rejected: amount_x must be 0, null, or omitted.",
+      reason: "Forced SOL-only deploy rejected: amount_x must be 0, null, or omitted.",
       details: { amount_x: amountX },
     };
   }
@@ -54,7 +55,7 @@ export function normalizeForcedSingleSidedSolBidAskArgs(args = {}, options = {})
       ok: false,
       retryableToolArgs: true,
       forced: true,
-      reason: "Forced SOL-only bid_ask deploy rejected: positive upside_pct is invalid; omit upside_pct and use bins_above=0.",
+      reason: "Forced SOL-only deploy rejected: positive upside_pct is invalid; omit upside_pct and use bins_above=0.",
       details: { upside_pct: upsidePct },
     };
   }

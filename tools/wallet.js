@@ -13,7 +13,10 @@ let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, "confirmed");
+  if (!_connection) _connection = new Connection(process.env.RPC_URL, {
+    commitment: "confirmed",
+    wsEndpoint: process.env.RPC_WS_URL || undefined,
+  });
   return _connection;
 }
 
@@ -23,6 +26,10 @@ function getWallet() {
     _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));
   }
   return _wallet;
+}
+
+export function getWalletPublicKey() {
+  return getWallet().publicKey.toString();
 }
 
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";

@@ -10,7 +10,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { buildConfig } from "../config-builder.js";
-import { resolveDualSourceDiscovery } from "../tools/screening.js";
+import { resolveDualSourceDiscovery, resolveMultiSourceDiscovery } from "../tools/screening.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -102,6 +102,18 @@ const meteoraOnly = candidate({
   source: "meteora",
   fee: 0.19,
 });
+const okxOnly = {
+  ...candidate({
+    pool: "pool-okx-only",
+    mint: "mint-okx-only",
+    source: "okx_discovery",
+    fee: 0.24,
+  }),
+  okxScore: 88,
+  okxScans: 3,
+  okxHolderGrowthPct: 4.2,
+  okxBuySellRatio: 1.4,
+};
 const sameMintLowerScore = candidate({
   pool: "pool-same-mint-low",
   mint: "mint-meteora-only",
@@ -179,18 +191,48 @@ assert.strictEqual(gmgnFailure.source_errors.gmgn, "synthetic GMGN failure", "GM
 assert.strictEqual(meteoraFailure.pools.length, 0, "Meteora failure blocks unvalidated GMGN-only candidates");
 assert.strictEqual(meteoraFailure.stage_counts.union_stage_counts.source_validation_reject, 1, "Meteora failure source validation reject is counted");
 
+const multi = resolveMultiSourceDiscovery({
+  sources: [
+    {
+      name: "gmgn",
+      discovery: { total: 1, pools: [gmgnOnlyValidated], stage_counts: { candidate_shape: 1 } },
+      validationByPool: new Map([["pool-gmgn-valid", gmgnOnlyValidation]]),
+      requiresValidation: true,
+    },
+    {
+      name: "meteora",
+      discovery: { total: 1, pools: [meteoraOnly], stage_counts: { deduped_pools: 1 } },
+    },
+    {
+      name: "okx_discovery",
+      discovery: { total: 1, pools: [okxOnly], stage_counts: { mapped_pools: 1 } },
+    },
+  ],
+  sourceErrors: { gmgn: null, meteora: null, okx_discovery: null },
+  runtimeConfig,
+  sourceMode: "all",
+});
+const okxResolved = multi.pools.find((pool) => pool.pool === "pool-okx-only");
+assert.ok(okxResolved, "OKX-only mapped candidate is preserved by multi-source resolver");
+assert.strictEqual(okxResolved.okxScore, 88, "OKX evidence is preserved");
+assert.strictEqual(multi.stage_counts.source_mode, "all", "multi-source resolver exposes all source mode");
+assert.strictEqual(multi.stage_counts.source_stage_counts.okx_discovery.mapped_pools, 1, "OKX stage counts are preserved");
+assert.strictEqual(multi.stage_counts.union_stage_counts.okx_discovery_only_accepted, 1, "OKX-only acceptance is counted");
+
 const configBuilderSource = src("config-builder.js");
 const screeningSource = src("tools/screening.js");
 const verifierSource = src("scripts/verify-scout-dual-source-discovery.js");
-assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"])'), "config source set includes both");
+assert.ok(configBuilderSource.includes('"all"') && configBuilderSource.includes('"meteora+okx"'), "config source set includes OKX source modes");
 assert.ok(screeningSource.includes("export function resolveDualSourceDiscovery"), "pure resolver is exported");
-assert.ok(screeningSource.includes('source === "both"'), "getTopCandidates has both branch");
+assert.ok(screeningSource.includes("export function resolveMultiSourceDiscovery"), "multi-source resolver is exported");
+assert.ok(screeningSource.includes('both: ["gmgn", "meteora"]'), "getTopCandidates has both source plan");
 assert.ok(screeningSource.includes("Promise.allSettled"), "both branch isolates one-source failures");
 assert.ok(screeningSource.includes("validateGmgnOnlyCandidatesWithMeteora"), "both branch validates GMGN-only pools with Meteora");
+assert.ok(screeningSource.includes("discoverOkxPools"), "getTopCandidates can run OKX discovery");
 assert.ok(screeningSource.includes("filterConfiguredPoolThresholds"), "shared configured threshold gate remains present");
 assert.ok(screeningSource.includes("rankCandidatesByDarwin(eligible)"), "Darwin ranking still happens after shared gates");
 
-const bothBranch = screeningSource.indexOf('source === "both"');
+const bothBranch = screeningSource.indexOf('both: ["gmgn", "meteora"]');
 const thresholdGate = screeningSource.indexOf("filterConfiguredPoolThresholds", bothBranch);
 const openPositionGate = screeningSource.indexOf("occupiedPools.has", bothBranch);
 const darwinRank = screeningSource.indexOf("rankCandidatesByDarwin(eligible)", bothBranch);
@@ -220,8 +262,9 @@ console.log(JSON.stringify({
     "Meteora-only candidates remain eligible for shared gates",
     "GMGN source failure can still return Meteora-only candidates",
     "Meteora source failure blocks unvalidated GMGN-only candidates",
+    "OKX-only mapped candidates are preserved by the multi-source resolver",
     "same-mint alternatives are dropped and logged",
-    "stage counts preserve GMGN, Meteora, and union evidence",
+    "stage counts preserve GMGN, Meteora, OKX, and union evidence",
     "source scan shows both branch before shared gates and no deploy/close verifier behavior",
   ],
   sourceFailureProof: {

@@ -325,6 +325,137 @@ const PROTECTED_TOOLS = new Set([
   "self_update",
 ]);
 
+const POST_CLOSE_SWAP_MAX_ATTEMPTS = Math.max(1, Number(process.env.POST_CLOSE_SWAP_MAX_ATTEMPTS || 3));
+const POST_CLOSE_SWAP_RETRY_DELAY_MS = Math.max(0, Number(process.env.POST_CLOSE_SWAP_RETRY_DELAY_MS || 1500));
+const POST_CLOSE_SWAP_DUST_USD = 0.10;
+const RESIDUAL_TOKEN_DEPLOY_BLOCK_USD = Math.max(0, Number(process.env.RESIDUAL_TOKEN_DEPLOY_BLOCK_USD || POST_CLOSE_SWAP_DUST_USD));
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isSolToken(token = {}) {
+  return token.symbol === "SOL" ||
+    token.mint === config.tokens.SOL ||
+    token.mint === "So11111111111111111111111111111111111111111" ||
+    token.mint === "So11111111111111111111111111111111111111112";
+}
+
+function getResidualTokensAboveThreshold(balances = {}, thresholdUsd = RESIDUAL_TOKEN_DEPLOY_BLOCK_USD) {
+  return (balances.tokens || [])
+    .filter((token) => !isSolToken(token))
+    .filter((token) => Number(token.balance || 0) > 0)
+    .filter((token) => Number(token.usd ?? 0) >= thresholdUsd)
+    .map((token) => ({
+      mint: token.mint,
+      symbol: token.symbol || token.mint?.slice(0, 8),
+      balance: token.balance,
+      usd: token.usd,
+    }));
+}
+
+function hasSwapAmountOut(swapResult) {
+  return swapResult?.amount_out != null &&
+    swapResult.amount_out !== "" &&
+    swapResult.amount_out !== "0" &&
+    Number(swapResult.amount_out) !== 0;
+}
+
+function markPostCloseSwap(result, fields) {
+  result.post_close_swap_status = fields.status;
+  result.post_close_swap_error = fields.error ?? null;
+  result.residual_base_mint = fields.residualBaseMint ?? null;
+  result.residual_token_amount = fields.residualTokenAmount ?? null;
+  result.residual_token_usd = fields.residualTokenUsd ?? null;
+  result.requires_operator_attention = fields.requiresOperatorAttention === true;
+  result.auto_swapped = fields.status === "success";
+
+  if (result.adaptive_close) {
+    result.adaptive_close.post_close_swap_status = fields.status;
+    result.adaptive_close.post_close_swap_error = fields.error ?? null;
+    result.adaptive_close.post_close_swap_attempts = fields.attempts ?? null;
+    result.adaptive_close.final_sol_received = fields.solReceived ?? null;
+  }
+}
+
+async function finalizePostCloseAutoSwap(result) {
+  if (!result.base_mint) return;
+
+  const autoSwapStartedAt = Date.now();
+  let token = null;
+  let lastError = null;
+  let attempts = 0;
+
+  try {
+    const balances = await getWalletBalances({});
+    token = balances.tokens?.find((t) => t.mint === result.base_mint);
+    if (!token || Number(token.usd ?? 0) < POST_CLOSE_SWAP_DUST_USD || Number(token.balance || 0) <= 0) {
+      markPostCloseSwap(result, {
+        status: "not_needed",
+        attempts: 0,
+      });
+      return;
+    }
+
+    for (let attempt = 1; attempt <= POST_CLOSE_SWAP_MAX_ATTEMPTS; attempt += 1) {
+      attempts = attempt;
+      log(
+        "executor",
+        `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${Number(token.usd || 0).toFixed(2)}) back to SOL ` +
+        `(attempt ${attempt}/${POST_CLOSE_SWAP_MAX_ATTEMPTS})`,
+      );
+      const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+      if (swapResult?.success === true && hasSwapAmountOut(swapResult)) {
+        result.sol_received = swapResult.amount_out;
+        result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
+        markPostCloseSwap(result, {
+          status: "success",
+          attempts: attempt,
+          solReceived: swapResult.amount_out,
+        });
+        if (result.adaptive_close) {
+          result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+        }
+        return;
+      }
+
+      lastError = swapResult?.error || "swap returned no output amount";
+      if (attempt < POST_CLOSE_SWAP_MAX_ATTEMPTS && POST_CLOSE_SWAP_RETRY_DELAY_MS > 0) {
+        await sleep(POST_CLOSE_SWAP_RETRY_DELAY_MS);
+      }
+    }
+  } catch (error) {
+    lastError = error.message;
+  }
+
+  let residual = token;
+  try {
+    const balances = await getWalletBalances({});
+    residual = balances.tokens?.find((t) => t.mint === result.base_mint) || token;
+  } catch {
+    // Preserve the pre-swap token observation if refresh fails.
+  }
+
+  markPostCloseSwap(result, {
+    status: "failed",
+    error: lastError || "post-close autoswap failed",
+    attempts,
+    residualBaseMint: result.base_mint,
+    residualTokenAmount: residual?.balance ?? token?.balance ?? null,
+    residualTokenUsd: residual?.usd ?? token?.usd ?? null,
+    requiresOperatorAttention: true,
+  });
+  if (result.adaptive_close) {
+    result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
+  }
+  log(
+    "executor_error",
+    `Post-close autoswap failed after ${attempts} attempt(s): ${lastError || "unknown error"}; ` +
+    `residual ${residual?.symbol || result.base_mint.slice(0, 8)}=${residual?.balance ?? "unknown"} ` +
+    `($${residual?.usd ?? "unknown"})`,
+  );
+}
+
 /**
  * Execute a tool call with safety checks and logging.
  */
@@ -456,32 +587,13 @@ export async function executeTool(name, args) {
         }
         // Auto-swap base token back to SOL unless user said to hold
         if (!args.skip_swap && !result.skip_post_close_swap && result.base_mint) {
-          const autoSwapStartedAt = Date.now();
-          try {
-            const balances = await getWalletBalances({});
-            const token = balances.tokens?.find(t => t.mint === result.base_mint);
-            if (token && token.usd >= 0.10) {
-              log("executor", `Auto-swapping ${token.symbol || result.base_mint.slice(0, 8)} ($${token.usd.toFixed(2)}) back to SOL`);
-              const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
-              // Tell the model the swap already happened so it doesn't call swap_token again
-              result.auto_swapped = true;
-              result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
-              if (swapResult?.amount_out) result.sol_received = swapResult.amount_out;
-              if (result.adaptive_close) {
-                result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
-                result.adaptive_close.final_sol_received = swapResult?.amount_out ?? null;
-              }
-            }
-          } catch (e) {
-            if (result.adaptive_close) {
-              result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
-              result.adaptive_close.post_close_swap_error = e.message;
-            }
-            log("executor_warn", `Auto-swap after close failed: ${e.message}`);
+          await finalizePostCloseAutoSwap(result);
+        } else if (args.skip_swap || result.skip_post_close_swap) {
+          markPostCloseSwap(result, { status: "skipped", attempts: 0 });
+          if (result.adaptive_close) {
+            result.adaptive_close.post_close_swap_ms = 0;
+            result.adaptive_close.post_close_swap_skipped = true;
           }
-        } else if (result.skip_post_close_swap && result.adaptive_close) {
-          result.adaptive_close.post_close_swap_ms = 0;
-          result.adaptive_close.post_close_swap_skipped = true;
         }
       } else if (name === "claim_fees" && config.management.autoSwapAfterClaim && result.base_mint) {
         try {
@@ -534,6 +646,21 @@ export async function executeTool(name, args) {
 async function runSafetyChecks(name, args) {
   switch (name) {
     case "deploy_position": {
+      if (process.env.DRY_RUN !== "true") {
+        const balances = await getWalletBalances();
+        const residualTokens = getResidualTokensAboveThreshold(balances);
+        if (residualTokens.length > 0) {
+          const sample = residualTokens
+            .slice(0, 3)
+            .map((token) => `${token.symbol || token.mint.slice(0, 8)} $${token.usd}`)
+            .join(", ");
+          return {
+            pass: false,
+            reason: `Residual non-SOL token(s) above $${RESIDUAL_TOKEN_DEPLOY_BLOCK_USD} block deploy until swapped: ${sample}.`,
+          };
+        }
+      }
+
       // Reject pools with bin_step out of configured range
       const minStep = config.screening.minBinStep;
       const maxStep = config.screening.maxBinStep;
@@ -658,6 +785,12 @@ function summarizeResult(result) {
       pnl_pct: result.pnl_pct,
       sol_received: result.sol_received,
       auto_swapped: result.auto_swapped,
+      post_close_swap_status: result.post_close_swap_status,
+      post_close_swap_error: result.post_close_swap_error,
+      residual_base_mint: result.residual_base_mint,
+      residual_token_amount: result.residual_token_amount,
+      residual_token_usd: result.residual_token_usd,
+      requires_operator_attention: result.requires_operator_attention,
       skip_post_close_swap: result.skip_post_close_swap,
       txs: result.txs,
       close_txs: result.close_txs,

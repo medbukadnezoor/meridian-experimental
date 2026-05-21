@@ -4,6 +4,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { log } from "./logger.js";
 import { getActiveBin } from "./tools/dlmm.js";
 import { deriveRangeSide } from "./oor-reposition.js";
+import { evaluateActiveBinBelowRangeEmergency } from "./active-bin-emergency-shadow.js";
 
 const DEFAULT_DEBOUNCE_MS = 3_000;
 const DEFAULT_LOG_DIR = "./logs";
@@ -527,9 +528,14 @@ export function shouldTriggerActiveBinEmergencyExit(row, {
   enabled = true,
   maxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
   signal = "rug_like_extreme",
+  belowRangeEnabled = false,
 } = {}) {
   if (!enabled) return false;
-  if (!row || row.shadow_velocity_signal !== signal) return false;
+  if (!row) return false;
+  if (belowRangeEnabled && row.active_bin_below_range_emergency_shadow_decision === "blocked") {
+    return row.active_bin_below_range_live_close_enabled === true;
+  }
+  if (row.shadow_velocity_signal !== signal) return false;
   const pnlPct = asNumber(row.pnl_pct);
   if (pnlPct == null) return false;
   return pnlPct <= maxPnlPct;
@@ -592,6 +598,9 @@ export class ActiveBinOracleRecorder {
     emergencyExitHandler = null,
     liveEmergencyExitEnabled = false,
     liveEmergencyExitMaxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
+    liveBelowRangeEmergencyEnabled = false,
+    belowRangeEmergencyPnlPct = -5,
+    belowRangeEmergencyEntryDrawdownPct = -20,
     getPoolLiquidityFlowFn = null,
     getLptele2LiquidityShapeFn = null,
     getLptele4SwapPressureFn = null,
@@ -608,6 +617,9 @@ export class ActiveBinOracleRecorder {
     this.emergencyExitHandler = emergencyExitHandler;
     this.liveEmergencyExitEnabled = liveEmergencyExitEnabled;
     this.liveEmergencyExitMaxPnlPct = liveEmergencyExitMaxPnlPct;
+    this.liveBelowRangeEmergencyEnabled = liveBelowRangeEmergencyEnabled;
+    this.belowRangeEmergencyPnlPct = belowRangeEmergencyPnlPct;
+    this.belowRangeEmergencyEntryDrawdownPct = belowRangeEmergencyEntryDrawdownPct;
     this.getPoolLiquidityFlowFn = typeof getPoolLiquidityFlowFn === "function" ? getPoolLiquidityFlowFn : null;
     this.getLptele2LiquidityShapeFn = typeof getLptele2LiquidityShapeFn === "function" ? getLptele2LiquidityShapeFn : null;
     this.getLptele4SwapPressureFn = typeof getLptele4SwapPressureFn === "function" ? getLptele4SwapPressureFn : null;
@@ -617,6 +629,8 @@ export class ActiveBinOracleRecorder {
     this.timers = new Map();
     this.poolState = new Map();
     this.positionProximityState = new Map();
+    this.lastPositionPollSampleAt = new Map();
+    this.positionPollMinIntervalMs = 25_000;
     this.disabledReason = null;
   }
 
@@ -627,10 +641,16 @@ export class ActiveBinOracleRecorder {
   setEmergencyExitHandler(handler, {
     enabled = true,
     maxPnlPct = DEFAULT_LIVE_EMERGENCY_MAX_PNL_PCT,
+    belowRangeEnabled = false,
+    belowRangePnlPct = -5,
+    belowRangeEntryDrawdownPct = -20,
   } = {}) {
     this.emergencyExitHandler = typeof handler === "function" ? handler : null;
     this.liveEmergencyExitEnabled = Boolean(enabled && this.emergencyExitHandler);
     this.liveEmergencyExitMaxPnlPct = maxPnlPct;
+    this.liveBelowRangeEmergencyEnabled = Boolean(belowRangeEnabled && this.emergencyExitHandler);
+    this.belowRangeEmergencyPnlPct = belowRangePnlPct;
+    this.belowRangeEmergencyEntryDrawdownPct = belowRangeEntryDrawdownPct;
   }
 
   ensureConnection() {
@@ -682,6 +702,19 @@ export class ActiveBinOracleRecorder {
       this.subscribePool(pool).catch((error) => {
         this.logger("active_bin_oracle_warn", `Subscribe failed for ${pool.slice(0, 8)}: ${error.message}`);
       });
+      if (this.subscriptions.has(pool)) {
+        const nowMs = this.now().getTime();
+        const lastPositionPollSampleAt = this.lastPositionPollSampleAt.get(pool) || 0;
+        if (nowMs - lastPositionPollSampleAt >= this.positionPollMinIntervalMs) {
+          this.lastPositionPollSampleAt.set(pool, nowMs);
+          this.recordPoolSample(pool, {
+            allowEmergencyExit: false,
+            sampleReason: "position_poll",
+          }).catch((error) => {
+            this.logger("active_bin_oracle_warn", `Position poll sample failed for ${pool.slice(0, 8)}: ${error.message}`);
+          });
+        }
+      }
     }
 
     for (const pool of this.subscriptions.keys()) {
@@ -710,6 +743,12 @@ export class ActiveBinOracleRecorder {
       );
       this.subscriptions.set(pool, id);
       this.logger("active_bin_oracle", `Subscribed shadow active-bin recorder for pool ${pool.slice(0, 8)}`);
+      await this.recordPoolSample(pool, {
+        allowEmergencyExit: false,
+        sampleReason: "initial_subscription",
+      }).catch((error) => {
+        this.logger("active_bin_oracle_warn", `Initial sample failed for ${pool.slice(0, 8)}: ${error.message}`);
+      });
     } finally {
       this.pendingSubscriptions.delete(pool);
     }
@@ -723,24 +762,25 @@ export class ActiveBinOracleRecorder {
     this.pendingSubscriptions.delete(pool);
     this.subscriptions.delete(pool);
     this.positionsByPool.delete(pool);
+    this.lastPositionPollSampleAt.delete(pool);
     if (this.connection?.removeAccountChangeListener) {
       await this.connection.removeAccountChangeListener(id).catch(() => {});
     }
     this.logger("active_bin_oracle", `Unsubscribed shadow active-bin recorder for pool ${pool.slice(0, 8)}`);
   }
 
-  queueSample(pool) {
+  queueSample(pool, { allowEmergencyExit = true, sampleReason = "account_change_or_manual" } = {}) {
     clearTimeout(this.timers.get(pool));
     const timer = setTimeout(() => {
       this.timers.delete(pool);
-      this.recordPoolSample(pool).catch((error) => {
+      this.recordPoolSample(pool, { allowEmergencyExit, sampleReason }).catch((error) => {
         this.logger("active_bin_oracle_warn", `Sample failed for ${pool.slice(0, 8)}: ${error.message}`);
       });
     }, this.debounceMs);
     this.timers.set(pool, timer);
   }
 
-  async recordPoolSample(pool) {
+  async recordPoolSample(pool, { allowEmergencyExit = true, sampleReason = "account_change_or_manual" } = {}) {
     const positions = this.positionsByPool.get(pool) || [];
     if (!positions.length) return [];
 
@@ -812,6 +852,14 @@ export class ActiveBinOracleRecorder {
         binDistanceToLower: rangeProximityFields.bin_distance_to_lower,
         pnlPct: position.pnl_pct,
       });
+      const belowRangeEmergency = evaluateActiveBinBelowRangeEmergency({
+        ...classification,
+        pnl_pct: position.pnl_pct ?? null,
+      }, {
+        liveEnabled: this.liveBelowRangeEmergencyEnabled,
+        pnlThresholdPct: this.belowRangeEmergencyPnlPct,
+        entryDrawdownThresholdPct: this.belowRangeEmergencyEntryDrawdownPct,
+      });
       this.positionProximityState.set(positionKey, {
         zone: rangeProximityFields.range_proximity_zone,
         edgeZone: rangeProximityFields.range_edge_zone,
@@ -837,19 +885,28 @@ export class ActiveBinOracleRecorder {
         ...lptele4SwapPressure,
         ...rangeProximityLogFields,
         ...whaleEscapeSignal,
+        active_bin_below_range_emergency_shadow_decision: belowRangeEmergency.decision,
+        active_bin_below_range_emergency_shadow_reasons: belowRangeEmergency.reasonCodes,
+        active_bin_below_range_emergency_shadow_only: belowRangeEmergency.shadowOnly,
+        active_bin_below_range_live_close_enabled: belowRangeEmergency.liveCloseEnabled,
+        active_bin_blind_below_range_close_allowed: belowRangeEmergency.blindBelowRangeCloseAllowed,
+        active_bin_below_lower_bins: belowRangeEmergency.belowLowerBins,
+        active_bin_below_lower_pct_of_range: belowRangeEmergency.belowLowerPctOfRange,
         pnl_pct: position.pnl_pct ?? null,
         pnl_usd: position.pnl_usd ?? null,
         pnl_pct_derived: position.pnl_pct_derived ?? null,
+        sample_reason: sampleReason,
         source: "shadow_active_bin_oracle",
       };
     });
 
     for (const row of rows) appendJsonl(this.getLogFile(observedAt), row);
-    if (this.emergencyExitHandler) {
+    if (allowEmergencyExit && this.emergencyExitHandler) {
       for (const row of rows) {
         if (!shouldTriggerActiveBinEmergencyExit(row, {
           enabled: this.liveEmergencyExitEnabled,
           maxPnlPct: this.liveEmergencyExitMaxPnlPct,
+          belowRangeEnabled: this.liveBelowRangeEmergencyEnabled,
         })) continue;
         await this.emergencyExitHandler(row).catch((error) => {
           this.logger("active_bin_oracle_warn", `Emergency exit handler failed for ${row.position?.slice(0, 8) || "position"}: ${error.message}`);
