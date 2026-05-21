@@ -5,7 +5,11 @@ import { log } from "../logger.js";
 import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
+import { discoverOkxPools } from "./okx-discovery.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
+import { getPerformanceHistory } from "../lessons.js";
+import { evaluateSamePoolPostWinDecay } from "../post-win-decay-gate.js";
+import { evaluateOhlcvEntryVetoShadow } from "../ohlcv-entry-veto-shadow.js";
 import {
   computeVolumeActiveTvlMultiple,
   enrichFeeVelocityCandidate,
@@ -13,6 +17,10 @@ import {
   getActiveStrategy,
   resolveStrategyRangePolicy,
 } from "../strategy-library.js";
+import {
+  appendTwoLaneClassification,
+  attachTwoLaneClassification,
+} from "../two-lane-classification-log.js";
 import {
   appendDecisionContext,
   buildCandidateDecisionContext,
@@ -65,6 +73,131 @@ function candidateBaseMint(candidate = {}) {
   return candidate.base?.mint ?? candidate.base_mint ?? candidate.token_x?.address ?? candidate.token_x_mint ?? null;
 }
 
+function extractCandidateOhlcvEvidence(candidate = {}) {
+  const source = candidate.ohlcv_entry_veto_shadow ?? candidate.ohlcv_shadow ?? candidate.ohlcv ?? candidate;
+  const highDrawdownPct = finiteNumberOrNull(
+    source.highDrawdownPct ??
+    source.high_drawdown_pct ??
+    source.ohlcvHighDrawdownPct ??
+    source.ohlcv_high_drawdown_pct,
+  );
+  const entryDrawdownPct = finiteNumberOrNull(
+    source.entryDrawdownPct ??
+    source.entry_drawdown_pct ??
+    source.ohlcvEntryDrawdownPct ??
+    source.ohlcv_entry_drawdown_pct,
+  );
+  if (highDrawdownPct == null && entryDrawdownPct == null) return null;
+  return {
+    source: source.source ?? source.ohlcv_source ?? "candidate",
+    highDrawdownPct,
+    entryDrawdownPct,
+  };
+}
+
+function getRecentCloseRecordsForTailLoss(screeningConfig = {}) {
+  const hours = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackHours) ?? 168;
+  const limit = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackLimit) ?? 250;
+  try {
+    return getPerformanceHistory({ hours, limit }).positions || [];
+  } catch (error) {
+    log("screening_warn", `Tail-loss shadow close-record lookup failed: ${error.message}`);
+    return [];
+  }
+}
+
+export function evaluateScoutTailLossCandidateShadows(candidate = {}, {
+  screeningConfig = config.screening,
+  closeRecords = null,
+  now = new Date(),
+} = {}) {
+  const records = Array.isArray(closeRecords) ? closeRecords : [];
+  const samePoolPostWinDecay = evaluateSamePoolPostWinDecay(candidate, {
+    closeRecords: records,
+    now,
+    config: screeningConfig,
+    freshEvidence: {
+      ohlcvHighDrawdownPct: extractCandidateOhlcvEvidence(candidate)?.highDrawdownPct,
+      volumeActiveTvlMultiple: candidate.volume_active_tvl_multiple,
+      feeActiveTvlRatio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+    },
+  });
+  const samePoolPriorOutcome = samePoolPostWinDecay.priorWin
+    ? {
+        pnlPct: samePoolPostWinDecay.priorWin.pnlPct,
+        minutesSince: samePoolPostWinDecay.priorWin.minutesSince,
+        identity: samePoolPostWinDecay.priorWin.identity,
+      }
+    : null;
+  const ohlcvEntryVetoShadow = screeningConfig.ohlcvEntryVetoShadowEnabled === false
+    ? {
+        event: "ohlcv_entry_veto_shadow",
+        decision: "disabled",
+        reasonCodes: ["shadow_disabled"],
+        shadowOnly: true,
+        liveBlockingEnabled: false,
+        bluntHighDrawdownOnlyForbidden: true,
+      }
+    : evaluateOhlcvEntryVetoShadow(candidate, {
+        ohlcv: extractCandidateOhlcvEvidence(candidate),
+        samePoolPriorOutcome,
+        config: screeningConfig,
+      });
+  return { samePoolPostWinDecay, ohlcvEntryVetoShadow };
+}
+
+export function applyScoutTailLossShadowDecisions(candidates = [], screeningConfig = config.screening, {
+  closeRecords = null,
+  now = new Date(),
+  appendContext = true,
+  filteredOut = [],
+} = {}) {
+  const records = Array.isArray(closeRecords) ? closeRecords : getRecentCloseRecordsForTailLoss(screeningConfig);
+  const accepted = [];
+  for (const candidate of candidates) {
+    const decisions = evaluateScoutTailLossCandidateShadows(candidate, {
+      screeningConfig,
+      closeRecords: records,
+      now,
+    });
+    candidate.same_pool_post_win_decay_decision = decisions.samePoolPostWinDecay;
+    candidate.ohlcv_entry_veto_shadow = decisions.ohlcvEntryVetoShadow;
+
+    if (appendContext) {
+      appendDecisionContext({
+        stage: "tail_loss_shadow_decision",
+        actor: "SCREENER",
+        pool: candidate.pool,
+        poolName: candidate.name,
+        baseMint: candidateBaseMint(candidate),
+        quoteMint: candidate.quote?.mint ?? candidate.quote_mint ?? null,
+        reason: [
+          decisions.samePoolPostWinDecay?.reasonCode,
+          ...(decisions.ohlcvEntryVetoShadow?.reasonCodes || []),
+        ].filter(Boolean).join("; "),
+        metrics: {
+          ...buildCandidateDecisionContext(candidate),
+          samePoolPostWinDecay: decisions.samePoolPostWinDecay,
+          ohlcvEntryVetoShadow: decisions.ohlcvEntryVetoShadow,
+        },
+        source: "screening.tail_loss_shadow",
+      });
+    }
+
+    const liveBlocked = decisions.samePoolPostWinDecay?.decision === "blocked" ||
+      decisions.ohlcvEntryVetoShadow?.decision === "blocked";
+    if (liveBlocked) {
+      pushFilteredReason(filteredOut, candidate, "tail-loss protection live block", {
+        priority: true,
+        audit: decisions,
+      });
+      continue;
+    }
+    accepted.push(candidate);
+  }
+  return accepted;
+}
+
 function buildSourceEvidence(candidate = {}) {
   return {
     source: candidate.source ?? candidate.discovery_source ?? null,
@@ -81,6 +214,8 @@ function buildSourceEvidence(candidate = {}) {
     holders: candidate.holders ?? candidate.holder_count ?? null,
     gmgn_score: candidate.gmgn_score ?? null,
     gmgn_total_fee_sol: candidate.gmgn_total_fee_sol ?? null,
+    okx_score: candidate.okxScore ?? null,
+    okx_scans: candidate.okxScans ?? null,
   };
 }
 
@@ -150,6 +285,72 @@ function mergeCandidateSources(gmgnCandidate, meteoraCandidate, {
       if (key.startsWith("gmgn_") && value != null) merged[key] = value;
     }
     if (gmgnCandidate.gmgn != null) merged.gmgn = gmgnCandidate.gmgn;
+  }
+
+  return merged;
+}
+
+function mergeMultiCandidateSources(sourceCandidates = {}, {
+  sourceResolution,
+  discoverySources,
+  sourceMode,
+  sameMintAlternatives = [],
+  preferredCandidate = null,
+} = {}) {
+  const orderedSources = [...(discoverySources || [])].sort((a, b) => {
+    const priority = { gmgn: 1, okx_discovery: 2, meteora: 3 };
+    return (priority[a] || 0) - (priority[b] || 0);
+  });
+  const preferredMetrics = preferredCandidate || sourceCandidates.meteora || sourceCandidates.okx_discovery || sourceCandidates.gmgn || {};
+  const merged = {};
+  for (const sourceName of orderedSources) {
+    Object.assign(merged, sourceCandidates[sourceName] || {});
+  }
+  Object.assign(merged, {
+    ...preferredMetrics,
+    source: sourceMode,
+    source_mode: sourceMode,
+    discovery_source: sourceMode,
+    discovery_sources: discoverySources,
+    source_resolution: sourceResolution,
+    source_evidence: {
+      ...Object.fromEntries(
+        Object.entries(sourceCandidates).map(([sourceName, candidate]) => [sourceName, buildSourceEvidence(candidate)])
+      ),
+      same_mint_alternatives: sameMintAlternatives,
+    },
+  });
+
+  for (const key of [
+    "active_tvl",
+    "volume_window",
+    "fee_active_tvl_ratio",
+    "bin_step",
+    "volatility",
+    "volatility_timeframe",
+    "organic_score",
+    "quote_organic_score",
+  ]) {
+    if (preferredMetrics[key] != null) merged[key] = preferredMetrics[key];
+  }
+
+  if (preferredMetrics.base?.organic != null) merged.base = { ...(merged.base || {}), organic: preferredMetrics.base.organic };
+  if (preferredMetrics.quote?.organic != null) merged.quote = { ...(merged.quote || {}), organic: preferredMetrics.quote.organic };
+
+  const gmgnCandidate = sourceCandidates.gmgn;
+  if (gmgnCandidate) {
+    for (const [key, value] of Object.entries(gmgnCandidate)) {
+      if (key.startsWith("gmgn_") && value != null) merged[key] = value;
+    }
+    if (gmgnCandidate.gmgn != null) merged.gmgn = gmgnCandidate.gmgn;
+  }
+
+  const okxCandidate = sourceCandidates.okx_discovery;
+  if (okxCandidate) {
+    for (const [key, value] of Object.entries(okxCandidate)) {
+      if (key.startsWith("okx") && value != null) merged[key] = value;
+    }
+    merged.okx_discovery = true;
   }
 
   return merged;
@@ -449,6 +650,126 @@ function formatThresholdValue(value) {
   return value == null ? "missing" : String(value);
 }
 
+function candidateNumberWithSource(candidate = {}, ...paths) {
+  for (const path of paths) {
+    const value = path.split(".").reduce((current, key) => current?.[key], candidate);
+    const num = finiteNumberOrNull(value);
+    if (num != null) return { value: num, source: path };
+  }
+  return { value: null, source: null };
+}
+
+function getCandidatePreEntryReturnPct(candidate = {}) {
+  return candidateNumberWithSource(
+    candidate,
+    "pre_entry_return_pct",
+    "preEntryReturnPct",
+    "entry_return_pct",
+    "price_change_pct",
+    "price_change_1h",
+    "change_1h",
+    "stats_1h.price_change",
+    "token_info.stats_1h.price_change",
+  );
+}
+
+function getCandidateVolumeRatio(candidate = {}) {
+  const explicit = candidateNumberWithSource(
+    candidate,
+    "pre_entry_volume_ratio",
+    "preEntryVolumeRatio",
+    "volume_ratio",
+    "volumeRatio",
+    "stats_1h.volume_ratio",
+    "token_info.stats_1h.volume_ratio",
+  );
+  if (explicit.value != null) return explicit;
+
+  const change = candidateNumberWithSource(candidate, "volume_change_pct", "volumeChangePct");
+  if (change.value == null) return { value: null, source: null };
+  return {
+    value: 1 + (change.value / 100),
+    source: `${change.source}->ratio`,
+  };
+}
+
+function buildPreEntryMomentumGateSnapshot(candidate = {}) {
+  const preEntryReturn = getCandidatePreEntryReturnPct(candidate);
+  const volumeRatio = getCandidateVolumeRatio(candidate);
+  return {
+    pre_entry_return_pct: preEntryReturn.value,
+    pre_entry_return_source: preEntryReturn.source,
+    volume_ratio: volumeRatio.value,
+    volume_ratio_source: volumeRatio.source,
+  };
+}
+
+export function evaluatePreEntryMomentumGates(candidate = {}, screeningConfig = {}) {
+  const gate = screeningConfig.preEntryMomentumGates || {};
+  if (!gate.enabled) {
+    return {
+      enabled: false,
+      accepted: true,
+      reason: "pre-entry momentum gates disabled",
+      snapshot: buildPreEntryMomentumGateSnapshot(candidate),
+    };
+  }
+
+  const minReturnPct = configuredNumber(gate.minReturnPct);
+  const maxReturnPct = configuredNumber(gate.maxReturnPct);
+  const minVolumeRatio = configuredNumber(gate.minVolumeRatio);
+  const maxVolumeRatio = configuredNumber(gate.maxVolumeRatio);
+  const missingDataPolicy = ["reject", "skip", "warn"].includes(gate.missingDataPolicy)
+    ? gate.missingDataPolicy
+    : "skip";
+  const needsReturn = minReturnPct != null || maxReturnPct != null;
+  const needsVolumeRatio = minVolumeRatio != null || maxVolumeRatio != null;
+  const snapshot = buildPreEntryMomentumGateSnapshot(candidate);
+  const missing = [];
+
+  if (needsReturn && snapshot.pre_entry_return_pct == null) missing.push("pre_entry_return_pct");
+  if (needsVolumeRatio && snapshot.volume_ratio == null) missing.push("volume_ratio");
+
+  if (missing.length > 0) {
+    const reason = `pre-entry momentum gate missing ${missing.join(", ")} data`;
+    return {
+      enabled: true,
+      accepted: missingDataPolicy !== "reject",
+      skipped: missingDataPolicy === "skip",
+      warning: missingDataPolicy === "warn",
+      missingDataPolicy,
+      reason,
+      snapshot,
+    };
+  }
+
+  if (minReturnPct != null && snapshot.pre_entry_return_pct != null && snapshot.pre_entry_return_pct < minReturnPct) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} < min ${minReturnPct}`, snapshot };
+  }
+  if (maxReturnPct != null && snapshot.pre_entry_return_pct != null && snapshot.pre_entry_return_pct > maxReturnPct) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} > max ${maxReturnPct}`, snapshot };
+  }
+  if (minVolumeRatio != null && snapshot.volume_ratio != null && snapshot.volume_ratio < minVolumeRatio) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} < min ${minVolumeRatio}`, snapshot };
+  }
+  if (maxVolumeRatio != null && snapshot.volume_ratio != null && snapshot.volume_ratio > maxVolumeRatio) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} > max ${maxVolumeRatio}`, snapshot };
+  }
+
+  return {
+    enabled: true,
+    accepted: true,
+    missingDataPolicy,
+    reason: needsReturn || needsVolumeRatio ? "pre-entry momentum gate passed" : "pre-entry momentum gate has no thresholds configured",
+    snapshot,
+  };
+}
+
+export function getPreEntryMomentumGateVetoReason(candidate = {}, screeningConfig = {}) {
+  const decision = evaluatePreEntryMomentumGates(candidate, screeningConfig);
+  return decision.accepted ? null : decision.reason;
+}
+
 export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningConfig = {}) {
   const feeActiveTvlRatio = candidateThresholdNumber(candidate, "fee_active_tvl_ratio", "fee_tvl_ratio");
   const minFeeActiveTvlRatio = configuredNumber(screeningConfig.minFeeActiveTvlRatio);
@@ -526,11 +847,42 @@ export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningCo
   return null;
 }
 
+function filterPreEntryMomentumGates(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
+  const accepted = [];
+  for (const pool of pools) {
+    const decision = evaluatePreEntryMomentumGates(pool, screeningConfig);
+    if (!decision.enabled) {
+      accepted.push(pool);
+      continue;
+    }
+    pool.pre_entry_momentum_gate = decision;
+    if (!decision.accepted) {
+      log("screening", `Pre-entry momentum gate: dropped ${pool.name || pool.pool || "unknown"} — ${decision.reason}`);
+      pushFilteredReason(filteredOut, pool, decision.reason, { priority: true });
+      stageCounts.pre_entry_momentum_reject = (stageCounts.pre_entry_momentum_reject || 0) + 1;
+    } else {
+      if (decision.warning) {
+        log("screening", `Pre-entry momentum gate warning for ${pool.name || pool.pool || "unknown"} — ${decision.reason}`);
+      }
+      accepted.push(pool);
+    }
+  }
+  stageCounts.pre_entry_momentum_accept = accepted.length;
+  return accepted;
+}
+
 export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}, rangePolicy = {}) {
   const accepted = [];
   for (const pool of pools) {
-    const enrichedPool = enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy });
+    const enrichedPool = attachTwoLaneClassification(
+      enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy }),
+      screeningConfig,
+    );
     const vetoReason = getConfiguredPoolThresholdVetoReason(enrichedPool, screeningConfig);
+    appendTwoLaneClassification(enrichedPool, screeningConfig, {
+      liveVetoReason: vetoReason,
+      liveAccepted: !vetoReason,
+    });
     if (vetoReason) {
       log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
       pushFilteredReason(filteredOut, enrichedPool, vetoReason, { priority: true });
@@ -956,6 +1308,172 @@ export function resolveDualSourceDiscovery({
   };
 }
 
+export function resolveMultiSourceDiscovery({
+  sources = [],
+  sourceErrors = {},
+  runtimeConfig = config,
+  sourceMode = "all",
+} = {}) {
+  const normalizedSources = sources
+    .map((source) => ({
+      name: source.name,
+      discovery: source.discovery || {},
+      validationByPool: source.validationByPool || new Map(),
+      requiresValidation: Boolean(source.requiresValidation),
+    }))
+    .filter((source) => source.name);
+  const filtered = normalizedSources.flatMap((source) =>
+    Array.isArray(source.discovery.filtered_examples) ? source.discovery.filtered_examples : []
+  );
+  const counts = {
+    pool_overlap: 0,
+    mint_overlap: 0,
+    same_mint_alternatives_dropped: 0,
+    source_validation_reject: 0,
+  };
+
+  const bySource = new Map();
+  for (const source of normalizedSources) {
+    const byPool = new Map();
+    const pools = Array.isArray(source.discovery.pools) ? source.discovery.pools : [];
+    counts[`${source.name}_candidates`] = pools.length;
+    counts[`${source.name}_only_accepted`] = 0;
+    counts[`${source.name}_only_rejected`] = 0;
+    for (const pool of pools) {
+      const address = candidatePoolAddress(pool);
+      if (address && !byPool.has(address)) byPool.set(address, pool);
+    }
+    bySource.set(source.name, { ...source, byPool });
+  }
+
+  const allPools = new Set();
+  for (const source of bySource.values()) {
+    for (const poolAddress of source.byPool.keys()) allPools.add(poolAddress);
+  }
+
+  const candidates = [];
+  for (const poolAddress of allPools) {
+    const sourceCandidates = {};
+    for (const [sourceName, source] of bySource.entries()) {
+      const candidate = source.byPool.get(poolAddress);
+      if (candidate) sourceCandidates[sourceName] = candidate;
+    }
+    const discoverySources = Object.keys(sourceCandidates);
+    if (discoverySources.length > 1) {
+      counts.pool_overlap += 1;
+      const preferred = sourceCandidates.meteora || sourceCandidates.okx_discovery || sourceCandidates.gmgn;
+      candidates.push(mergeMultiCandidateSources(sourceCandidates, {
+        sourceResolution: "overlap_same_pool",
+        discoverySources,
+        sourceMode,
+        preferredCandidate: preferred,
+      }));
+      continue;
+    }
+
+    const sourceName = discoverySources[0];
+    const source = bySource.get(sourceName);
+    const candidate = sourceCandidates[sourceName];
+    const validation = source.validationByPool.get(poolAddress);
+    const validationCandidate = validation || candidate;
+    const valid = isMeteoraSolDlmmCandidate(validationCandidate, runtimeConfig);
+    if (source.requiresValidation && !validation) {
+      counts[`${sourceName}_only_rejected`] += 1;
+      counts.source_validation_reject += 1;
+      filtered.push({
+        stage: "source_validation_reject",
+        name: candidate.name || candidate.base?.symbol || poolAddress,
+        pool: poolAddress,
+        reason: `${sourceName} candidate lacks valid direct Meteora SOL DLMM validation`,
+        source: sourceName,
+      });
+      continue;
+    }
+    if (!valid) {
+      counts[`${sourceName}_only_rejected`] += 1;
+      counts.source_validation_reject += 1;
+      filtered.push({
+        stage: "source_validation_reject",
+        name: candidate.name || candidate.base?.symbol || poolAddress,
+        pool: poolAddress,
+        reason: `${sourceName} candidate is not a valid SOL DLMM pool`,
+        source: sourceName,
+      });
+      continue;
+    }
+
+    counts[`${sourceName}_only_accepted`] += 1;
+    candidates.push(mergeMultiCandidateSources(
+      { [sourceName]: candidate, ...(validation ? { meteora: validation } : {}) },
+      {
+        sourceResolution: sourceName === "meteora" ? "meteora_only" : `${sourceName}_only_validated`,
+        discoverySources: [sourceName],
+        sourceMode,
+        preferredCandidate: validation || candidate,
+      },
+    ));
+  }
+
+  const byMint = new Map();
+  for (const candidate of candidates) {
+    const mint = candidateBaseMint(candidate);
+    if (!mint) continue;
+    const list = byMint.get(mint) || [];
+    list.push(candidate);
+    byMint.set(mint, list);
+  }
+
+  const resolved = [];
+  for (const list of byMint.values()) {
+    if (list.length === 1) {
+      resolved.push(list[0]);
+      continue;
+    }
+    counts.mint_overlap += list.length;
+    const sorted = [...list].sort((a, b) => scoreCandidate(b) - scoreCandidate(a));
+    const [winner, ...dropped] = sorted;
+    const alternatives = dropped.map(buildSourceEvidence);
+    winner.source_evidence = {
+      ...(winner.source_evidence || {}),
+      same_mint_alternatives: alternatives,
+    };
+    for (const candidate of dropped) {
+      counts.same_mint_alternatives_dropped += 1;
+      filtered.push({
+        stage: "same_mint_alternative_dropped",
+        name: candidate.name || candidate.base?.symbol || candidate.pool,
+        pool: candidate.pool,
+        base_mint: candidateBaseMint(candidate),
+        reason: "same base mint already represented by a higher-scored resolved pool",
+        source: Array.isArray(candidate.discovery_sources) ? candidate.discovery_sources.join("+") : candidate.source,
+      });
+    }
+    resolved.push(winner);
+  }
+
+  return {
+    total: normalizedSources.reduce((sum, source) => {
+      const pools = Array.isArray(source.discovery.pools) ? source.discovery.pools.length : 0;
+      return sum + (source.discovery.total ?? pools);
+    }, 0),
+    pools: resolved.sort((a, b) => scoreCandidate(b) - scoreCandidate(a)),
+    filtered_examples: filtered,
+    source_errors: sourceErrors,
+    stage_counts: {
+      source: sourceMode,
+      source_mode: sourceMode,
+      source_stage_counts: Object.fromEntries(
+        normalizedSources.map((source) => [source.name, source.discovery.stage_counts || {}])
+      ),
+      union_stage_counts: {
+        resolved_candidates: resolved.length,
+        ...counts,
+      },
+      ...counts,
+    },
+  };
+}
+
 /**
  * Returns eligible pools for the agent to evaluate and pick from.
  * Hard filters applied in code, agent decides which to deploy into.
@@ -963,37 +1481,68 @@ export function resolveDualSourceDiscovery({
 export async function getTopCandidates({ limit = 10 } = {}) {
   const { config } = await import("../config.js");
   const source = String(config.screening.source || "meteora").toLowerCase();
-  if (!["meteora", "gmgn", "both"].includes(source)) {
-    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora, gmgn, or both.`);
+  const sourcePlans = {
+    meteora: ["meteora"],
+    gmgn: ["gmgn"],
+    okx: ["okx_discovery"],
+    both: ["gmgn", "meteora"],
+    all: ["gmgn", "meteora", "okx_discovery"],
+    "gmgn+okx": ["gmgn", "okx_discovery"],
+    "meteora+okx": ["meteora", "okx_discovery"],
+  };
+  const activeSources = sourcePlans[source];
+  if (!activeSources) {
+    throw new Error(`Invalid screeningSource: ${config.screening.source}. Use meteora, gmgn, okx, both, all, gmgn+okx, or meteora+okx.`);
   }
 
   let discovery;
   if (source === "gmgn") {
     discovery = await discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) });
-  } else if (source === "both") {
-    const [gmgnResult, meteoraResult] = await Promise.allSettled([
-      discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) }),
-      discoverMeteoraCandidateUniverse(config),
-    ]);
-    const gmgnDiscovery = gmgnResult.status === "fulfilled"
-      ? gmgnResult.value
-      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
-    const meteoraDiscovery = meteoraResult.status === "fulfilled"
-      ? meteoraResult.value
-      : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
-    const meteoraPools = new Set((meteoraDiscovery.pools || []).map(candidatePoolAddress).filter(Boolean));
-    const gmgnOnlyPools = (gmgnDiscovery.pools || []).filter((pool) => !meteoraPools.has(candidatePoolAddress(pool)));
-    const gmgnValidationByPool = await validateGmgnOnlyCandidatesWithMeteora(gmgnOnlyPools, config);
-    discovery = resolveDualSourceDiscovery({
-      gmgnDiscovery,
-      meteoraDiscovery,
-      gmgnValidationByPool,
-      sourceErrors: {
-        gmgn: gmgnResult.status === "rejected" ? gmgnResult.reason?.message || String(gmgnResult.reason) : null,
-        meteora: meteoraResult.status === "rejected" ? meteoraResult.reason?.message || String(meteoraResult.reason) : null,
-      },
-      runtimeConfig: config,
+  } else if (source === "okx") {
+    discovery = await discoverOkxPools({ limit: Math.max(limit, config.screening.okxDiscovery?.maxCandidatesPerPoll || 4), runtimeConfig: config });
+  } else if (activeSources.length > 1) {
+    const jobs = activeSources.map((sourceName) => {
+      if (sourceName === "gmgn") return discoverGmgnPools({ limit: Math.max(limit, config.gmgn.enrichLimit || 20) });
+      if (sourceName === "meteora") return discoverMeteoraCandidateUniverse(config);
+      return discoverOkxPools({ limit: Math.max(limit, config.screening.okxDiscovery?.maxCandidatesPerPoll || 4), runtimeConfig: config });
     });
+    const results = await Promise.allSettled(jobs);
+    const discoveryBySource = {};
+    const sourceErrors = {};
+    activeSources.forEach((sourceName, index) => {
+      const result = results[index];
+      discoveryBySource[sourceName] = result.status === "fulfilled"
+        ? result.value
+        : { total: 0, pools: [], filtered_examples: [], stage_counts: {} };
+      sourceErrors[sourceName] = result.status === "rejected" ? result.reason?.message || String(result.reason) : null;
+    });
+
+    const validationSources = activeSources.filter((sourceName) => sourceName !== "meteora");
+    const meteoraPools = new Set((discoveryBySource.meteora?.pools || []).map(candidatePoolAddress).filter(Boolean));
+    const validationMaps = {};
+    await Promise.all(validationSources.map(async (sourceName) => {
+      const sourceOnlyPools = (discoveryBySource[sourceName]?.pools || [])
+        .filter((pool) => !meteoraPools.has(candidatePoolAddress(pool)));
+      validationMaps[sourceName] = sourceName === "gmgn"
+        ? await validateGmgnOnlyCandidatesWithMeteora(sourceOnlyPools, config)
+        : new Map();
+    }));
+
+    discovery = resolveMultiSourceDiscovery({
+      sources: activeSources.map((sourceName) => ({
+        name: sourceName,
+        discovery: discoveryBySource[sourceName],
+        validationByPool: validationMaps[sourceName] || new Map(),
+        requiresValidation: sourceName === "gmgn",
+      })),
+      sourceErrors,
+      runtimeConfig: config,
+      sourceMode: source,
+    });
+    const breakdown = activeSources
+      .map((sourceName) => `${sourceName}=${discoveryBySource[sourceName]?.pools?.length || 0}`)
+      .join(" ");
+    log("screening", `Source breakdown ${source}: ${breakdown}; resolved=${discovery.pools?.length || 0}`);
   } else {
     discovery = await discoverMeteoraCandidateUniverse(config);
   }
@@ -1028,6 +1577,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     filteredOut,
     postDiscoveryStageCounts,
     activeRangePolicy,
+  );
+  pools = filterPreEntryMomentumGates(
+    pools,
+    config.screening,
+    filteredOut,
+    postDiscoveryStageCounts,
   );
 
   // Exclude pools where the wallet already has an open position
@@ -1279,6 +1834,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       log("screening", `Indicator confirmation removed ${before - eligible.length} candidate(s)`);
     }
   }
+
+  eligible.splice(
+    0,
+    eligible.length,
+    ...applyScoutTailLossShadowDecisions(eligible, config.screening, { filteredOut }),
+  );
 
   const ranked = rankCandidatesByDarwin(eligible);
 

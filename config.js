@@ -79,10 +79,24 @@ export function reloadScreeningThresholds() {
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minVolumeActiveTvlMultiple !== undefined) s.minVolumeActiveTvlMultiple = fresh.minVolumeActiveTvlMultiple;
     if (fresh.preferredVolumeActiveTvlMultiple !== undefined) s.preferredVolumeActiveTvlMultiple = fresh.preferredVolumeActiveTvlMultiple;
+    if (fresh.twoLaneClassificationLoggingEnabled !== undefined) s.twoLaneClassificationLoggingEnabled = fresh.twoLaneClassificationLoggingEnabled;
+    if (fresh.twoLanePrimaryVolumeActiveTvlMultiple !== undefined) s.twoLanePrimaryVolumeActiveTvlMultiple = fresh.twoLanePrimaryVolumeActiveTvlMultiple;
+    if (fresh.looseVolumeActiveTvlMultiple !== undefined) s.looseVolumeActiveTvlMultiple = fresh.looseVolumeActiveTvlMultiple;
     if (Array.isArray(fresh.feeVelocityShadowDownsidePct)) s.feeVelocityShadowDownsidePct = fresh.feeVelocityShadowDownsidePct;
     if (Array.isArray(fresh.feeVelocityShadowTakeProfitPct)) s.feeVelocityShadowTakeProfitPct = fresh.feeVelocityShadowTakeProfitPct;
     if (Array.isArray(fresh.feeVelocityShadowFeeTvlFloors)) s.feeVelocityShadowFeeTvlFloors = fresh.feeVelocityShadowFeeTvlFloors;
     if (fresh.sameTickerSurfEnabled !== undefined) s.sameTickerSurfEnabled = fresh.sameTickerSurfEnabled;
+    if (fresh.samePoolPostWinDecayEnabled !== undefined) s.samePoolPostWinDecayEnabled = fresh.samePoolPostWinDecayEnabled;
+    if (fresh.samePoolPostWinCooldownMinutes !== undefined) s.samePoolPostWinCooldownMinutes = fresh.samePoolPostWinCooldownMinutes;
+    if (fresh.samePoolPostWinMaterialPnlPct !== undefined) s.samePoolPostWinMaterialPnlPct = fresh.samePoolPostWinMaterialPnlPct;
+    if (fresh.samePoolPostWinRequireFreshDecayPass !== undefined) s.samePoolPostWinRequireFreshDecayPass = fresh.samePoolPostWinRequireFreshDecayPass;
+    if (fresh.ohlcvEntryVetoShadowEnabled !== undefined) s.ohlcvEntryVetoShadowEnabled = fresh.ohlcvEntryVetoShadowEnabled;
+    if (fresh.ohlcvEntryVetoLiveEnabled !== undefined) s.ohlcvEntryVetoLiveEnabled = fresh.ohlcvEntryVetoLiveEnabled;
+    if (fresh.ohlcvEntryVetoHighDrawdownPct !== undefined) s.ohlcvEntryVetoHighDrawdownPct = fresh.ohlcvEntryVetoHighDrawdownPct;
+    if (fresh.ohlcvEntryVetoEntryDrawdownPct !== undefined) s.ohlcvEntryVetoEntryDrawdownPct = fresh.ohlcvEntryVetoEntryDrawdownPct;
+    if (fresh.ohlcvEntryVetoExtremePriceChangePct !== undefined) s.ohlcvEntryVetoExtremePriceChangePct = fresh.ohlcvEntryVetoExtremePriceChangePct;
+    if (fresh.ohlcvEntryVetoRequireCompound !== undefined) s.ohlcvEntryVetoRequireCompound = fresh.ohlcvEntryVetoRequireCompound;
+    if (Array.isArray(fresh.ohlcvEntryVetoLiveReasonCodes)) s.ohlcvEntryVetoLiveReasonCodes = fresh.ohlcvEntryVetoLiveReasonCodes;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
@@ -96,5 +110,9 @@ export function reloadScreeningThresholds() {
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
+    if (fresh.okxDiscovery !== undefined) s.okxDiscovery = fresh.okxDiscovery;
+    if (fresh.screening?.okxDiscovery !== undefined) s.okxDiscovery = fresh.screening.okxDiscovery;
+    if (fresh.preEntryMomentumGates !== undefined) s.preEntryMomentumGates = fresh.preEntryMomentumGates;
+    if (fresh.screening?.preEntryMomentumGates !== undefined) s.preEntryMomentumGates = fresh.screening.preEntryMomentumGates;
   } catch { /* ignore */ }
 }
