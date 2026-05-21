@@ -24,10 +24,24 @@ autoresearch-state.json
 
 # Logs
 logs/
+reports/
+state/okx-discovery/
 
 # OS
 .DS_Store
+._*
+**/._*
 
 # Dev context
 context.md
 docs/
+
+# Local backups / runtime snapshots
+*.bak*
+*.backup*
+*.pre-*
+user-config.json.*
+strategy-library.json.bak*
+strategy-library.json.pre-*
+package-lock.json.pre-*
+hivemind-cache.json.pre-*
