@@ -221,6 +221,7 @@ assert.strictEqual(multi.stage_counts.union_stage_counts.okx_discovery_only_acce
 
 const configBuilderSource = src("config-builder.js");
 const screeningSource = src("tools/screening.js");
+const okxDiscoverySource = src("tools/okx-discovery.js");
 const verifierSource = src("scripts/verify-scout-dual-source-discovery.js");
 assert.ok(configBuilderSource.includes('"all"') && configBuilderSource.includes('"meteora+okx"'), "config source set includes OKX source modes");
 assert.ok(screeningSource.includes("export function resolveDualSourceDiscovery"), "pure resolver is exported");
@@ -231,6 +232,10 @@ assert.ok(screeningSource.includes("validateGmgnOnlyCandidatesWithMeteora"), "bo
 assert.ok(screeningSource.includes("discoverOkxPools"), "getTopCandidates can run OKX discovery");
 assert.ok(screeningSource.includes("filterConfiguredPoolThresholds"), "shared configured threshold gate remains present");
 assert.ok(screeningSource.includes("rankCandidatesByDarwin(eligible)"), "Darwin ranking still happens after shared gates");
+assert.ok(okxDiscoverySource.includes("lastMappingMisses"), "OKX discovery exposes recent Meteora mapping misses");
+assert.ok(okxDiscoverySource.includes("mapping_miss_sample"), "OKX discovery returns compact mapping miss samples");
+assert.ok(okxDiscoverySource.includes("Pool map miss"), "OKX discovery logs compact map-fail diagnostics");
+assert.ok(okxDiscoverySource.includes("resolved_pool_count"), "OKX mapping diagnostics record resolver pool counts");
 
 const bothBranch = screeningSource.indexOf('both: ["gmgn", "meteora"]');
 const thresholdGate = screeningSource.indexOf("filterConfiguredPoolThresholds", bothBranch);
@@ -263,6 +268,7 @@ console.log(JSON.stringify({
     "GMGN source failure can still return Meteora-only candidates",
     "Meteora source failure blocks unvalidated GMGN-only candidates",
     "OKX-only mapped candidates are preserved by the multi-source resolver",
+    "OKX map-fail diagnostics expose compact token context without changing gates",
     "same-mint alternatives are dropped and logged",
     "stage counts preserve GMGN, Meteora, OKX, and union evidence",
     "source scan shows both branch before shared gates and no deploy/close verifier behavior",
