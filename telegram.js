@@ -80,6 +80,14 @@ function isAuthorizedIncomingMessage(msg) {
   return true;
 }
 
+function isAuthorizedIncomingCallback(callbackQuery) {
+  if (!callbackQuery?.message) return false;
+  return isAuthorizedIncomingMessage({
+    chat: callbackQuery.message.chat,
+    from: callbackQuery.from,
+  });
+}
+
 // ─── Core send ───────────────────────────────────────────────────
 export function isEnabled() {
   return !!TOKEN;
@@ -96,13 +104,13 @@ function getRetryAfterMs(payloadText) {
   return 0;
 }
 
-async function postTelegram(method, body, { quietRateLimit = false } = {}) {
+async function postTelegram(method, body, { quietRateLimit = false, includeChatId = true } = {}) {
   if (!TOKEN || !chatId) return null;
   try {
     const res = await fetch(`${BASE}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, ...body }),
+      body: JSON.stringify(includeChatId ? { chat_id: chatId, ...body } : body),
     });
     if (!res.ok) {
       const err = await res.text();
@@ -164,6 +172,14 @@ export async function sendMessage(text) {
   return firstResult;
 }
 
+export async function sendMessageWithButtons(text, keyboard) {
+  if (!TOKEN || !chatId) return;
+  return postTelegram("sendMessage", {
+    text: String(text).slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
 export async function sendHTML(html) {
   if (!TOKEN || !chatId) return;
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
@@ -175,6 +191,23 @@ export async function editMessage(text, messageId) {
     message_id: messageId,
     text: String(text).slice(0, 4096),
   });
+}
+
+export async function editMessageWithButtons(text, messageId, keyboard) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: String(text).slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+export async function answerCallbackQuery(callbackQueryId, text = "") {
+  if (!TOKEN || !callbackQueryId) return null;
+  return postTelegram("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    ...(text ? { text: String(text).slice(0, 200) } : {}),
+  }, { includeChatId: false });
 }
 
 export function hasActiveLiveMessage() {
@@ -403,6 +436,19 @@ async function poll(onMessage) {
       const data = await res.json();
       for (const update of data.result || []) {
         _offset = update.update_id + 1;
+        if (update.callback_query) {
+          const callbackQuery = update.callback_query;
+          if (!isAuthorizedIncomingCallback(callbackQuery)) continue;
+          await onMessage({
+            text: callbackQuery.data || "",
+            callbackData: callbackQuery.data || "",
+            callbackQueryId: callbackQuery.id,
+            messageId: callbackQuery.message?.message_id,
+            from: callbackQuery.from,
+            chat: callbackQuery.message?.chat,
+          });
+          continue;
+        }
         const msg = update.message;
         if (!msg?.text) continue;
         if (!isAuthorizedIncomingMessage(msg)) continue;

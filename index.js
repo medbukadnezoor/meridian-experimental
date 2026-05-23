@@ -11,7 +11,7 @@ import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, a
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
-import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
+import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy, computeDownsideBinsForPct } from "./strategy-library.js";
@@ -2007,6 +2007,55 @@ async function showSettingsMenu({ messageId = null, page = "main" } = {}) {
   }
 }
 
+const SETTINGS_MENU_MUTATION_ALLOWLIST = new Set([]);
+const SETTINGS_MENU_BLOCKED_KEYS = new Set([
+  "deployAmountSol",
+  "maxDeployAmount",
+  "maxPositions",
+  "strategy",
+  "lpAgentRelayEnabled",
+  "solMode",
+  "gasReserve",
+  "takeProfitPct",
+  "stopLossPct",
+  "trailingTakeProfit",
+  "trailingTriggerPct",
+  "trailingDropPct",
+  "profitGivebackEmergencyEnabled",
+  "profitGivebackTriggerPct",
+  "profitGivebackFloorPct",
+  "repeatDeployCooldownEnabled",
+  "repeatDeployCooldownTriggerCount",
+  "repeatDeployCooldownHours",
+  "repeatDeployCooldownMinFeeEarnedPct",
+  "useDiscordSignals",
+  "blockPvpSymbols",
+  "managementIntervalMin",
+  "screeningIntervalMin",
+  "chartIndicatorsEnabled",
+  "indicatorEntryPreset",
+  "indicatorExitPreset",
+  "indicatorIntervals",
+  "requireAllIntervals",
+  "rsiLength",
+]);
+
+function isSettingsMenuMutationAllowed(key) {
+  return SETTINGS_MENU_MUTATION_ALLOWLIST.has(key) && !SETTINGS_MENU_BLOCKED_KEYS.has(key);
+}
+
+async function blockSettingsMenuMutation(msg, key) {
+  const label = key ? `Blocked: ${key}` : "Blocked";
+  await answerCallbackQuery(msg.callbackQueryId, label);
+  if (msg.messageId) {
+    await editMessageWithButtons(
+      `${formatConfigSnapshot()}\n\nScout settings menu is read-only. ${key ? `Blocked button change: ${key}.` : "Button changes are blocked."}`,
+      msg.messageId,
+      [[settingButton("Back", "cfg:page:main")]]
+    );
+  }
+}
+
 function normalizeMenuValue(key, raw) {
   if (key === "indicatorIntervals") {
     if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
@@ -2043,6 +2092,11 @@ async function applySettingsMenuCallback(msg) {
   }
 
   const key = parts[2];
+  if (!isSettingsMenuMutationAllowed(key)) {
+    await blockSettingsMenuMutation(msg, key);
+    return;
+  }
+
   let value;
   if (action === "toggle") {
     value = !Boolean(settingValue(key));
@@ -2097,6 +2151,7 @@ function formatHelpText() {
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
     "/config — show important runtime config",
+    "/settings — read-only inline settings menu",
     "/setcfg <key> <value> — update persisted config",
     "/cooldowns — active pool + token cooldowns with countdown",
     "/screen — refresh deterministic candidate list",
@@ -2211,8 +2266,19 @@ async function drainTelegramQueue() {
 }
 
 async function telegramHandler(msg) {
-  const text = msg?.text?.trim();
+  const text = (msg?.callbackData || msg?.text || "").trim();
   if (!text) return;
+
+  if (text.startsWith("cfg:")) {
+    await applySettingsMenuCallback(msg);
+    return;
+  }
+
+  if (["/settings", "/menu", "/configmenu"].includes(text)) {
+    await showSettingsMenu();
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
