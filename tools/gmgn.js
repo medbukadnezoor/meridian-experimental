@@ -42,8 +42,6 @@ import {
 
 setDefaultResultOrder("ipv4first");
 
-const METEORA_DLMM_API = "https://dlmm.datapi.meteora.ag";
-const POOL_DISCOVERY_BASE = "https://pool-discovery-api.datapi.meteora.ag";
 const GMGN_BASE = "https://openapi.gmgn.ai/v1";
 const SUPPORTED_INTERVALS = new Set(["1m", "5m", "1h", "3h", "6h", "24h"]);
 const MIN_VOLATILITY_TIMEFRAME = "30m";
@@ -441,51 +439,6 @@ function analyzeHoldersAndTraders(holders = [], traders = []) {
     sniperTopHolderCount: sniperTopHolders.length,
     sniperHoldRate,
   };
-}
-
-async function fetchTopMeteoraDlmmPoolsForMint(mint, minTvl = 0, limit = 2) {
-  const filterBy = minTvl > 0 ? `&filter_by=${encodeURIComponent(`tvl>${minTvl}`)}` : "";
-  const url = `${METEORA_DLMM_API}/pools?query=${encodeURIComponent(mint)}&sort_by=${encodeURIComponent("tvl:desc")}${filterBy}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) throw new Error(`Meteora pool search ${res.status}`);
-  const data = await res.json();
-  const pools = Array.isArray(data?.data) ? data.data : [];
-  return pools
-    .filter((pool) => {
-      const baseMatches = pool?.token_x?.address === mint || pool?.token_x_mint === mint;
-      const quoteIsSol =
-        pool?.token_y?.address === config.tokens.SOL ||
-        pool?.token_y_mint === config.tokens.SOL ||
-        pool?.token_y?.symbol === "SOL";
-      return baseMatches && quoteIsSol;
-    })
-    .slice(0, limit);
-}
-
-async function fetchPoolDetailDirect(poolAddress) {
-  const timeframe = encodeURIComponent(getVolatilityTimeframe(config.screening?.timeframe || "5m"));
-  const url = `${POOL_DISCOVERY_BASE}/pools?page_size=1&filter_by=${encodeURIComponent(`pool_address=${poolAddress}`)}&timeframe=${timeframe}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  if (!res.ok) return null;
-  const data = await res.json();
-  return (data?.data || [])[0] ?? null;
-}
-
-async function pickBestPool(pools) {
-  const details = await Promise.all(
-    pools.map((pool) => fetchPoolDetailDirect(pool.address || pool.pool_address).catch(() => null)),
-  );
-  if (pools.length <= 1) return { pool: pools[0] ?? null, detail: details[0] ?? null };
-  const scored = pools.map((pool, index) => {
-    const detail = details[index];
-    const activeTvl = num(detail?.active_tvl ?? pool.active_tvl ?? pool.tvl ?? pool.liquidity);
-    const feeActiveTvlRatio = Number(detail?.fee_active_tvl_ratio) > 0
-      ? Number(detail.fee_active_tvl_ratio)
-      : (activeTvl > 0 ? (num(detail?.fee) / activeTvl) * 100 : 0);
-    return { pool, detail, feeActiveTvlRatio, activeTvl };
-  });
-  scored.sort((a, b) => b.feeActiveTvlRatio - a.feeActiveTvlRatio || b.activeTvl - a.activeTvl);
-  return { pool: scored[0].pool, detail: scored[0].detail };
 }
 
 function condenseGmgnCandidate({ token, pool, poolDetail, info, infoAnalysis, holdersAnalysis }) {

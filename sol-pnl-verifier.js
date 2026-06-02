@@ -229,6 +229,7 @@ export function buildSolPnlVerification({
     closedPositionCount: closeSummary.closedPositionCount,
     successfulAutoswapCount: closeSummary.successfulAutoswapCount,
     failedAutoswapCount: closeSummary.failedAutoswapCount,
+    disappearedPositions: disappeared,
     residualTokenValueSol,
     unresolvedResidualTokenValueSol,
     warnings,

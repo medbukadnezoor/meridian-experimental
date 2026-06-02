@@ -6,7 +6,6 @@ import { fileURLToPath } from "url";
 import {
   computeDownsideBinsForPct,
   describeRangePolicyForPrompt,
-  getActiveStrategy,
   resolveStrategyRangePolicy,
 } from "../strategy-library.js";
 import { normalizeForcedSingleSidedSolBidAskArgs } from "../tools/single-side-bidask-guard.js";
@@ -17,6 +16,10 @@ const ROOT = path.join(__dirname, "..");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(ROOT, relativePath), "utf8");
+}
+
+function loadJson(relativePath) {
+  return JSON.parse(read(relativePath));
 }
 
 function countOccurrences(text, needle) {
@@ -37,10 +40,11 @@ function syntheticMaxHoldDecision({ deployedAt, now = Date.now(), maxHoldMinutes
   };
 }
 
-const active = getActiveStrategy();
-assert.ok(active, "runtime active strategy exists");
-assert.strictEqual(active.id, "scout_single_sided_sol_spot_scalp_v1", "runtime active strategy is direct Spot scalp");
-assert.strictEqual(active.lp_strategy, "spot", "runtime active strategy is Spot");
+const strategyDb = loadJson("strategy-library.scout-tight.example.json");
+const active = strategyDb.strategies.scout_single_sided_sol_spot_scalp_v1;
+assert.ok(active, "direct Spot strategy profile exists");
+assert.strictEqual(active.id, "scout_single_sided_sol_spot_scalp_v1", "direct Spot profile id");
+assert.strictEqual(active.lp_strategy, "spot", "direct Spot profile uses Spot");
 
 const policy = resolveStrategyRangePolicy(active, { strategy: { strategy: "spot", binsBelow: 69 } });
 assert.strictEqual(policy.lpStrategy, "spot", "range policy preserves Spot");

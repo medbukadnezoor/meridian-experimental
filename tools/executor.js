@@ -33,6 +33,7 @@ const USER_CONFIG_PATH = path.join(__dirname, "../user-config.json");
 import { log, logAction } from "../logger.js";
 import { appendDecisionContext } from "../decision-context-log.js";
 import { notifyDeploy, notifyClose, notifySwap } from "../telegram.js";
+import { appendJsonl, jsonlPath } from "../sol-equity-tracker.js";
 
 const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
@@ -378,6 +379,33 @@ function markPostCloseSwap(result, fields) {
   }
 }
 
+function appendPostCloseSwapTrace({ result, token = null, swapResult = null, status, attempt = null, error = null, residual = null }) {
+  const trace = swapResult?.swap_trace ?? null;
+  const ts = new Date();
+  appendJsonl(jsonlPath("logs", "post-close-swap-trace", ts), {
+    ts: ts.toISOString(),
+    event: "post_close_swap_trace",
+    trace_source: "meridian_close_autoswap",
+    position: result.position ?? result.position_address ?? null,
+    pool: result.pool ?? result.pool_address ?? null,
+    pair: result.pool_name ?? result.pair ?? null,
+    close_reason: result.close_reason ?? result.reason ?? null,
+    pnl_usd: result.pnl_usd ?? null,
+    pnl_pct: result.pnl_pct ?? null,
+    base_mint: result.base_mint ?? token?.mint ?? null,
+    token_symbol: token?.symbol ?? null,
+    token_balance: token?.balance ?? null,
+    token_usd: token?.usd ?? null,
+    attempt,
+    post_close_swap_status: status,
+    post_close_swap_error: error,
+    tx: swapResult?.tx ?? null,
+    residual_token_amount: residual?.balance ?? null,
+    residual_token_usd: residual?.usd ?? null,
+    swap_trace: trace,
+  });
+}
+
 async function finalizePostCloseAutoSwap(result) {
   if (!result.base_mint) return;
 
@@ -385,6 +413,7 @@ async function finalizePostCloseAutoSwap(result) {
   let token = null;
   let lastError = null;
   let attempts = 0;
+  let lastSwapResult = null;
 
   try {
     const balances = await getWalletBalances({});
@@ -405,8 +434,10 @@ async function finalizePostCloseAutoSwap(result) {
         `(attempt ${attempt}/${POST_CLOSE_SWAP_MAX_ATTEMPTS})`,
       );
       const swapResult = await swapToken({ input_mint: result.base_mint, output_mint: "SOL", amount: token.balance });
+      lastSwapResult = swapResult;
       if (swapResult?.success === true && hasSwapAmountOut(swapResult)) {
         result.sol_received = swapResult.amount_out;
+        result.post_close_swap_trace = swapResult.swap_trace ?? null;
         result.auto_swap_note = `Base token already auto-swapped back to SOL (${token.symbol || result.base_mint.slice(0, 8)} → SOL). Do NOT call swap_token again.`;
         markPostCloseSwap(result, {
           status: "success",
@@ -416,6 +447,7 @@ async function finalizePostCloseAutoSwap(result) {
         if (result.adaptive_close) {
           result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
         }
+        appendPostCloseSwapTrace({ result, token, swapResult, status: "success", attempt });
         return;
       }
 
@@ -448,6 +480,15 @@ async function finalizePostCloseAutoSwap(result) {
   if (result.adaptive_close) {
     result.adaptive_close.post_close_swap_ms = Date.now() - autoSwapStartedAt;
   }
+  appendPostCloseSwapTrace({
+    result,
+    token,
+    swapResult: lastSwapResult,
+    status: "failed",
+    attempt: attempts,
+    error: lastError || "post-close autoswap failed",
+    residual,
+  });
   log(
     "executor_error",
     `Post-close autoswap failed after ${attempts} attempt(s): ${lastError || "unknown error"}; ` +
@@ -787,6 +828,13 @@ function summarizeResult(result) {
       auto_swapped: result.auto_swapped,
       post_close_swap_status: result.post_close_swap_status,
       post_close_swap_error: result.post_close_swap_error,
+      post_close_swap_trace: result.post_close_swap_trace ? {
+        router: result.post_close_swap_trace.router,
+        mode: result.post_close_swap_trace.mode,
+        price_impact_bps: result.post_close_swap_trace.price_impact_bps,
+        actual_vs_expected_bps: result.post_close_swap_trace.actual_vs_expected_bps,
+        value_leak_bps: result.post_close_swap_trace.value_leak_bps,
+      } : null,
       residual_base_mint: result.residual_base_mint,
       residual_token_amount: result.residual_token_amount,
       residual_token_usd: result.residual_token_usd,
