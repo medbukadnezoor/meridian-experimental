@@ -38,6 +38,7 @@ const OPERATOR_UPDATE_CONFIG_REASONS = new Set([
   "CLI config set",
   "Telegram slash command /setcfg",
 ]);
+
 // Registered by index.js so update_config can restart cron jobs when intervals change
 let _cronRestarter = null;
 export function registerCronRestarter(fn) { _cronRestarter = fn; }
@@ -492,10 +493,11 @@ export async function executeTool(name, args) {
       force: config.strategy.forceSingleSidedSolBidAsk || activeRangePolicy.singleSidedSol,
       deployAmountSol: Number.isFinite(forcedDeployAmountSol) ? forcedDeployAmountSol : config.management.deployAmountSol,
       strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
-      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsBelow: activeRangePolicy.binsBelowDefault ?? (activeRangePolicy.targetDownsidePct != null ? null : config.strategy.binsBelow),
       binsBelowMin: activeRangePolicy.binsBelowMin,
       binsBelowMax: activeRangePolicy.binsBelowMax,
       binsAbove: activeRangePolicy.binsAbove ?? 0,
+      targetDownsidePct: activeRangePolicy.targetDownsidePct,
     });
     if (!forcedDeploy.ok) {
       log("deploy_reject", `[forced-single-side-bidask] ${forcedDeploy.reason}`);

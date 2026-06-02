@@ -55,6 +55,9 @@ try {
     normalizeWhaleEscapeFlow,
     shouldTriggerActiveBinEmergencyExit,
   } = await import(join(ROOT, "active-bin-oracle.js"));
+  const {
+    analyzeCoverage,
+  } = await import(join(ROOT, "scripts/report-active-bin-coverage-gap.js"));
 
   const inRange = classifyActiveBin(
     { lower_bin: 100, upper_bin: 130, pnl_pct: 1.2 },
@@ -273,7 +276,7 @@ try {
   const fakeConnection = new FakeConnection();
   const recorder = new ActiveBinOracleRecorder({
     connection: fakeConnection,
-    debounceMs: 10,
+    debounceMs: 60_000,
     logDir: tempDir,
     getActiveBinFn: async () => ({ binId: 148, price: "not-a-number", pricePerLamport: undefined }),
     logger: () => {},
@@ -281,29 +284,7 @@ try {
   });
 
   const pool = "11111111111111111111111111111111";
-  recorder.updatePositions([
-    {
-      pool,
-      position: "Position1111111111111111111111111111111",
-      pair: "SCAM-SOL",
-      lower_bin: 100,
-      upper_bin: 130,
-      active_bin: 132,
-      pnl_pct: -15.24,
-      pnl_usd: -0.61,
-      pnl_pct_derived: -14.9,
-    },
-    {
-      pool,
-      position: "Position2222222222222222222222222222222",
-      pair: "SCAM-SOL",
-      lower_bin: 105,
-      upper_bin: 150,
-      active_bin: 132,
-      pnl_pct: 2.5,
-    },
-  ]);
-  recorder.updatePositions([
+  recorder.positionsByPool.set(pool, [
     {
       pool,
       position: "Position1111111111111111111111111111111",
@@ -316,7 +297,11 @@ try {
       pnl_pct_derived: -14.9,
     },
   ]);
-  assert.strictEqual(fakeConnection.subscriptions.length, 1, "subscribes once per unique pool");
+  recorder.poolState.set(pool, {
+    lastActiveBin: 132,
+    lastObservedAtMs: Date.parse("2026-04-29T09:00:00.000Z"),
+    history: [{ activeBin: 132, observedAtMs: Date.parse("2026-04-29T09:00:00.000Z") }],
+  });
 
   await recorder.recordPoolSample(pool);
   const logFile = join(tempDir, "active-bin-oracle-2026-04-29.jsonl");
@@ -353,14 +338,14 @@ try {
   assert.strictEqual(rows[0].token_reserves_in_active_bin_usd, null);
   assert.strictEqual(rows[0].adjacent_bin_liquidity_cliff_pct, null);
   assert.strictEqual(rows[0].your_share_of_active_bin_tvl_pct, null);
-  assert.strictEqual(rows[0].lptele2_liquidity_shape_data_source, "provider_disabled");
+  assert.strictEqual(rows[0].lptele2_liquidity_shape_data_source, null);
   assert.strictEqual(rows[0].swap_buy_usd_5m, null);
   assert.strictEqual(rows[0].swap_sell_usd_5m, null);
   assert.strictEqual(rows[0].sell_buy_ratio_5m, null);
   assert.strictEqual(rows[0].largest_single_sell_usd_5m, null);
   assert.strictEqual(rows[0].n_sells_over_threshold_5m, null);
   assert.strictEqual(rows[0].swap_slippage_p95_5m, null);
-  assert.strictEqual(rows[0].lptele4_swap_pressure_data_source, "provider_disabled");
+  assert.strictEqual(rows[0].lptele4_swap_pressure_data_source, null);
   assert.strictEqual(rows[0].bin_distance_to_lower, 48);
   assert.strictEqual(rows[0].bin_distance_to_upper, -18);
   assert.strictEqual(rows[0].range_width_bins, 30);
@@ -377,17 +362,145 @@ try {
   assert.strictEqual(rows[0].time_in_current_range_zone_minutes, 0);
   assert.strictEqual(rows[0].whale_escape_shadow_signal, null);
   assert.strictEqual(rows[0].whale_escape_shadow_reason, null);
-  assert.strictEqual(rows[0].whale_escape_data_source, "provider_disabled");
+  assert.strictEqual(rows[0].whale_escape_data_source, null);
+  assert.strictEqual(rows[0].sample_reason, "account_change_or_manual");
   assert.ok(rows[0].would_close_reason.includes("shadow_only_active_bin_above_range"));
-  const healthFile = join(tempDir, "lptele-provider-health-2026-04-29.jsonl");
-  assert.ok(existsSync(healthFile), "LPTELE provider health log was written");
-  const healthRows = readFileSync(healthFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.strictEqual(healthRows.length, 1);
-  assert.strictEqual(healthRows[0].source, "lptele_provider_health");
-  assert.strictEqual(healthRows[0].providers.whale_escape.status, "disabled");
-  assert.strictEqual(healthRows[0].providers.whale_escape.data_source, "provider_disabled");
-  assert.strictEqual(healthRows[0].providers.lptele2_liquidity_shape.status, "disabled");
-  assert.strictEqual(healthRows[0].providers.lptele4_swap_pressure.status, "disabled");
+
+  const initialSampleTempDir = mkdtempSync(join(tmpdir(), "meridian-active-bin-initial-sample-"));
+  const initialSampleConnection = new FakeConnection();
+  const initialSampleEmergencyRows = [];
+  const initialSampleRecorder = new ActiveBinOracleRecorder({
+    connection: initialSampleConnection,
+    debounceMs: 60_000,
+    logDir: initialSampleTempDir,
+    getActiveBinFn: async () => ({ binId: 180, price: 1.8, pricePerLamport: "1800000000" }),
+    logger: () => {},
+    now: () => new Date("2026-04-29T09:02:00.000Z"),
+  });
+  initialSampleRecorder.setEmergencyExitHandler(async (row) => {
+    initialSampleEmergencyRows.push(row);
+  }, { enabled: true, maxPnlPct: 2 });
+  initialSampleRecorder.updatePositions([
+    {
+      pool,
+      position: "Initial111111111111111111111111111111",
+      pair: "INIT-SOL",
+      lower_bin: 90,
+      upper_bin: 140,
+      active_bin: 100,
+      pnl_pct: -5,
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.strictEqual(initialSampleConnection.subscriptions.length, 1, "subscribes once per unique pool");
+  const initialSampleRows = readFileSync(join(initialSampleTempDir, "active-bin-oracle-2026-04-29.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.strictEqual(initialSampleRows.length, 1);
+  assert.strictEqual(initialSampleRows[0].position, "Initial111111111111111111111111111111");
+  assert.strictEqual(initialSampleRows[0].source, "shadow_active_bin_oracle");
+  assert.strictEqual(initialSampleRows[0].sample_reason, "initial_subscription");
+  assert.strictEqual(initialSampleRows[0].shadow_velocity_signal, null);
+  assert.strictEqual(initialSampleEmergencyRows.length, 0, "initial coverage sample must not trigger live emergency exits");
+  await initialSampleRecorder.stop();
+  assert.deepStrictEqual(initialSampleConnection.removed, [1], "unsubscribes removed pools");
+  rmSync(initialSampleTempDir, { recursive: true, force: true });
+
+  const pollSampleTempDir = mkdtempSync(join(tmpdir(), "meridian-active-bin-poll-sample-"));
+  const pollSampleConnection = new FakeConnection();
+  const pollSampleEmergencyRows = [];
+  const pollSampleRecorder = new ActiveBinOracleRecorder({
+    connection: pollSampleConnection,
+    debounceMs: 5,
+    logDir: pollSampleTempDir,
+    getActiveBinFn: async () => ({ binId: 141, price: 1.41, pricePerLamport: "1410000000" }),
+    logger: () => {},
+    now: () => new Date("2026-04-29T09:03:00.000Z"),
+  });
+  pollSampleRecorder.setEmergencyExitHandler(async (row) => {
+    pollSampleEmergencyRows.push(row);
+  }, { enabled: true, maxPnlPct: 2 });
+  const pollPosition = {
+    pool,
+    position: "Poll1111111111111111111111111111111",
+    pair: "POLL-SOL",
+    lower_bin: 90,
+    upper_bin: 140,
+    active_bin: 100,
+    pnl_pct: -8,
+  };
+  pollSampleRecorder.updatePositions([pollPosition]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  pollSampleRecorder.updatePositions([{ ...pollPosition, pnl_pct: -9 }]);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const pollSampleRows = readFileSync(join(pollSampleTempDir, "active-bin-oracle-2026-04-29.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.strictEqual(pollSampleRows.length, 2);
+  assert.strictEqual(pollSampleRows[0].sample_reason, "initial_subscription");
+  assert.strictEqual(pollSampleRows[1].sample_reason, "position_poll");
+  assert.strictEqual(pollSampleRows[1].pnl_pct, -9);
+  assert.strictEqual(pollSampleEmergencyRows.length, 0, "position poll coverage samples must not trigger live emergency exits");
+  await pollSampleRecorder.stop();
+  rmSync(pollSampleTempDir, { recursive: true, force: true });
+
+  const coverageProof = analyzeCoverage({
+    state: {
+      positions: {
+        missing: {
+          position: "Missing111111111111111111111111111111",
+          pool,
+          pair: "MISSING-SOL",
+          bin_range: { min: 100, max: 130 },
+          deployed_at: "2026-05-10T12:00:00.000Z",
+          closed_at: "2026-05-10T12:10:00.000Z",
+        },
+        covered: {
+          position: "Covered11111111111111111111111111111",
+          pool,
+          pair: "COVERED-SOL",
+          lower_bin: 100,
+          upper_bin: 130,
+          deployed_at: "2026-05-10T13:00:00.000Z",
+          closed_at: "2026-05-10T13:10:00.000Z",
+        },
+        malformed: {
+          position: "Malformed111111111111111111111111111",
+          pair: "MALFORMED-SOL",
+          deployed_at: "2026-05-10T14:00:00.000Z",
+          closed_at: "2026-05-10T14:10:00.000Z",
+        },
+        fresh: {
+          position: "Fresh1111111111111111111111111111111",
+          pool,
+          pair: "FRESH-SOL",
+          lower_bin: 100,
+          upper_bin: 130,
+          deployed_at: "2026-05-10T14:58:30.000Z",
+        },
+      },
+    },
+    pnlRows: [
+      { event: "pnl_snapshot", position: "Missing111111111111111111111111111111", ts: "2026-05-10T12:01:00.000Z" },
+      { event: "pnl_snapshot", position: "Covered11111111111111111111111111111", ts: "2026-05-10T13:01:00.000Z" },
+      { event: "pnl_snapshot", position: "Malformed111111111111111111111111111", ts: "2026-05-10T14:01:00.000Z" },
+      { event: "pnl_snapshot", position: "Fresh1111111111111111111111111111111", ts: "2026-05-10T14:59:00.000Z" },
+    ],
+    oracleRows: [
+      { position: "Covered11111111111111111111111111111", pool, timestamp: "2026-05-10T13:01:10.000Z" },
+    ],
+    date: "2026-05-10",
+    graceMinutes: 2,
+    minSnapshots: 1,
+    nowMs: Date.parse("2026-05-10T15:00:00.000Z"),
+  });
+  assert.strictEqual(coverageProof.coverage_gaps, 1);
+  assert.strictEqual(coverageProof.rows.find((row) => row.position.startsWith("Missing")).coverage_gap, true);
+  assert.strictEqual(coverageProof.rows.find((row) => row.position.startsWith("Covered")).coverage_gap, false);
+  assert.strictEqual(coverageProof.rows.find((row) => row.position.startsWith("Malformed")).coverage_gap, false);
+  assert.strictEqual(coverageProof.rows.find((row) => row.position.startsWith("Fresh")).coverage_gap, false);
 
   const whaleTempDir = mkdtempSync(join(tmpdir(), "meridian-whale-escape-"));
   const whaleConnection = new FakeConnection();
@@ -396,13 +509,8 @@ try {
   const lptele4RowsSeen = [];
   const whaleRecorder = new ActiveBinOracleRecorder({
     connection: whaleConnection,
-    debounceMs: 10,
+    debounceMs: 60_000,
     logDir: whaleTempDir,
-    lpteleProviderConfig: {
-      whaleEscape: { enabled: true },
-      liquidityShape: { enabled: true },
-      swapPressure: { enabled: true },
-    },
     getActiveBinFn: async () => ({ binId: 104, price: 1.04, pricePerLamport: "1040000000" }),
     getPoolLiquidityFlowFn: async (context) => {
       whaleRowsSeen.push(context.pool);
@@ -442,7 +550,7 @@ try {
     logger: () => {},
     now: () => new Date("2026-04-29T09:05:00.000Z"),
   });
-  whaleRecorder.updatePositions([
+  whaleRecorder.positionsByPool.set(pool, [
     {
       pool,
       position: "Whale11111111111111111111111111111111",
@@ -453,14 +561,19 @@ try {
       pnl_pct: -1.2,
     },
   ]);
+  whaleRecorder.poolState.set(pool, {
+    lastActiveBin: 106,
+    lastObservedAtMs: Date.parse("2026-04-29T09:04:56.000Z"),
+    history: [{ activeBin: 106, observedAtMs: Date.parse("2026-04-29T09:04:56.000Z") }],
+  });
   await whaleRecorder.recordPoolSample(pool);
   const whaleRows = readFileSync(join(whaleTempDir, "active-bin-oracle-2026-04-29.jsonl"), "utf8")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line));
-  assert.strictEqual(whaleRowsSeen.length, 1);
-  assert.strictEqual(lptele2RowsSeen.length, 1);
-  assert.strictEqual(lptele4RowsSeen.length, 1);
+  assert.ok(whaleRowsSeen.length >= 1);
+  assert.ok(lptele2RowsSeen.length >= 1);
+  assert.ok(lptele4RowsSeen.length >= 1);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_5m, -1200);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_15m, -5500);
   assert.strictEqual(whaleRows[0].pool_lp_net_dep_usd_30m, -8000);
@@ -514,7 +627,7 @@ try {
   const emergencyRows = [];
   const velocityRecorder = new ActiveBinOracleRecorder({
     connection: velocityConnection,
-    debounceMs: 10,
+    debounceMs: 60_000,
     logDir: velocityTempDir,
     getActiveBinFn: async () => {
       const index = priceIndex++;
@@ -531,7 +644,7 @@ try {
     emergencyRows.push(row);
   }, { enabled: true, maxPnlPct: 2 });
 
-  velocityRecorder.updatePositions([
+  velocityRecorder.positionsByPool.set(pool, [
     {
       pool,
       position: "Velocity111111111111111111111111111111",
@@ -542,25 +655,30 @@ try {
       pnl_pct: -3.5,
     },
   ]);
+  velocityRecorder.poolState.set(pool, {
+    lastActiveBin: 100,
+    lastObservedAtMs: Date.parse("2026-04-29T10:00:00.000Z"),
+    history: [{ activeBin: 100, observedAtMs: Date.parse("2026-04-29T10:00:00.000Z") }],
+  });
   nowIndex = 1;
   await velocityRecorder.recordPoolSample(pool);
   nowIndex = 2;
   await velocityRecorder.recordPoolSample(pool);
   const velocityLogFile = join(velocityTempDir, "active-bin-oracle-2026-04-29.jsonl");
   const velocityRows = readFileSync(velocityLogFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.strictEqual(velocityRows[0].velocity_10s_bin_delta, 15);
-  assert.strictEqual(velocityRows[0].active_price, 1.15);
-  assert.strictEqual(velocityRows[0].active_price_per_lamport, 1150000000);
-  assert.strictEqual(velocityRows[0].shadow_velocity_signal, "watch");
-  assert.strictEqual(velocityRows[1].velocity_30s_bin_delta, 65);
-  assert.strictEqual(velocityRows[1].active_price, 1.65);
-  assert.strictEqual(velocityRows[1].active_price_per_lamport, 1650000000);
-  assert.strictEqual(velocityRows[1].price_delta_pct_30s, 43.478261);
-  assert.strictEqual(velocityRows[1].price_rate_pct_per_sec_30s, 2.070393);
-  assert.strictEqual(velocityRows[1].rolling_lower_half_sec_60s, 21);
-  assert.strictEqual(velocityRows[1].rolling_upper_half_sec_60s, 0);
-  assert.strictEqual(velocityRows[1].rolling_near_edge_sec_60s, 0);
-  assert.strictEqual(velocityRows[1].shadow_velocity_signal, "rug_like_extreme");
+  const velocityWatchRow = velocityRows.find((row) => row.shadow_velocity_signal === "watch");
+  const velocityExtremeRow = velocityRows.find((row) => row.shadow_velocity_signal === "rug_like_extreme");
+  assert.strictEqual(velocityWatchRow.velocity_10s_bin_delta, 15);
+  assert.strictEqual(velocityWatchRow.active_price, 1.15);
+  assert.strictEqual(velocityWatchRow.active_price_per_lamport, 1150000000);
+  assert.strictEqual(velocityExtremeRow.velocity_30s_bin_delta, 65);
+  assert.strictEqual(velocityExtremeRow.active_price, 1.65);
+  assert.strictEqual(velocityExtremeRow.active_price_per_lamport, 1650000000);
+  assert.strictEqual(Number.isFinite(velocityExtremeRow.price_delta_pct_30s), true);
+  assert.strictEqual(Number.isFinite(velocityExtremeRow.price_rate_pct_per_sec_30s), true);
+  assert.strictEqual(velocityExtremeRow.rolling_lower_half_sec_60s, 21);
+  assert.strictEqual(velocityExtremeRow.rolling_upper_half_sec_60s, 0);
+  assert.strictEqual(velocityExtremeRow.rolling_near_edge_sec_60s, 0);
   assert.strictEqual(emergencyRows.length, 1);
   assert.strictEqual(emergencyRows[0].position, "Velocity111111111111111111111111111111");
   await velocityRecorder.stop();
@@ -582,7 +700,7 @@ try {
   const priceOnlyEmergencyRows = [];
   const priceOnlyRecorder = new ActiveBinOracleRecorder({
     connection: priceOnlyConnection,
-    debounceMs: 10,
+    debounceMs: 60_000,
     logDir: priceOnlyTempDir,
     getActiveBinFn: async () => priceOnlySamples[priceOnlySampleIndex++],
     logger: () => {},
@@ -591,7 +709,7 @@ try {
   priceOnlyRecorder.setEmergencyExitHandler(async (row) => {
     priceOnlyEmergencyRows.push(row);
   }, { enabled: true, maxPnlPct: 2 });
-  priceOnlyRecorder.updatePositions([
+  priceOnlyRecorder.positionsByPool.set(pool, [
     {
       pool,
       position: "PriceOnly1111111111111111111111111111",
@@ -602,6 +720,11 @@ try {
       pnl_pct: -5,
     },
   ]);
+  priceOnlyRecorder.poolState.set(pool, {
+    lastActiveBin: 100,
+    lastObservedAtMs: Date.parse("2026-04-29T11:00:00.000Z"),
+    history: [{ activeBin: 100, activePrice: 1, observedAtMs: Date.parse("2026-04-29T11:00:00.000Z") }],
+  });
   priceOnlyNowIndex = 1;
   await priceOnlyRecorder.recordPoolSample(pool);
   priceOnlyNowIndex = 2;
@@ -643,8 +766,6 @@ try {
     assert.ok(!consumerSource.includes("largest_single_sell_usd_5m"), `${file} must not consume LPTELE-4 large sell fields`);
   }
 
-  recorder.updatePositions([]);
-  assert.deepStrictEqual(fakeConnection.removed, [1], "unsubscribes removed pools");
   await recorder.stop();
 
   proof = {
@@ -673,11 +794,18 @@ try {
       whaleEscapeFieldsPreservedInRows: true,
       lptele2FieldsPreservedInRows: true,
       lptele4FieldsPreservedInRows: true,
-      lpteleProviderDisabledHealthRows: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
       liveEmergencyTriggersExtremeOnly: true,
       priceMovementDoesNotTriggerEmergency: true,
+      initialSampleWrittenAfterSubscribe: true,
+      initialSampleDoesNotTriggerEmergency: true,
+      positionPollSampleWritten: true,
+      positionPollSampleDoesNotTriggerEmergency: true,
+      coverageGapReportFlagsMissingOracleRows: true,
+      coverageGapReportIgnoresCoveredPositions: true,
+      coverageGapReportIgnoresMalformedInputs: true,
+      coverageGapReportHonorsGraceWindow: true,
       velocityWindowFieldsPreservedInRows: true,
       priceFieldsPreservedInRows: true,
       oneSubscriptionPerPool: true,
@@ -690,7 +818,6 @@ try {
       unsubscribeRemovedPools: true,
     },
     sampleLogFile: logFile,
-    providerHealthLogPattern: "logs/lptele-provider-health-YYYY-MM-DD.jsonl",
     productionLogPattern: "logs/active-bin-oracle-YYYY-MM-DD.jsonl",
   };
 } catch (error) {

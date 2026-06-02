@@ -149,10 +149,11 @@ assert.ok(thresholdCases.lowQuoteOrganic?.includes("quote_organic_score"), "low 
 
 const configBuilderSource = src("config-builder.js");
 const gmgnSource = src("tools/gmgn.js");
+const meteoraResolverSource = src("tools/meteora-pool-resolver.js");
 const screeningSource = src("tools/screening.js");
 const verifierSource = src("scripts/verify-scout-gmgn-first-discovery.js");
 
-assert.ok(configBuilderSource.includes('const SCREENING_SOURCES = new Set(["meteora", "gmgn", "both"])'), "supported screening source set is explicit");
+assert.ok(configBuilderSource.includes('"gmgn"') && configBuilderSource.includes('"both"') && configBuilderSource.includes('"all"'), "supported screening source set is explicit");
 assert.ok(configBuilderSource.includes("normalizeScreeningSource"), "screening source normalizer exists");
 assert.ok(configBuilderSource.includes("resolveEnvReference(g.apiKey ?? u.gmgnApiKey"), "GMGN key can resolve from env reference without committing secrets");
 
@@ -162,7 +163,7 @@ assert.ok(gmgnSource.includes('"/v1/token/info"'), "GMGN token info endpoint is 
 assert.ok(gmgnSource.includes('"/v1/market/token_top_holders"'), "GMGN holders endpoint is wired");
 assert.ok(gmgnSource.includes('"/v1/market/token_top_traders"'), "GMGN traders endpoint is wired");
 assert.ok(gmgnSource.includes("fetchTopMeteoraDlmmPoolsForMint"), "GMGN tokens map back to Meteora DLMM pools");
-assert.ok(gmgnSource.includes("quoteIsSol"), "GMGN pool mapper requires SOL quote pools");
+assert.ok(meteoraResolverSource.includes("quoteIsSol"), "shared pool mapper requires SOL quote pools");
 assert.ok(gmgnSource.includes('discovery_source: "gmgn"'), "GMGN candidates are source-tagged");
 assert.ok(gmgnSource.includes("organic_score: optionalNum"), "GMGN candidates carry organic score when Meteora detail provides it");
 assert.ok(gmgnSource.includes("quote_organic_score: optionalNum"), "GMGN candidates carry quote organic score when Meteora detail provides it");

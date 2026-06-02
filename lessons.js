@@ -737,8 +737,10 @@ export function getPerformanceHistory({ hours = 24, limit = 50 } = {}) {
     .map((r) => {
       const material = classifyMaterialOutcome(r, runtimeConfig);
       return {
+        position: r.position ?? null,
         pool_name: r.pool_name,
         pool: r.pool,
+        base_mint: r.base_mint ?? r.signal_snapshot?.base_mint ?? null,
         strategy: r.strategy,
         pnl_usd: r.pnl_usd,
         pnl_pct: r.pnl_pct,

@@ -36,7 +36,6 @@ const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstre
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH = join(__dirname, "verify-post-close-autoswap-logging.js");
-const DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH = join(__dirname, "verify-direct-close-inflight-guard.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -44,16 +43,15 @@ const NANOCAP_BOLLINGER_CANARY_VERIFIER_PATH = join(__dirname, "verify-nanocap-b
 const SUPERTREND_LOSS_EXIT_VERIFIER_PATH = join(__dirname, "verify-supertrend-loss-exit.js");
 const SUPERTREND_URGENT_RUNTIME_VERIFIER_PATH = join(__dirname, "verify-supertrend-urgent-runtime-proof.js");
 const ACTIVE_BIN_ORACLE_VERIFIER_PATH = join(__dirname, "verify-active-bin-oracle.js");
-const WHALE_ESCAPE_PROVIDER_WIRING_VERIFIER_PATH = join(__dirname, "verify-whale-escape-provider-wiring.js");
-const LP_WITHDRAWAL_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lp-withdrawal-provider.js");
-const LPTELE2_SHAPE_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lptele2-shape-provider.js");
-const LPTELE4_SWAP_PRESSURE_PROVIDER_VERIFIER_PATH = join(__dirname, "verify-lptele4-swap-pressure-provider.js");
 const OOR_REPOSITION_VERIFIER_PATH = join(__dirname, "verify-oor-reposition.js");
 const ADAPTIVE_CLOSE_MODE_VERIFIER_PATH = join(__dirname, "verify-adaptive-close-mode.js");
 const SCOUT_STRATEGY_LIBRARY_CONFIG_VERIFIER_PATH = join(__dirname, "verify-scout-strategy-library-config.js");
+const SCOUT_DIRECT_SPOT_VERIFIER_PATH = join(__dirname, "verify-scout-direct-spot-single-sided-sol.js");
 const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-gmgn-first-discovery.js");
 const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-discovery-shadow.js");
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
+const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
+const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -317,28 +315,13 @@ function runPostCloseAutoswapLoggingProof() {
   const result = spawnSync(process.execPath, [POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH], {
     cwd: ROOT,
     encoding: "utf8",
-  });
-
-  if (result.status !== 0) {
-    const stderr = result.stderr?.trim() || "(no stderr)";
-    const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-post-close-autoswap-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  }
-
-  return JSON.parse(result.stdout);
-}
-
-function runDirectCloseInflightGuardProof() {
-  const result = spawnSync(process.execPath, [DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH], {
-    cwd: ROOT,
-    encoding: "utf8",
     env: { ...process.env, LOG_LEVEL: "error" },
   });
 
   if (result.status !== 0) {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-direct-close-inflight-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+    throw new Error(`verify-post-close-autoswap-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -472,70 +455,6 @@ function runActiveBinOracleProof() {
   return JSON.parse(result.stdout);
 }
 
-function runWhaleEscapeProviderWiringProof() {
-  const result = spawnSync(process.execPath, [WHALE_ESCAPE_PROVIDER_WIRING_VERIFIER_PATH], {
-    cwd: ROOT,
-    encoding: "utf8",
-    env: { ...process.env, LOG_LEVEL: "error" },
-  });
-
-  if (result.status !== 0) {
-    const stderr = result.stderr?.trim() || "(no stderr)";
-    const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-whale-escape-provider-wiring failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  }
-
-  return JSON.parse(result.stdout);
-}
-
-function runLpWithdrawalProviderProof() {
-  const result = spawnSync(process.execPath, [LP_WITHDRAWAL_PROVIDER_VERIFIER_PATH], {
-    cwd: ROOT,
-    encoding: "utf8",
-    env: { ...process.env, LOG_LEVEL: "error" },
-  });
-
-  if (result.status !== 0) {
-    const stderr = result.stderr?.trim() || "(no stderr)";
-    const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-lp-withdrawal-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  }
-
-  return JSON.parse(result.stdout);
-}
-
-function runLptele2ShapeProviderProof() {
-  const result = spawnSync(process.execPath, [LPTELE2_SHAPE_PROVIDER_VERIFIER_PATH], {
-    cwd: ROOT,
-    encoding: "utf8",
-    env: { ...process.env, LOG_LEVEL: "error" },
-  });
-
-  if (result.status !== 0) {
-    const stderr = result.stderr?.trim() || "(no stderr)";
-    const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-lptele2-shape-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  }
-
-  return JSON.parse(result.stdout);
-}
-
-function runLptele4SwapPressureProviderProof() {
-  const result = spawnSync(process.execPath, [LPTELE4_SWAP_PRESSURE_PROVIDER_VERIFIER_PATH], {
-    cwd: ROOT,
-    encoding: "utf8",
-    env: { ...process.env, LOG_LEVEL: "error" },
-  });
-
-  if (result.status !== 0) {
-    const stderr = result.stderr?.trim() || "(no stderr)";
-    const stdout = result.stdout?.trim() || "(no stdout)";
-    throw new Error(`verify-lptele4-swap-pressure-provider failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
-  }
-
-  return JSON.parse(result.stdout);
-}
-
 function runAdaptiveCloseModeProof() {
   const result = spawnSync(process.execPath, [ADAPTIVE_CLOSE_MODE_VERIFIER_PATH], {
     cwd: ROOT,
@@ -563,6 +482,22 @@ function runScoutStrategyLibraryConfigProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-scout-strategy-library-config failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runScoutDirectSpotProof() {
+  const result = spawnSync(process.execPath, [SCOUT_DIRECT_SPOT_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-direct-spot-single-sided-sol failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -616,6 +551,38 @@ function runScoutDualSourceDiscoveryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runScoutFeeVelocityLiveCanaryProof() {
+  const result = spawnSync(process.execPath, [SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-scout-fee-velocity-live-canary failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runTwoLaneGateProof() {
+  const result = spawnSync(process.execPath, [TWO_LANE_GATE_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-two-lane-gate failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -637,7 +604,6 @@ function buildChecks() {
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
   const postCloseAutoswapLoggingProof = runPostCloseAutoswapLoggingProof();
-  const directCloseInflightGuardProof = runDirectCloseInflightGuardProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -645,18 +611,67 @@ function buildChecks() {
   const supertrendLossExitProof = runSupertrendLossExitProof();
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
   const activeBinOracleProof = runActiveBinOracleProof();
-  const whaleEscapeProviderWiringProof = runWhaleEscapeProviderWiringProof();
-  const lpWithdrawalProviderProof = runLpWithdrawalProviderProof();
-  const lptele2ShapeProviderProof = runLptele2ShapeProviderProof();
-  const lptele4SwapPressureProviderProof = runLptele4SwapPressureProviderProof();
   const oorRepositionProof = runOorRepositionProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
+  const scoutDirectSpotProof = runScoutDirectSpotProof();
   const scoutGmgnFirstDiscoveryProof = runScoutGmgnFirstDiscoveryProof();
   const scoutDiscoveryShadowProof = runScoutDiscoveryShadowProof();
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
+  const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
+  const twoLaneGateProof = runTwoLaneGateProof();
 
   return [
+    {
+      file: "scripts/verify-two-lane-gate.js",
+      label: "[Scout two-lane gate] T1 is pure shadow and preserves live candidate acceptance",
+      test: () =>
+        twoLaneGateProof?.success === true &&
+        twoLaneGateProof?.acceptanceParity === true &&
+        twoLaneGateProof?.belowLiveFloorRejected === true &&
+        twoLaneGateProof?.looseSupplementalVetoShadowOnly === true &&
+        twoLaneGateProof?.primaryAccepted === true &&
+        twoLaneGateProof?.futureHardGateNotOverridden === true &&
+        twoLaneGateProof?.sourceGuardNoDeployConsumers === true &&
+        twoLaneGateProof?.decisionContextFields?.feeLane === "loose" &&
+        twoLaneGateProof?.decisionContextFields?.looseLaneQualified === false &&
+        twoLaneGateProof?.decisionContextFields?.hasLooseLaneVeto === true,
+    },
+    {
+      file: "scripts/verify-scout-fee-velocity-live-canary.js",
+      label: "[Scout fee-velocity canary] code-only H2 gate and H1/H3/H4/H5 shadow metadata are deterministic",
+      test: () =>
+        scoutFeeVelocityLiveCanaryProof?.success === true &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.minVolumeActiveTvlMultiple === null &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.preferredVolumeActiveTvlMultiple === null &&
+        scoutFeeVelocityLiveCanaryProof?.defaults?.sameTickerSurfEnabled === false &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.defaultDoesNotHardGate === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.belowThresholdRejected === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.aboveThresholdAccepted === true &&
+        scoutFeeVelocityLiveCanaryProof?.gateProof?.filteredExamplesCarryReason === true &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.volume_active_tvl_multiple) === 5 &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.fee_velocity_usd_per_min) === 120 &&
+        Number(scoutFeeVelocityLiveCanaryProof?.metadataProof?.target_downside_bins) === 17 &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.sameTickerSurfDefaultFalse === true &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.noShadowVelocitySignalPiggyback === true &&
+        scoutFeeVelocityLiveCanaryProof?.metadataProof?.percentPolicyDoesNotInjectBins === true &&
+        scoutFeeVelocityLiveCanaryProof?.strategyExample?.activeUnchanged === true &&
+        scoutFeeVelocityLiveCanaryProof?.strategyExample?.feeVelocityStrategyPresent === true &&
+        scoutFeeVelocityLiveCanaryProof?.guardedOperationalWordingAbsent === true,
+    },
+    {
+      file: "strategy-library.js",
+      label: "[Scout] Fee-velocity entry shadow indicators — 5 signals, shadow-only, no live filtering",
+      test: (src) =>
+        src.includes("price_direction_shadow") &&
+        src.includes("sell_pressure_shadow") &&
+        src.includes("volume_tvl_threshold_shadow") &&
+        src.includes("fee_velocity_momentum_shadow") &&
+        src.includes("quality_vs_velocity_shadow") &&
+        src.includes("shadow_only") &&
+        !src.includes('pushFilteredReason(filteredOut, p, "price_direction') &&
+        !src.includes('pushFilteredReason(filteredOut, p, "sell_pressure'),
+    },
     {
       file: "scripts/verify-scout-dual-source-discovery.js",
       label: "[Scout dual-source discovery] both mode resolves GMGN and Meteora before shared gates",
@@ -697,9 +712,10 @@ function buildChecks() {
     },
     {
       file: "scripts/verify-scout-strategy-library-config.js",
-      label: "[Scout strategy library] tight-bin range is strategy/config-driven and clamps deploy args",
+      label: "[Scout strategy library] direct Spot runtime and tracked bid_ask example are strategy/config-driven",
       test: () =>
         scoutStrategyLibraryConfigProof?.success === true &&
+        scoutStrategyLibraryConfigProof?.spot_strategy_verified === true &&
         scoutStrategyLibraryConfigProof?.range_policy_from_json === true &&
         scoutStrategyLibraryConfigProof?.clamps_low_bins_to_min === true &&
         scoutStrategyLibraryConfigProof?.clamps_high_bins_to_max === true &&
@@ -708,7 +724,24 @@ function buildChecks() {
         scoutStrategyLibraryConfigProof?.no_prompt_formula === true &&
         scoutStrategyLibraryConfigProof?.no_index_formula === true &&
         scoutStrategyLibraryConfigProof?.tracked_example_matches_runtime_shape === true &&
+        scoutStrategyLibraryConfigProof?.tracked_example_contains_spot_strategy === true &&
+        scoutStrategyLibraryConfigProof?.spot_repair_preserves_spot === true &&
         scoutStrategyLibraryConfigProof?.no_executor_strategy_id === true,
+    },
+    {
+      file: "scripts/verify-scout-direct-spot-single-sided-sol.js",
+      label: "[Scout direct spot] true Spot strategy deploys without bid_ask reversion, max-hold exits, range guard validates",
+      test: () =>
+        scoutDirectSpotProof?.success === true &&
+        scoutDirectSpotProof?.strategy_resolution === true &&
+        scoutDirectSpotProof?.prompt_guidance === true &&
+        scoutDirectSpotProof?.guard_preserves_spot === true &&
+        scoutDirectSpotProof?.deploy_range_guard === true &&
+        scoutDirectSpotProof?.relay_payload === true &&
+        scoutDirectSpotProof?.target_downside_bins === true &&
+        scoutDirectSpotProof?.no_bidask_fallback === true &&
+        scoutDirectSpotProof?.max_hold === true &&
+        scoutDirectSpotProof?.tail_loss_agnostic === true,
     },
     {
       file: "scripts/verify-active-bin-oracle.js",
@@ -726,71 +759,15 @@ function buildChecks() {
         activeBinOracleProof?.checks?.whaleEscapeWatchSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeCandidateSignal === true &&
         activeBinOracleProof?.checks?.whaleEscapeFieldsPreservedInRows === true &&
+        activeBinOracleProof?.checks?.initialSampleWrittenAfterSubscribe === true &&
+        activeBinOracleProof?.checks?.initialSampleDoesNotTriggerEmergency === true &&
+        activeBinOracleProof?.checks?.coverageGapReportFlagsMissingOracleRows === true &&
+        activeBinOracleProof?.checks?.coverageGapReportIgnoresCoveredPositions === true &&
+        activeBinOracleProof?.checks?.coverageGapReportIgnoresMalformedInputs === true &&
+        activeBinOracleProof?.checks?.coverageGapReportHonorsGraceWindow === true &&
         activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
         activeBinOracleProof?.checks?.noRangeProximityExecutionConsumers === true &&
         activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
-    },
-    {
-      file: "scripts/verify-whale-escape-provider-wiring.js",
-      label: "[Whale Escape provider wiring] explicit disabled scaffold and health guard are detectable",
-      test: () =>
-        whaleEscapeProviderWiringProof?.success === true &&
-        whaleEscapeProviderWiringProof?.classification === "disabled_provider_scaffold" &&
-        whaleEscapeProviderWiringProof?.production_wiring?.production_constructor_has_explicit_args === true &&
-        whaleEscapeProviderWiringProof?.production_wiring?.production_uses_provider_config === true &&
-        whaleEscapeProviderWiringProof?.production_wiring?.whale_escape_provider_module_wired === true &&
-        whaleEscapeProviderWiringProof?.production_wiring?.lptele2_provider_module_wired === true &&
-        whaleEscapeProviderWiringProof?.production_wiring?.lptele4_provider_module_wired === true &&
-        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.whale_escape === "disabled" &&
-        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.lptele2_liquidity_shape === "disabled" &&
-        whaleEscapeProviderWiringProof?.production_wiring?.provider_statuses?.lptele4_swap_pressure === "disabled" &&
-        whaleEscapeProviderWiringProof?.health_guard?.provider_health?.hasHealthLogFile === true &&
-        whaleEscapeProviderWiringProof?.health_guard?.provider_data_sources?.providerDisabledSource === true &&
-        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.whale_escape_fields_preserved === true &&
-        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.lptele2_fields_preserved === true &&
-        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.lptele4_fields_preserved === true &&
-        whaleEscapeProviderWiringProof?.synthetic_provider_injection?.disabled_health_rows_written === true &&
-        whaleEscapeProviderWiringProof?.execution_consumers?.has_whale_escape_or_lptele_execution_consumers === false,
-    },
-    {
-      file: "scripts/verify-lp-withdrawal-provider.js",
-      label: "[Whale Escape provider] LP add/remove TX decode provider is wired and shadow-only",
-      test: () =>
-        lpWithdrawalProviderProof?.success === true &&
-        lpWithdrawalProviderProof?.checks?.includes("mock LP remove counted") &&
-        lpWithdrawalProviderProof?.checks?.includes("bot wallet signer excluded") &&
-        lpWithdrawalProviderProof?.checks?.includes("mock swap ignored") &&
-        lpWithdrawalProviderProof?.checks?.includes("quiet pool returns zeros") &&
-        lpWithdrawalProviderProof?.checks?.includes("rate-limit source is explicit") &&
-        lpWithdrawalProviderProof?.checks?.includes("uses shared tx decode cache") &&
-        lpWithdrawalProviderProof?.checks?.includes("index wires pool liquidity provider"),
-    },
-    {
-      file: "scripts/verify-lptele2-shape-provider.js",
-      label: "[LPTELE-2 provider] bin-state liquidity shape provider is wired and shadow-only",
-      test: () =>
-        lptele2ShapeProviderProof?.success === true &&
-        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes active quote reserve") &&
-        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes below support") &&
-        lptele2ShapeProviderProof?.checks?.includes("mock bin state computes liquidity cliff") &&
-        lptele2ShapeProviderProof?.checks?.includes("position share unavailable is explicit") &&
-        lptele2ShapeProviderProof?.checks?.includes("quiet bins return zeros") &&
-        lptele2ShapeProviderProof?.checks?.includes("error source is explicit") &&
-        lptele2ShapeProviderProof?.checks?.includes("index wires LPTELE-2 provider"),
-    },
-    {
-      file: "scripts/verify-lptele4-swap-pressure-provider.js",
-      label: "[LPTELE-4 provider] swap-pressure provider is wired and shadow-only",
-      test: () =>
-        lptele4SwapPressureProviderProof?.success === true &&
-        lptele4SwapPressureProviderProof?.checks?.includes("mock sell swap increases sell pressure") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("mock buy swap increases buy pressure") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("large sell threshold counted") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("LP events do not leak into swap pressure") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("slippage p95 deferred with explicit reason") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("quiet swaps return zeros") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("error source is explicit") &&
-        lptele4SwapPressureProviderProof?.checks?.includes("index wires LPTELE-4 provider"),
     },
     {
       file: "scripts/verify-adaptive-close-mode.js",
@@ -906,16 +883,6 @@ function buildChecks() {
         postCloseAutoswapLoggingProof?.checks?.includes("successful post-close autoswap records SOL received") &&
         postCloseAutoswapLoggingProof?.checks?.includes("deploy is blocked by residual non-SOL token value") &&
         postCloseAutoswapLoggingProof?.checks?.includes("close action summary includes post-close swap truth fields"),
-    },
-    {
-      file: "index.js",
-      label: "[Runtime] direct TP/SL close paths are guarded against duplicate in-flight closes",
-      test: () =>
-        directCloseInflightGuardProof?.success === true &&
-        directCloseInflightGuardProof?.checks?.includes("per-position close-in-flight map exists") &&
-        directCloseInflightGuardProof?.checks?.includes("fresh duplicate close attempts are skipped") &&
-        directCloseInflightGuardProof?.checks?.includes("all index.js close_position calls route through guarded helper") &&
-        directCloseInflightGuardProof?.checks?.includes("PnL poll duplicate skips continue scanning other positions"),
     },
     {
       file: "config-builder.js",
@@ -1997,46 +1964,6 @@ function buildChecks() {
       file: "tools/wallet.js",
       label: "[Upstream] Jupiter v2 swap endpoint present",
       test: (src) => src.includes("v6") || src.includes("jup.ag") || src.includes("jupiter"),
-    },
-    {
-      file: "config-builder.js",
-      label: "[TP direct close] tpDirectCloseEnabled config field present",
-      test: (src) => src.includes("tpDirectCloseEnabled: u.tpDirectCloseEnabled ?? true"),
-    },
-    {
-      file: "config-builder.js",
-      label: "[TP direct close] tpDirectCloseUrgent config field present",
-      test: (src) => src.includes("tpDirectCloseUrgent: u.tpDirectCloseUrgent ?? false"),
-    },
-    {
-      file: "index.js",
-      label: "[TP direct close] Rule 2 TP bypasses LLM when tpDirectCloseEnabled",
-      test: (src) => src.includes("isTpRule && config.management.tpDirectCloseEnabled"),
-    },
-    {
-      file: "index.js",
-      label: "[TP direct close] Trailing recheck bypasses management cycle when tpDirectCloseEnabled",
-      test: (src) =>
-        src.includes("config.management.tpDirectCloseEnabled") &&
-        src.includes("[Trailing recheck] Confirmed trailing exit") &&
-        src.includes("closing directly (no LLM, no relay)"),
-    },
-    {
-      file: "index.js",
-      label: "[TP direct close] Confirmed trailing TP in PnL poller closes directly",
-      test: (src) =>
-        src.includes("exit.action === \"TRAILING_TP\" && exit.confirmed_recheck") &&
-        src.includes("[PnL poll] Confirmed trailing TP"),
-    },
-    {
-      file: "user-config.example.json",
-      label: "[TP direct close] tpDirectCloseEnabled present in example config",
-      test: (src) => src.includes('"tpDirectCloseEnabled"'),
-    },
-    {
-      file: "user-config.example.json",
-      label: "[TP direct close] tpDirectCloseUrgent present in example config",
-      test: (src) => src.includes('"tpDirectCloseUrgent"'),
     },
   ];
 }

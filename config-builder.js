@@ -252,6 +252,32 @@ export function buildConfig(userConfig = {}, env = process.env) {
       minTvl: u.minTvl ?? 10_000,
       maxTvl: u.maxTvl !== undefined ? u.maxTvl : 150_000,
       minVolume: u.minVolume ?? 500,
+      minVolumeActiveTvlMultiple: u.minVolumeActiveTvlMultiple ?? null,
+      preferredVolumeActiveTvlMultiple: u.preferredVolumeActiveTvlMultiple ?? null,
+      twoLaneClassificationLoggingEnabled: u.twoLaneClassificationLoggingEnabled ?? true,
+      twoLanePrimaryVolumeActiveTvlMultiple: u.twoLanePrimaryVolumeActiveTvlMultiple ?? 3,
+      looseVolumeActiveTvlMultiple: u.looseVolumeActiveTvlMultiple ?? 2.5,
+      feeVelocityShadowDownsidePct: Array.isArray(u.feeVelocityShadowDownsidePct) ? u.feeVelocityShadowDownsidePct : [7, 10, 12, 15, 20, 25],
+      feeVelocityShadowTakeProfitPct: Array.isArray(u.feeVelocityShadowTakeProfitPct) ? u.feeVelocityShadowTakeProfitPct : [6, 7, 8],
+      feeVelocityShadowFeeTvlFloors: Array.isArray(u.feeVelocityShadowFeeTvlFloors) ? u.feeVelocityShadowFeeTvlFloors : [0.12, 0.15, 0.19],
+      feeVelocityShadowPumpThresholds: Array.isArray(u.feeVelocityShadowPumpThresholds) ? u.feeVelocityShadowPumpThresholds : [30, 50, 100],
+      feeVelocityShadowSellBuyThresholds: Array.isArray(u.feeVelocityShadowSellBuyThresholds) ? u.feeVelocityShadowSellBuyThresholds : [1.2, 1.5, 2.0],
+      feeVelocityShadowVolTvlThresholds: Array.isArray(u.feeVelocityShadowVolTvlThresholds) ? u.feeVelocityShadowVolTvlThresholds : [3.5, 4.0, 4.5, 5.0, 6.0, 8.0],
+      sameTickerSurfEnabled: u.sameTickerSurfEnabled ?? false,
+      samePoolPostWinDecayEnabled: u.samePoolPostWinDecayEnabled ?? false,
+      samePoolPostWinCooldownMinutes: u.samePoolPostWinCooldownMinutes ?? 0,
+      samePoolPostWinMaterialPnlPct: u.samePoolPostWinMaterialPnlPct ?? 1,
+      samePoolPostWinRequireFreshDecayPass: u.samePoolPostWinRequireFreshDecayPass ?? false,
+      ohlcvEntryVetoShadowEnabled: u.ohlcvEntryVetoShadowEnabled ?? true,
+      ohlcvEntryVetoLiveEnabled: u.ohlcvEntryVetoLiveEnabled ?? false,
+      ohlcvEntryVetoHighDrawdownPct: u.ohlcvEntryVetoHighDrawdownPct ?? -45,
+      ohlcvEntryVetoEntryDrawdownPct: u.ohlcvEntryVetoEntryDrawdownPct ?? -20,
+      ohlcvEntryVetoExtremePriceChangePct: u.ohlcvEntryVetoExtremePriceChangePct ?? 500,
+      ohlcvEntryVetoRequireCompound: u.ohlcvEntryVetoRequireCompound ?? true,
+      ohlcvEntryVetoLiveReasonCodes: Array.isArray(u.ohlcvEntryVetoLiveReasonCodes)
+        ? u.ohlcvEntryVetoLiveReasonCodes
+        : ["high_drawdown_with_extreme_positive_candidate_price_change"],
+      preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
       minOrganic: u.minOrganic ?? 60,
       minQuoteOrganic: u.minQuoteOrganic ?? 60,
       minHolders: u.minHolders ?? 500,
@@ -287,7 +313,6 @@ export function buildConfig(userConfig = {}, env = process.env) {
       suspiciousVolumeMinGlobalFeesSol: u.suspiciousVolumeMinGlobalFeesSol ?? 20,
       suspiciousVolumeMaxTokenAgeHours: u.suspiciousVolumeMaxTokenAgeHours ?? 96,
       suspiciousVolumeMinPriceDropPct: u.suspiciousVolumeMinPriceDropPct ?? -25,
-      preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
       okxDiscovery: buildOkxDiscoveryConfig(u),
     },
 
@@ -384,13 +409,6 @@ export function buildConfig(userConfig = {}, env = process.env) {
       trailingTakeProfit: u.trailingTakeProfit ?? true,
       trailingTriggerPct: u.trailingTriggerPct ?? 3,
       trailingDropPct: u.trailingDropPct ?? 1.5,
-      // When true: TP (Rule 2) and confirmed trailing TP close directly — no LLM,
-      // no relay, no poll cooldown — same fast path as stop-loss.
-      // When false (legacy): TP goes through runManagementCycle → LLM → close_position.
-      tpDirectCloseEnabled: u.tpDirectCloseEnabled ?? true,
-      // When true: direct TP close uses urgent=true (priority fees, 2 tx attempts).
-      // When false: urgent=false (no priority fee bump, 1 attempt).
-      tpDirectCloseUrgent: u.tpDirectCloseUrgent ?? false,
       profitGivebackEmergencyEnabled: u.profitGivebackEmergencyEnabled ?? isNanocapPreset,
       profitGivebackTriggerPct: u.profitGivebackTriggerPct ?? (isNanocapPreset ? 6 : null),
       profitGivebackFloorPct: u.profitGivebackFloorPct ?? (isNanocapPreset ? 2 : null),
@@ -406,12 +424,16 @@ export function buildConfig(userConfig = {}, env = process.env) {
       ohlcvDrawdownShadowPnlDivergenceMinPnlPct: u.ohlcvDrawdownShadowPnlDivergenceMinPnlPct ?? -2,
       ohlcvDrawdownShadowCombinedPeakPct: u.ohlcvDrawdownShadowCombinedPeakPct ?? 2,
       ohlcvDrawdownShadowCombinedCurrentPnlPct: u.ohlcvDrawdownShadowCombinedCurrentPnlPct ?? 0,
+      activeBinBelowRangeEmergencyLiveEnabled: u.activeBinBelowRangeEmergencyLiveEnabled ?? false,
+      activeBinBelowRangeEmergencyPnlPct: u.activeBinBelowRangeEmergencyPnlPct ?? -5,
+      activeBinBelowRangeEmergencyEntryDrawdownPct: u.activeBinBelowRangeEmergencyEntryDrawdownPct ?? -20,
       pnlSanityMaxDiffPct: u.pnlSanityMaxDiffPct ?? 5,
       pnlSnapshotLoggingEnabled: u.pnlSnapshotLoggingEnabled ?? false,
       pnlSnapshotDebug: u.pnlSnapshotDebug ?? false,
       pnlSnapshotBotName: u.pnlSnapshotBotName ?? (String(u.preset ?? "").toLowerCase().includes("nanocap") ? "nanocap" : "meridian"),
       earlyDumpPct: u.earlyDumpPct ?? null,
       earlyDumpMaxAgeMin: u.earlyDumpMaxAgeMin ?? 30,
+      maxHoldMinutes: u.maxHoldMinutes ?? null,
       feeExitPolicy: buildFeeExitPolicyConfig(u),
       solMode: u.solMode ?? false,
     },
@@ -419,6 +441,9 @@ export function buildConfig(userConfig = {}, env = process.env) {
     strategy: {
       strategy: u.strategy ?? "bid_ask",
       binsBelow: u.binsBelow ?? 69,
+      targetDownsidePct: u.targetDownsidePct ?? null,
+      targetDownsideMinPct: u.targetDownsideMinPct ?? null,
+      targetDownsideMaxPct: u.targetDownsideMaxPct ?? null,
       forceSingleSidedSolBidAsk: u.forceSingleSidedSolBidAsk ?? isNanocapPreset,
       // Nanocap prompt canon is 35-90 bins below; keep live guard deterministic.
       minSingleSidedSolBins: u.minSingleSidedSolBins ?? (isNanocapPreset ? 35 : 5),
@@ -509,28 +534,6 @@ export function buildConfig(userConfig = {}, env = process.env) {
       url: firstNonEmptyString(u.agentMeridianApiUrl, env.AGENT_MERIDIAN_API_URL, DEFAULT_AGENT_MERIDIAN_API_URL) ?? DEFAULT_AGENT_MERIDIAN_API_URL,
       publicApiKey: firstNonEmptyString(u.publicApiKey, env.PUBLIC_API_KEY, DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY) ?? DEFAULT_AGENT_MERIDIAN_PUBLIC_KEY,
       lpAgentRelayEnabled: u.lpAgentRelayEnabled ?? false,
-    },
-
-    oracle: {
-      providers: {
-        whaleEscape: {
-          enabled: u.oracle?.providers?.whaleEscape?.enabled === true,
-          signatureLimit: normalizePositiveInteger(u.oracle?.providers?.whaleEscape?.signatureLimit, 50),
-          maxWindowMs: normalizePositiveInteger(u.oracle?.providers?.whaleEscape?.maxWindowMs, 1_800_000),
-        },
-        liquidityShape: {
-          enabled: u.oracle?.providers?.liquidityShape?.enabled === true,
-          binsBelow: normalizePositiveInteger(u.oracle?.providers?.liquidityShape?.binsBelow, 5),
-          binsAbove: normalizePositiveInteger(u.oracle?.providers?.liquidityShape?.binsAbove, 3),
-        },
-        swapPressure: {
-          enabled: u.oracle?.providers?.swapPressure?.enabled === true,
-          signatureLimit: normalizePositiveInteger(u.oracle?.providers?.swapPressure?.signatureLimit, 50),
-          sellThresholdUsd: Number.isFinite(Number(u.oracle?.providers?.swapPressure?.sellThresholdUsd))
-            ? Number(u.oracle.providers.swapPressure.sellThresholdUsd)
-            : 500,
-        },
-      },
     },
 
     jupiter: {

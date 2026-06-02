@@ -8,26 +8,6 @@
   "llmModel": "deepseek-v4-flash",
   "dryRun": false,
 
-  "oracle": {
-    "providers": {
-      "whaleEscape": {
-        "enabled": false,
-        "signatureLimit": 50,
-        "maxWindowMs": 1800000
-      },
-      "liquidityShape": {
-        "enabled": false,
-        "binsBelow": 5,
-        "binsAbove": 3
-      },
-      "swapPressure": {
-        "enabled": false,
-        "signatureLimit": 50,
-        "sellThresholdUsd": 500
-      }
-    }
-  },
-
   "deployAmountSol": 1.5,
   "maxPositions": 2,
   "minSolToOpen": 0.5,
@@ -59,12 +39,47 @@
   "minBinStep": 50,
   "maxBinStep": 250,
   "minFeeActiveTvlRatio": 0.02,
+  "minVolumeActiveTvlMultiple": null,
+  "twoLaneClassificationLoggingEnabled": true,
+  "twoLanePrimaryVolumeActiveTvlMultiple": 3,
+  "looseVolumeActiveTvlMultiple": 2.5,
   "minTokenFeesSol": 3,
 
   "avoidPvpSymbols": false,
   "blockPvpSymbols": false,
   "useDiscordSignals": false,
   "discordSignalMode": "merge",
+  "okxDiscovery": {
+    "enabled": false,
+    "shadowMode": true,
+    "pollMs": 60000,
+    "mintCooldownMins": 60,
+    "watchlistTtlMins": 180,
+    "maxWatchMints": 120,
+    "maxCandidatesPerPoll": 4,
+    "seedLimit": 100,
+    "timeFrame": "1",
+    "rankBy": "5",
+    "includeBundleInfo": false,
+    "baseline": {
+      "minHolders": 100,
+      "minLiquidityUsd": 5000,
+      "minMcapUsd": 0,
+      "maxMcapUsd": 0,
+      "maxTop10HolderRate": 0.5,
+      "maxRugRatio": 0.3,
+      "maxBundlerRate": 0.5,
+      "maxBotRate": 0.5,
+      "maxCreatorBalanceRate": 0.2,
+      "requireNotWashTrading": true
+    },
+    "trigger": {
+      "minScans": 2,
+      "minHolderGrowthPct": 3,
+      "maxLiquidityDropPct": 30,
+      "minBuySellRatio": 1.1
+    }
+  },
 
   "maxBundlePct": 45,
   "maxBotHoldersPct": 55,
@@ -80,6 +95,17 @@
   "fallingKnifeSeverePriceChangePct": -45,
   "fallingKnifeMinSellBuyRatio": 1.25,
   "fallingKnifeRequireOversoldRsi": false,
+  "samePoolPostWinDecayEnabled": false,
+  "samePoolPostWinCooldownMinutes": 0,
+  "samePoolPostWinMaterialPnlPct": 1,
+  "samePoolPostWinRequireFreshDecayPass": false,
+  "ohlcvEntryVetoShadowEnabled": true,
+  "ohlcvEntryVetoLiveEnabled": false,
+  "ohlcvEntryVetoHighDrawdownPct": -45,
+  "ohlcvEntryVetoEntryDrawdownPct": -20,
+  "ohlcvEntryVetoExtremePriceChangePct": 500,
+  "ohlcvEntryVetoRequireCompound": true,
+  "ohlcvEntryVetoLiveReasonCodes": ["high_drawdown_with_extreme_positive_candidate_price_change"],
   "suspiciousVolumeVetoEnabled": true,
   "suspiciousVolumeMaxMcapToGlobalFeesRatio": 12000,
   "suspiciousVolumeMinGlobalFeesSol": 20,
@@ -143,8 +169,6 @@
   "trailingTakeProfit": true,
   "trailingTriggerPct": 6,
   "trailingDropPct": 3,
-  "tpDirectCloseEnabled": true,
-  "tpDirectCloseUrgent": false,
   "profitGivebackEmergencyEnabled": true,
   "profitGivebackTriggerPct": 6,
   "profitGivebackFloorPct": 2,
@@ -160,6 +184,9 @@
   "ohlcvDrawdownShadowPnlDivergenceMinPnlPct": -2,
   "ohlcvDrawdownShadowCombinedPeakPct": 2,
   "ohlcvDrawdownShadowCombinedCurrentPnlPct": 0,
+  "activeBinBelowRangeEmergencyLiveEnabled": false,
+  "activeBinBelowRangeEmergencyPnlPct": -5,
+  "activeBinBelowRangeEmergencyEntryDrawdownPct": -20,
   "pnlSanityMaxDiffPct": 5,
   "pnlSnapshotLoggingEnabled": true,
   "pnlSnapshotDebug": false,

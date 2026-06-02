@@ -1,9 +1,12 @@
-const BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv";
-const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY || "";
-const CACHE_TTL_MS = 25_000;
+const GECKOTERMINAL_SOLANA_POOL_OHLCV = "https://api.geckoterminal.com/api/v2/networks/solana/pools";
+const BIRDEYE_OHLCV_V3 = "https://public-api.birdeye.so/defi/v3/ohlcv";
+const CACHE_TTL_MS = 60_000;
+const CACHE_BUCKET_SEC = 60;
 const REQUEST_TIMEOUT_MS = 4_000;
+const BACKOFF_DURATION_MS = 300_000;
 
 const ohlcvCache = new Map();
+const providerBackoff = { geckoterminal: { until: 0 }, birdeye: { until: 0 } };
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
@@ -40,58 +43,135 @@ function normalizeRows(payload) {
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
-async function fetchBirdeyeOhlcv(baseMint, pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+function birdeyeTimeframe(aggregateMin) {
+  const map = { 1: "1m", 5: "5m", 15: "15m" };
+  return map[clampAggregate(aggregateMin)] || "1m";
+}
+
+function normalizeBirdeyeRows(payload) {
+  const items = payload?.data?.items;
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => ({
+      timestamp: Number(item?.unix_time),
+      iso: Number.isFinite(Number(item?.unix_time))
+        ? new Date(Number(item.unix_time) * 1000).toISOString()
+        : null,
+      open: finiteNumberOrNull(item?.o),
+      high: finiteNumberOrNull(item?.h),
+      low: finiteNumberOrNull(item?.l),
+      close: finiteNumberOrNull(item?.c),
+      volumeUsd: finiteNumberOrNull(item?.v_usd),
+    }))
+    .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function fetchBirdeyeOhlcv(tokenMint, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+  const apiKey = process.env.BIRDEYE_API_KEY;
+  if (!apiKey) return null;
+  if (Date.now() < providerBackoff.birdeye.until) return null;
+
   const aggregate = clampAggregate(aggregateMin);
-  const before = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
-  const tokenAddress = baseMint || pool;
-  const cacheKey = `${tokenAddress}:${aggregate}:${Math.floor(before / 30)}`;
+  const type = birdeyeTimeframe(aggregate);
+  const timeTo = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
+  const timeFrom = timeTo - (aggregate * 60 * 1000);
+
+  const cacheKey = `birdeye:${tokenMint}:${aggregate}:${Math.floor(timeTo / CACHE_BUCKET_SEC)}`;
   const cached = ohlcvCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
 
-  const typeMap = { 1: "1m", 5: "5m", 15: "15m" };
-  const timeFrom = before - (aggregate * 60 * 1000);
-  const url = new URL(BIRDEYE_OHLCV_URL);
-  url.searchParams.set("address", tokenAddress);
-  url.searchParams.set("type", typeMap[aggregate] || "1m");
-  url.searchParams.set("time_from", String(before - 86400));
-  url.searchParams.set("time_to", String(before));
+  const url = new URL(BIRDEYE_OHLCV_V3);
+  url.searchParams.set("address", tokenMint);
+  url.searchParams.set("type", type);
+  url.searchParams.set("time_from", String(timeFrom));
+  url.searchParams.set("time_to", String(timeTo));
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const res = await fetch(url, {
-      headers: { accept: "application/json", "X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana" },
+      headers: { "X-API-KEY": apiKey, "x-chain": "solana", accept: "application/json" },
       signal: controller.signal,
     });
+    if (res.status === 429) {
+      providerBackoff.birdeye.until = Date.now() + BACKOFF_DURATION_MS;
+      return null;
+    }
     const text = await res.text();
     if (!res.ok) throw new Error(`Birdeye OHLCV ${res.status}: ${text.slice(0, 160)}`);
     const payload = JSON.parse(text);
-    const items = payload?.data?.items || [];
-    const rows = items
-      .map((item) => ({
-        timestamp: Number(item.unixTime),
-        iso: Number.isFinite(Number(item.unixTime)) ? new Date(Number(item.unixTime) * 1000).toISOString() : null,
-        open: finiteNumberOrNull(item.o),
-        high: finiteNumberOrNull(item.h),
-        low: finiteNumberOrNull(item.l),
-        close: finiteNumberOrNull(item.c),
-        volumeUsd: finiteNumberOrNull(item.v),
-      }))
-      .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
-      .sort((a, b) => a.timestamp - b.timestamp);
     const value = {
       source: "birdeye",
       url: url.toString(),
       aggregateMin: aggregate,
-      rows,
+      rows: normalizeBirdeyeRows(payload),
       meta: null,
     };
     ohlcvCache.set(cacheKey, { cachedAt: Date.now(), value });
     return value;
+  } catch (err) {
+    if (err?.name === "AbortError") return null;
+    throw err;
   } finally {
     clearTimeout(timer);
   }
 }
+
+async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+  const aggregate = clampAggregate(aggregateMin);
+  const before = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
+  const cacheKey = `gecko:${pool}:${aggregate}:${Math.floor(before / CACHE_BUCKET_SEC)}`;
+  const cached = ohlcvCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
+  if (Date.now() < providerBackoff.geckoterminal.until) return null;
+
+  const url = new URL(`${GECKOTERMINAL_SOLANA_POOL_OHLCV}/${pool}/ohlcv/minute`);
+  url.searchParams.set("aggregate", String(aggregate));
+  url.searchParams.set("before_timestamp", String(before));
+  url.searchParams.set("limit", "1000");
+  url.searchParams.set("currency", "usd");
+  url.searchParams.set("token", "base");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (res.status === 429) {
+      providerBackoff.geckoterminal.until = Date.now() + BACKOFF_DURATION_MS;
+      return null;
+    }
+    const text = await res.text();
+    if (!res.ok) throw new Error(`GeckoTerminal OHLCV ${res.status}: ${text.slice(0, 160)}`);
+    const payload = JSON.parse(text);
+    const value = {
+      source: "geckoterminal",
+      url: url.toString(),
+      aggregateMin: aggregate,
+      rows: normalizeRows(payload),
+      meta: payload?.meta ?? null,
+    };
+    ohlcvCache.set(cacheKey, { cachedAt: Date.now(), value });
+    return value;
+  } catch (err) {
+    if (err?.name === "AbortError") return null;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+  const opts = { aggregateMin, beforeTimestamp };
+  if (tokenMint && process.env.BIRDEYE_API_KEY) {
+    const birdeye = await fetchBirdeyeOhlcv(tokenMint, opts);
+    if (birdeye && birdeye.rows.length > 0) return birdeye;
+  }
+  const gecko = await fetchGeckoTerminalOhlcv(pool, opts);
+  if (gecko && gecko.rows.length > 0) return gecko;
+  return null;
+}
+
 function selectEntryReference(rows, deployedAtMs) {
   if (!rows.length || !Number.isFinite(deployedAtMs)) return null;
   const deployedSec = Math.floor(deployedAtMs / 1000);
@@ -246,12 +326,13 @@ export async function getOhlcvDrawdownShadowRows({
   const deployedAtMs = new Date(tracked?.deployed_at).getTime();
   if (!Number.isFinite(deployedAtMs)) return [];
 
+  const tokenMint = position.base_mint ?? tracked?.base_mint ?? null;
   const aggregateMin = mgmtConfig.ohlcvDrawdownShadowAggregateMin ?? 1;
-  const baseMint = position.base_mint ?? tracked?.base_mint ?? null;
-  const ohlcv = await fetchBirdeyeOhlcv(baseMint, pool, {
+  const ohlcv = await fetchOhlcv(pool, tokenMint, {
     aggregateMin,
     beforeTimestamp: Math.floor(nowMs / 1000),
   });
+  if (!ohlcv) return [];
   const summary = summarizeOhlcv(ohlcv.rows, deployedAtMs, nowMs);
   if (!summary.entry || !summary.current) return [];
 
@@ -271,6 +352,7 @@ export async function getOhlcvDrawdownShadowRows({
 
 export const __test = {
   normalizeRows,
+  normalizeBirdeyeRows,
   summarizeOhlcv,
   makeRuleRows,
   pctChange,
