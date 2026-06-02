@@ -450,6 +450,14 @@ function isEmergencyDirectExit(exit) {
   );
 }
 
+function isOorRepositionCloseRule(closeRule) {
+  return (
+    (closeRule?.rule === 3 || closeRule?.rule === 4) &&
+    isOorRepositionEnabled(config) &&
+    isOorRepositionEligibleRangeSide(closeRule.rangeSide)
+  );
+}
+
 async function closeEmergencyDirect(position, exit, source = "management") {
   const pair = position?.pair || position?.pool_name || position?.position || "position";
   const reason = exit?.reason || "Emergency exit";
@@ -517,6 +525,16 @@ async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL p
     runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fee-exit fallback management failed: ${e.message}`));
   }
   return true;
+}
+
+async function tryLiveFeeExitPolicy(position, source = "management") {
+  const evaluation = evaluateFeeExitPolicy({
+    position,
+    tracked: getTrackedPosition(position.position),
+    managementConfig: config.management,
+  });
+  if (!evaluation.decision) return false;
+  return handleFeeExitPolicyDecision(position, evaluation, source);
 }
 
 function appendOorRepositionDecision(entry) {
@@ -864,6 +882,40 @@ export async function runManagementCycle({ silent = false } = {}) {
           });
           continue;
         }
+        if (isOorRepositionCloseRule(closeRule)) {
+          if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
+            const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
+            if (!indicatorConfirmation.confirmed) {
+              log(
+                "indicators",
+                `Rule-based exit indicator hold for ${p.pair} (${p.position.slice(0, 8)}) — requested close "${closeRule.reason}" blocked: ${indicatorConfirmation.reason}`,
+              );
+              actionMap.set(p.position, { action: "STAY", indicatorHold: indicatorConfirmation.reason });
+              continue;
+            }
+          } else {
+            log(
+              "indicators",
+              `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${closeRule.reason}`,
+            );
+          }
+          const result = await executeTool("close_position", {
+            position_address: p.position,
+            reason: closeRule.reason,
+            urgent: !!closeRule.urgent,
+          });
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
+          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
+          continue;
+        }
+        if (await tryLiveFeeExitPolicy(p, "Management cycle")) {
+          actionMap.set(p.position, { action: "CLOSED_DIRECT", reason: "fee_exit_policy" });
+          continue;
+        }
         if (closeRule.reason === "low yield") {
           const tracked = getTrackedPosition(p.position);
           if (!tracked) {
@@ -896,25 +948,15 @@ export async function runManagementCycle({ silent = false } = {}) {
             `Rule-based exit indicator bypass for ${p.pair} (${p.position.slice(0, 8)}) — policy bypass: ${closeRule.reason}`,
           );
         }
-        if (closeRule.rule === 4 && isOorRepositionEnabled(config) && isOorRepositionEligibleRangeSide(closeRule.rangeSide)) {
-          const result = await executeTool("close_position", {
-            position_address: p.position,
-            reason: closeRule.reason,
-            urgent: !!closeRule.urgent,
-          });
-          actionMap.set(p.position, {
-            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
-            reason: closeRule.reason,
-            result,
-          });
-          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
-          continue;
-        }
         actionMap.set(p.position, closeRule);
         continue;
       }
       // No close rule — position has recovered; clear any pending low-yield strikes
       clearLowYieldStrike(p.position);
+      if (await tryLiveFeeExitPolicy(p, "Management cycle")) {
+        actionMap.set(p.position, { action: "CLOSED_DIRECT", reason: "fee_exit_policy" });
+        continue;
+      }
       // Claim rule
       if ((p.unclaimed_fees_usd ?? 0) >= config.management.minClaimAmount) {
         actionMap.set(p.position, { action: "CLAIM" });
@@ -1577,15 +1619,6 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
           }
         }
-        const feeExitEvaluation = evaluateFeeExitPolicy({
-          position: p,
-          tracked: getTrackedPosition(p.position),
-          managementConfig: config.management,
-        });
-        if (feeExitEvaluation.decision) {
-          const closed = await handleFeeExitPolicyDecision(p, feeExitEvaluation, "PnL poll");
-          if (closed) break;
-        }
         const closeRule = getDeterministicCloseRule(p, config.management);
         if (closeRule) {
           if (closeRule.action === "STOP_LOSS_CANDIDATE" && closeRule.needs_confirmation) {
@@ -1617,6 +1650,24 @@ Summarize the current portfolio health, total fees earned, and performance of al
             })();
             break;
           }
+          if (isOorRepositionCloseRule(closeRule)) {
+            const bypassPollCooldown = !!closeRule.urgent;
+            const cooldownMs = config.schedule.managementIntervalMin * 60 * 1000;
+            const sinceLastTrigger = Date.now() - _pollTriggeredAt;
+            if (bypassPollCooldown || sinceLastTrigger >= cooldownMs) {
+              _pollTriggeredAt = Date.now();
+              log("state", `[PnL poll] OOR reposition close rule: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — triggering management before fee exits`);
+              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Poll-triggered OOR reposition management failed: ${e.message}`));
+            } else {
+              log("state", `[PnL poll] OOR reposition close rule: ${p.pair} — cooldown (${Math.round((cooldownMs - sinceLastTrigger) / 1000)}s left)`);
+            }
+            break;
+          }
+        }
+        if (await tryLiveFeeExitPolicy(p, "PnL poll")) {
+          break;
+        }
+        if (closeRule) {
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
           if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
             const indicatorConfirmation = await confirmExitIndicator(p, closeRule.reason);
@@ -1720,9 +1771,6 @@ function getDeterministicCloseRule(position, managementConfig) {
     });
     if (stopLossDecision) return stopLossDecision;
   }
-  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
-    return { action: "CLOSE", rule: 2, reason: "take profit" };
-  }
   const rangeSide = position.range_side || deriveRangeSide(position);
   if (
     rangeSide === "above_range" &&
@@ -1746,6 +1794,9 @@ function getDeterministicCloseRule(position, managementConfig) {
       rangeSide,
       oorSide: rangeSide,
     };
+  }
+  if (!pnlSuspect && position.pnl_pct != null && position.pnl_pct >= managementConfig.takeProfitPct) {
+    return { action: "CLOSE", rule: 2, reason: "take profit" };
   }
   if (
     position.fee_per_tvl_24h != null &&

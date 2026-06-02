@@ -30,6 +30,7 @@ const ROLLING_DRAWDOWN_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-rolli
 const OHLCV_DRAWDOWN_SHADOW_VERIFIER_PATH = join(__dirname, "verify-ohlcv-drawdown-shadow.js");
 const FALLING_KNIFE_VETO_VERIFIER_PATH = join(__dirname, "verify-falling-knife-veto.js");
 const NARROW_RANGE_GUARD_VERIFIER_PATH = join(__dirname, "verify-narrow-range-guard.js");
+const FNMF_FEE_EXIT_POLICY_VERIFIER_PATH = join(__dirname, "verify-fnmf-fee-exit-policy.js");
 const NANOCAP_SINGLE_SIDE_BIDASK_VERIFIER_PATH = join(__dirname, "verify-nanocap-single-side-bidask.js");
 const MATERIAL_WIN_METRICS_VERIFIER_PATH = join(__dirname, "verify-material-win-metrics.js");
 const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstream-security-hardening.js");
@@ -228,6 +229,22 @@ function runNarrowRangeGuardProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-narrow-range-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runFnmfFeeExitPolicyProof() {
+  const result = spawnSync(process.execPath, [FNMF_FEE_EXIT_POLICY_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-fnmf-fee-exit-policy failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -632,6 +649,7 @@ function buildChecks() {
   const ohlcvDrawdownShadowProof = runOhlcvDrawdownShadowProof();
   const fallingKnifeProof = runFallingKnifeVetoProof();
   const narrowRangeGuardProof = runNarrowRangeGuardProof();
+  const fnmfFeeExitPolicyProof = runFnmfFeeExitPolicyProof();
   const nanocapSingleSideBidAskProof = runNanocapSingleSideBidAskProof();
   const materialProof = runMaterialWinMetricsProof();
   const upstreamSecurityProof = runUpstreamSecurityHardeningProof();
@@ -694,6 +712,22 @@ function buildChecks() {
         scoutFeeVelocityLiveCanaryProof?.strategyExample?.activeUnchanged === true &&
         scoutFeeVelocityLiveCanaryProof?.strategyExample?.feeVelocityStrategyPresent === true &&
         scoutFeeVelocityLiveCanaryProof?.guardedOperationalWordingAbsent === true,
+    },
+    {
+      file: "scripts/verify-fnmf-fee-exit-policy.js",
+      label: "[Fee exit] live fee harvest is first positive exit while stop/OOR protections stay ahead",
+      test: () =>
+        fnmfFeeExitPolicyProof?.success === true &&
+        fnmfFeeExitPolicyProof?.orderedRules?.[0] === "fee_harvest" &&
+        fnmfFeeExitPolicyProof?.liveShadowOnly === false &&
+        fnmfFeeExitPolicyProof?.missingFeeSafety === null &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.deterministicOorBeforeTakeProfit === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.pnlPollStopBeforeFee === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.pnlPollOorBeforeFee === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.pnlPollFeeBeforeOrdinaryRules === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.managementOorBeforeFee === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.managementFeeBeforeLowYield === true &&
+        fnmfFeeExitPolicyProof?.sourceOrder?.managementNoCloseFeeBeforeClaim === true,
     },
     {
       file: "strategy-library.js",

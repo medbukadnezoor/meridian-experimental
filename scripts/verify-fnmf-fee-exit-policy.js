@@ -8,6 +8,25 @@
 
 import { evaluateFeeExitPolicy } from "../fee-exit-policy.js";
 import { normalizeFeeInputs } from "../fee-helpers.js";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, "..");
+
+function source(relativePath) {
+  return readFileSync(join(ROOT, relativePath), "utf8");
+}
+
+function ordered(sourceText, earlier, later, message) {
+  const earlierIndex = sourceText.indexOf(earlier);
+  const laterIndex = sourceText.indexOf(later);
+  assert(earlierIndex >= 0, `${message}: missing earlier marker`);
+  assert(laterIndex >= 0, `${message}: missing later marker`);
+  assert(earlierIndex < laterIndex, message);
+  return true;
+}
 
 function assert(condition, message) {
   if (!condition) {
@@ -133,6 +152,61 @@ function main() {
   }, { total_fees_claimed_sol: null });
   assert(missingFeeSafety == null, "missing fee data must not trigger fee abort rules");
 
+  const indexSource = source("index.js");
+  const deterministicBody = indexSource.match(/function getDeterministicCloseRule[\s\S]*?\n}\n\n\/\/ ═/)?.[0] ?? "";
+  const pnlPollBody = indexSource.match(/const pnlPollInterval = setInterval\(async \(\) => \{[\s\S]*?_pnlPollBusy = false;\n    }\n  }, pnlPollIntervalMs\);/)?.[0] ?? "";
+  const managementBody = indexSource.match(/const closeRule = getDeterministicCloseRule\(p, config\.management\);[\s\S]*?\/\/ No close rule/)?.[0] ?? "";
+  const noCloseRuleBody = indexSource.match(/\/\/ No close rule[\s\S]*?\/\/ Claim rule/)?.[0] ?? "";
+  assert(deterministicBody, "deterministic close rule body should be found");
+  assert(pnlPollBody, "PnL poll body should be found");
+  assert(managementBody, "management close-rule body should be found");
+  assert(noCloseRuleBody, "management no-close-rule body should be found");
+
+  const sourceOrder = {
+    deterministicOorBeforeTakeProfit: ordered(
+      deterministicBody,
+      'rangeSide === "above_range"',
+      'reason: "take profit"',
+      "deterministic OOR checks must run before ordinary take profit",
+    ),
+    pnlPollStopBeforeFee: ordered(
+      pnlPollBody,
+      "URGENT deterministic stop-loss",
+      'tryLiveFeeExitPolicy(p, "PnL poll")',
+      "PnL poll stop-loss must stay ahead of fee exits",
+    ),
+    pnlPollOorBeforeFee: ordered(
+      pnlPollBody,
+      "OOR reposition close rule",
+      'tryLiveFeeExitPolicy(p, "PnL poll")',
+      "PnL poll OOR reposition must stay ahead of fee exits",
+    ),
+    pnlPollFeeBeforeOrdinaryRules: ordered(
+      pnlPollBody,
+      'tryLiveFeeExitPolicy(p, "PnL poll")',
+      "Non-stop-loss deterministic rules",
+      "PnL poll fee exits must precede ordinary deterministic TP/low-yield handling",
+    ),
+    managementOorBeforeFee: ordered(
+      managementBody,
+      "isOorRepositionCloseRule(closeRule)",
+      'tryLiveFeeExitPolicy(p, "Management cycle")',
+      "management OOR reposition must stay ahead of fee exits",
+    ),
+    managementFeeBeforeLowYield: ordered(
+      managementBody,
+      'tryLiveFeeExitPolicy(p, "Management cycle")',
+      'closeRule.reason === "low yield"',
+      "management fee exits must precede ordinary low-yield handling",
+    ),
+    managementNoCloseFeeBeforeClaim: ordered(
+      noCloseRuleBody,
+      'tryLiveFeeExitPolicy(p, "Management cycle")',
+      "Claim rule",
+      "management fee exits must precede claim/STAY when no deterministic close rule exists",
+    ),
+  };
+
   console.log(JSON.stringify({
     success: true,
     defaultOff: defaultOff.decision,
@@ -151,6 +225,7 @@ function main() {
     ],
     liveShadowOnly: liveDecision.shadowOnly,
     missingFeeSafety: missingFeeSafety ?? null,
+    sourceOrder,
   }, null, 2));
 }
 
