@@ -1,5 +1,4 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
+import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { config } from "../config.js";
@@ -9,12 +8,14 @@ import {
   resolveTokenToMeteoraDlmmPool,
 } from "./meteora-pool-resolver.js";
 
-const execFileAsync = promisify(execFile);
 const OKX_STATE_DIR = path.resolve("state", "okx-discovery");
 const WATCHLIST_FILE = path.join(OKX_STATE_DIR, "watchlist.json");
 const SNAPSHOTS_FILE = path.join(OKX_STATE_DIR, "snapshots.json");
-const CLI_TIMEOUT_MS = 15_000;
+const OKX_BASE_URL = "https://web3.okx.com";
+const OKX_CHAIN_SOLANA = "501";
+const REQUEST_TIMEOUT_MS = 15_000;
 const SNAPSHOT_CAP = 500;
+const MAPPING_MISS_CAP = 24;
 
 const DEFAULT_OKX_DISCOVERY = Object.freeze({
   enabled: false,
@@ -72,6 +73,7 @@ const status = {
   poolsNotFound: 0,
   filtered: {},
   lastCandidate: null,
+  lastMappingMisses: [],
 };
 
 function num(value, fallback = 0) {
@@ -108,36 +110,77 @@ function okxSettings(runtimeConfig = config) {
 
 function hasCredentials(env = process.env) {
   return Boolean(
-    env.OKX_API_KEY &&
-    env.OKX_SECRET_KEY &&
-    (env.OKX_PASSPHRASE || env.OKX_API_PASSPHRASE)
+    getOkxApiKey(env) &&
+    getOkxSecretKey(env) &&
+    getOkxPassphrase(env)
   );
 }
 
-function onchainosEnv(env = process.env) {
-  const childEnv = { ...env };
-  if (!childEnv.OKX_PASSPHRASE && childEnv.OKX_API_PASSPHRASE) {
-    childEnv.OKX_PASSPHRASE = childEnv.OKX_API_PASSPHRASE;
-  }
-  return childEnv;
+function getOkxApiKey(env = process.env) {
+  return env.OKX_API_KEY || env.OK_ACCESS_KEY || "";
 }
 
-async function runOnchainos(args, { timeout = CLI_TIMEOUT_MS } = {}) {
-  const { stdout } = await execFileAsync("onchainos", args, {
-    timeout,
-    env: onchainosEnv(),
-  });
-  return parseCliJson(stdout);
+function getOkxSecretKey(env = process.env) {
+  return env.OKX_SECRET_KEY || env.OK_ACCESS_SECRET || "";
 }
 
-function parseCliJson(stdout) {
-  const text = String(stdout || "").trim();
-  if (!text) return null;
-  const parsed = JSON.parse(text);
-  if (parsed?.ok === false) {
-    throw new Error(String(parsed.error || parsed.message || "onchainos returned ok=false"));
+function getOkxPassphrase(env = process.env) {
+  return env.OKX_PASSPHRASE || env.OKX_API_PASSPHRASE || env.OK_ACCESS_PASSPHRASE || "";
+}
+
+function getOkxProjectId(env = process.env) {
+  return env.OKX_PROJECT_ID || env.OK_ACCESS_PROJECT || "";
+}
+
+function okxAuthHeaders(method, requestPath, bodyText = "") {
+  const timestamp = new Date().toISOString();
+  const prehash = `${timestamp}${method.toUpperCase()}${requestPath}${bodyText}`;
+  const sign = crypto
+    .createHmac("sha256", getOkxSecretKey())
+    .update(prehash)
+    .digest("base64");
+  const headers = {
+    "OK-ACCESS-KEY": getOkxApiKey(),
+    "OK-ACCESS-SIGN": sign,
+    "OK-ACCESS-PASSPHRASE": getOkxPassphrase(),
+    "OK-ACCESS-TIMESTAMP": timestamp,
+  };
+  const projectId = getOkxProjectId();
+  if (projectId) headers["OK-ACCESS-PROJECT"] = projectId;
+  return headers;
+}
+
+async function okxRequest(method, requestPath, body = null) {
+  const bodyText = body == null ? "" : JSON.stringify(body);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${OKX_BASE_URL}${requestPath}`, {
+      method,
+      headers: {
+        ...okxAuthHeaders(method, requestPath, bodyText),
+        ...(body == null ? {} : { "Content-Type": "application/json" }),
+      },
+      signal: controller.signal,
+      ...(body == null ? {} : { body: bodyText }),
+    });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(`OKX API ${response.status}: ${json?.msg || json?.message || requestPath}`);
+    }
+    if (json.code !== "0" && json.code !== 0) {
+      throw new Error(`OKX error ${json.code ?? "unknown"}: ${json.msg || json.message || "unknown"}`);
+    }
+    return json.data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`OKX API timeout after ${REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return parsed?.data ?? parsed;
 }
 
 function unwrapRows(payload) {
@@ -188,6 +231,47 @@ function normalizeTokenRow(row = {}) {
 
 function recordFilter(reason) {
   status.filtered[reason] = (status.filtered[reason] || 0) + 1;
+}
+
+function shortMint(mint) {
+  return mint ? `${String(mint).slice(0, 6)}...${String(mint).slice(-4)}` : null;
+}
+
+function compactOkxEntry(entry = {}) {
+  return {
+    mint: entry.mint || null,
+    mint_short: shortMint(entry.mint),
+    symbol: entry.symbol || null,
+    name: entry.name || entry.symbol || entry.mint || "unknown",
+    okx_score: okxScore(entry),
+    scans: entry.scans || 0,
+    holder_growth_pct: entry.okxHolderGrowthPct || 0,
+    liquidity_drop_pct: entry.okxLiquidityDropPct || 0,
+    buy_sell_ratio: entry.okxBuySellRatio || 0,
+    liquidity_usd: Math.round(num(entry.liquidityUsd)),
+    holders: Math.round(num(entry.holders)),
+    market_cap_usd: Math.round(num(entry.marketCapUsd)),
+    volume_usd: Math.round(num(entry.volumeUsd)),
+  };
+}
+
+function mappingDiagnostic(entry, { minTvl, reason, resolved = null } = {}) {
+  return {
+    ...compactOkxEntry(entry),
+    reason,
+    min_tvl: minTvl,
+    resolved_pool_count: Array.isArray(resolved?.pools) ? resolved.pools.length : 0,
+    source: "okx_discovery",
+  };
+}
+
+function rememberMappingMiss(diagnostic) {
+  const miss = {
+    at: new Date().toISOString(),
+    ...diagnostic,
+  };
+  status.lastMappingMisses = [miss, ...status.lastMappingMisses].slice(0, MAPPING_MISS_CAP);
+  return miss;
 }
 
 function passBaseline(token, settings) {
@@ -269,31 +353,26 @@ function triggerReason(entry, settings) {
 }
 
 async function fetchHotTokens(settings) {
-  const payload = await runOnchainos([
-    "token",
-    "hot-tokens",
-    "--chain",
-    "solana",
-    "--rank-by",
-    String(settings.rankBy),
-    "--time-frame",
-    String(settings.timeFrame),
-    "--limit",
-    String(settings.seedLimit),
-  ]);
+  const params = new URLSearchParams({
+    rankingType: "4",
+    chainIndex: OKX_CHAIN_SOLANA,
+    rankBy: String(settings.rankBy),
+    rankingTimeFrame: String(settings.timeFrame),
+    limit: String(settings.seedLimit),
+    riskFilter: "true",
+    stableTokenFilter: "true",
+  });
+  const payload = await okxRequest("GET", `/api/v6/dex/market/token/hot-token?${params.toString()}`);
   return unwrapRows(payload).map(normalizeTokenRow).filter(Boolean);
 }
 
 async function fetchAdvancedInfo(mint) {
   try {
-    const payload = await runOnchainos([
-      "token",
-      "advanced-info",
-      "--chain",
-      "solana",
-      "--address",
-      mint,
-    ]);
+    const params = new URLSearchParams({
+      chainIndex: OKX_CHAIN_SOLANA,
+      tokenContractAddress: mint,
+    });
+    const payload = await okxRequest("GET", `/api/v6/dex/market/token/advanced-info?${params.toString()}`);
     const row = Array.isArray(payload) ? payload[0] : payload?.data ?? payload;
     return row && typeof row === "object" ? normalizeTokenRow(row) : null;
   } catch (error) {
@@ -332,6 +411,19 @@ async function mapEntryToCandidate(entry, runtimeConfig, settings) {
   });
   if (!resolved?.pool) {
     status.poolsNotFound += 1;
+    entry.okxLastMappingMiss = rememberMappingMiss(mappingDiagnostic(entry, {
+      minTvl,
+      resolved,
+      reason: "no SOL DLMM pool above configured minimum TVL",
+    }));
+    log(
+      "okx_discovery",
+      `Pool map miss ${entry.okxLastMappingMiss.name} ${entry.okxLastMappingMiss.mint_short}: ` +
+        `score=${entry.okxLastMappingMiss.okx_score} scans=${entry.okxLastMappingMiss.scans} ` +
+        `holderGrowth=${entry.okxLastMappingMiss.holder_growth_pct}% ` +
+        `buySell=${entry.okxLastMappingMiss.buy_sell_ratio} ` +
+        `liqUsd=${entry.okxLastMappingMiss.liquidity_usd} minTvl=${minTvl}`,
+    );
     return null;
   }
   status.poolsMapped += 1;
@@ -352,7 +444,15 @@ async function mapEntryToCandidate(entry, runtimeConfig, settings) {
     source: "okx_discovery",
     runtimeConfig,
   });
-  if (!candidate) return null;
+  if (!candidate) {
+    status.poolsNotFound += 1;
+    entry.okxLastMappingMiss = rememberMappingMiss(mappingDiagnostic(entry, {
+      minTvl,
+      resolved,
+      reason: "Meteora pool resolved but candidate condensation failed",
+    }));
+    return null;
+  }
   return {
     ...candidate,
     source: "okx_discovery",
@@ -487,7 +587,17 @@ export async function discoverOkxPools({ limit = 10, runtimeConfig = config, for
       const candidate = await mapEntryToCandidate(entry, runtimeConfig, settings);
       if (!candidate) {
         stageCounts.no_pool += 1;
-        filtered.push({ stage: "okx_meteora_pool_map", name: entry.name || entry.mint, reason: "no SOL DLMM pool above configured minimum TVL", source: "okx_discovery" });
+        const miss = entry.okxLastMappingMiss || mappingDiagnostic(entry, {
+          minTvl: num(settings.minTvl ?? runtimeConfig.screening?.minTvl ?? 0),
+          reason: "no SOL DLMM pool above configured minimum TVL",
+        });
+        filtered.push({
+          stage: "okx_meteora_pool_map",
+          name: miss.name,
+          reason: miss.reason,
+          source: "okx_discovery",
+          ...miss,
+        });
         continue;
       }
       entry.emittedAt = Date.now();
@@ -514,6 +624,7 @@ export async function discoverOkxPools({ limit = 10, runtimeConfig = config, for
       shadow_pools: settings.shadowMode ? candidates : [],
       filtered_examples: filtered,
       stage_counts: stageCounts,
+      mapping_miss_sample: status.lastMappingMisses.slice(0, MAPPING_MISS_CAP),
       okx_status: getOkxDiscoveryStatus(),
     };
   } catch (error) {
@@ -525,6 +636,7 @@ export async function discoverOkxPools({ limit = 10, runtimeConfig = config, for
       pools: [],
       filtered_examples: [{ stage: "okx_discovery_error", reason: error.message, source: "okx_discovery" }],
       stage_counts: { source: "okx_discovery", error: error.message },
+      mapping_miss_sample: status.lastMappingMisses.slice(0, MAPPING_MISS_CAP),
     };
   }
 }

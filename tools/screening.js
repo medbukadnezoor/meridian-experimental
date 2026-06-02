@@ -7,6 +7,20 @@ import { confirmIndicatorPreset } from "./chart-indicators.js";
 import { discoverGmgnPools } from "./gmgn.js";
 import { discoverOkxPools } from "./okx-discovery.js";
 import { scoreSignalSnapshot } from "../signal-weights.js";
+import { getPerformanceHistory } from "../lessons.js";
+import { evaluateSamePoolPostWinDecay } from "../post-win-decay-gate.js";
+import { evaluateOhlcvEntryVetoShadow } from "../ohlcv-entry-veto-shadow.js";
+import {
+  computeVolumeActiveTvlMultiple,
+  enrichFeeVelocityCandidate,
+  estimateFeeVelocityUsdPerMin,
+  getActiveStrategy,
+  resolveStrategyRangePolicy,
+} from "../strategy-library.js";
+import {
+  appendTwoLaneClassification,
+  attachTwoLaneClassification,
+} from "../two-lane-classification-log.js";
 import {
   appendDecisionContext,
   buildCandidateDecisionContext,
@@ -57,6 +71,131 @@ function candidatePoolAddress(candidate = {}) {
 
 function candidateBaseMint(candidate = {}) {
   return candidate.base?.mint ?? candidate.base_mint ?? candidate.token_x?.address ?? candidate.token_x_mint ?? null;
+}
+
+function extractCandidateOhlcvEvidence(candidate = {}) {
+  const source = candidate.ohlcv_entry_veto_shadow ?? candidate.ohlcv_shadow ?? candidate.ohlcv ?? candidate;
+  const highDrawdownPct = finiteNumberOrNull(
+    source.highDrawdownPct ??
+    source.high_drawdown_pct ??
+    source.ohlcvHighDrawdownPct ??
+    source.ohlcv_high_drawdown_pct,
+  );
+  const entryDrawdownPct = finiteNumberOrNull(
+    source.entryDrawdownPct ??
+    source.entry_drawdown_pct ??
+    source.ohlcvEntryDrawdownPct ??
+    source.ohlcv_entry_drawdown_pct,
+  );
+  if (highDrawdownPct == null && entryDrawdownPct == null) return null;
+  return {
+    source: source.source ?? source.ohlcv_source ?? "candidate",
+    highDrawdownPct,
+    entryDrawdownPct,
+  };
+}
+
+function getRecentCloseRecordsForTailLoss(screeningConfig = {}) {
+  const hours = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackHours) ?? 168;
+  const limit = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackLimit) ?? 250;
+  try {
+    return getPerformanceHistory({ hours, limit }).positions || [];
+  } catch (error) {
+    log("screening_warn", `Tail-loss shadow close-record lookup failed: ${error.message}`);
+    return [];
+  }
+}
+
+export function evaluateScoutTailLossCandidateShadows(candidate = {}, {
+  screeningConfig = config.screening,
+  closeRecords = null,
+  now = new Date(),
+} = {}) {
+  const records = Array.isArray(closeRecords) ? closeRecords : [];
+  const samePoolPostWinDecay = evaluateSamePoolPostWinDecay(candidate, {
+    closeRecords: records,
+    now,
+    config: screeningConfig,
+    freshEvidence: {
+      ohlcvHighDrawdownPct: extractCandidateOhlcvEvidence(candidate)?.highDrawdownPct,
+      volumeActiveTvlMultiple: candidate.volume_active_tvl_multiple,
+      feeActiveTvlRatio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+    },
+  });
+  const samePoolPriorOutcome = samePoolPostWinDecay.priorWin
+    ? {
+        pnlPct: samePoolPostWinDecay.priorWin.pnlPct,
+        minutesSince: samePoolPostWinDecay.priorWin.minutesSince,
+        identity: samePoolPostWinDecay.priorWin.identity,
+      }
+    : null;
+  const ohlcvEntryVetoShadow = screeningConfig.ohlcvEntryVetoShadowEnabled === false
+    ? {
+        event: "ohlcv_entry_veto_shadow",
+        decision: "disabled",
+        reasonCodes: ["shadow_disabled"],
+        shadowOnly: true,
+        liveBlockingEnabled: false,
+        bluntHighDrawdownOnlyForbidden: true,
+      }
+    : evaluateOhlcvEntryVetoShadow(candidate, {
+        ohlcv: extractCandidateOhlcvEvidence(candidate),
+        samePoolPriorOutcome,
+        config: screeningConfig,
+      });
+  return { samePoolPostWinDecay, ohlcvEntryVetoShadow };
+}
+
+export function applyScoutTailLossShadowDecisions(candidates = [], screeningConfig = config.screening, {
+  closeRecords = null,
+  now = new Date(),
+  appendContext = true,
+  filteredOut = [],
+} = {}) {
+  const records = Array.isArray(closeRecords) ? closeRecords : getRecentCloseRecordsForTailLoss(screeningConfig);
+  const accepted = [];
+  for (const candidate of candidates) {
+    const decisions = evaluateScoutTailLossCandidateShadows(candidate, {
+      screeningConfig,
+      closeRecords: records,
+      now,
+    });
+    candidate.same_pool_post_win_decay_decision = decisions.samePoolPostWinDecay;
+    candidate.ohlcv_entry_veto_shadow = decisions.ohlcvEntryVetoShadow;
+
+    if (appendContext) {
+      appendDecisionContext({
+        stage: "tail_loss_shadow_decision",
+        actor: "SCREENER",
+        pool: candidate.pool,
+        poolName: candidate.name,
+        baseMint: candidateBaseMint(candidate),
+        quoteMint: candidate.quote?.mint ?? candidate.quote_mint ?? null,
+        reason: [
+          decisions.samePoolPostWinDecay?.reasonCode,
+          ...(decisions.ohlcvEntryVetoShadow?.reasonCodes || []),
+        ].filter(Boolean).join("; "),
+        metrics: {
+          ...buildCandidateDecisionContext(candidate),
+          samePoolPostWinDecay: decisions.samePoolPostWinDecay,
+          ohlcvEntryVetoShadow: decisions.ohlcvEntryVetoShadow,
+        },
+        source: "screening.tail_loss_shadow",
+      });
+    }
+
+    const liveBlocked = decisions.samePoolPostWinDecay?.decision === "blocked" ||
+      decisions.ohlcvEntryVetoShadow?.decision === "blocked";
+    if (liveBlocked) {
+      pushFilteredReason(filteredOut, candidate, "tail-loss protection live block", {
+        priority: true,
+        audit: decisions,
+      });
+      continue;
+    }
+    accepted.push(candidate);
+  }
+  return accepted;
 }
 
 function buildSourceEvidence(candidate = {}) {
@@ -604,69 +743,24 @@ export function evaluatePreEntryMomentumGates(candidate = {}, screeningConfig = 
     };
   }
 
-  if (
-    minReturnPct != null &&
-    snapshot.pre_entry_return_pct != null &&
-    snapshot.pre_entry_return_pct < minReturnPct
-  ) {
-    return {
-      enabled: true,
-      accepted: false,
-      missingDataPolicy,
-      reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} < min ${minReturnPct}`,
-      snapshot,
-    };
+  if (minReturnPct != null && snapshot.pre_entry_return_pct != null && snapshot.pre_entry_return_pct < minReturnPct) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} < min ${minReturnPct}`, snapshot };
   }
-
-  if (
-    maxReturnPct != null &&
-    snapshot.pre_entry_return_pct != null &&
-    snapshot.pre_entry_return_pct > maxReturnPct
-  ) {
-    return {
-      enabled: true,
-      accepted: false,
-      missingDataPolicy,
-      reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} > max ${maxReturnPct}`,
-      snapshot,
-    };
+  if (maxReturnPct != null && snapshot.pre_entry_return_pct != null && snapshot.pre_entry_return_pct > maxReturnPct) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: return ${snapshot.pre_entry_return_pct} > max ${maxReturnPct}`, snapshot };
   }
-
-  if (
-    minVolumeRatio != null &&
-    snapshot.volume_ratio != null &&
-    snapshot.volume_ratio < minVolumeRatio
-  ) {
-    return {
-      enabled: true,
-      accepted: false,
-      missingDataPolicy,
-      reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} < min ${minVolumeRatio}`,
-      snapshot,
-    };
+  if (minVolumeRatio != null && snapshot.volume_ratio != null && snapshot.volume_ratio < minVolumeRatio) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} < min ${minVolumeRatio}`, snapshot };
   }
-
-  if (
-    maxVolumeRatio != null &&
-    snapshot.volume_ratio != null &&
-    snapshot.volume_ratio > maxVolumeRatio
-  ) {
-    return {
-      enabled: true,
-      accepted: false,
-      missingDataPolicy,
-      reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} > max ${maxVolumeRatio}`,
-      snapshot,
-    };
+  if (maxVolumeRatio != null && snapshot.volume_ratio != null && snapshot.volume_ratio > maxVolumeRatio) {
+    return { enabled: true, accepted: false, missingDataPolicy, reason: `pre-entry momentum gate: volume_ratio ${snapshot.volume_ratio} > max ${maxVolumeRatio}`, snapshot };
   }
 
   return {
     enabled: true,
     accepted: true,
     missingDataPolicy,
-    reason: needsReturn || needsVolumeRatio
-      ? "pre-entry momentum gate passed"
-      : "pre-entry momentum gate has no thresholds configured",
+    reason: needsReturn || needsVolumeRatio ? "pre-entry momentum gate passed" : "pre-entry momentum gate has no thresholds configured",
     snapshot,
   };
 }
@@ -714,6 +808,13 @@ export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningCo
   if (minVolume != null && (volume == null || volume < minVolume)) {
     return `configured threshold veto: volume ${formatThresholdValue(volume)} < ${minVolume}`;
   }
+  const minVolumeActiveTvlMultiple = configuredNumber(screeningConfig.minVolumeActiveTvlMultiple);
+  if (minVolumeActiveTvlMultiple != null) {
+    const volumeActiveTvlMultiple = candidateThresholdNumber(candidate, "volume_active_tvl_multiple") ?? computeVolumeActiveTvlMultiple(candidate);
+    if (volumeActiveTvlMultiple == null || volumeActiveTvlMultiple < minVolumeActiveTvlMultiple) {
+      return `configured threshold veto: volume_active_tvl_multiple ${formatThresholdValue(volumeActiveTvlMultiple)} < ${minVolumeActiveTvlMultiple}`;
+    }
+  }
 
   const mcap = candidateThresholdNumber(candidate, "mcap", "token_info.mcap");
   const minMcap = configuredNumber(screeningConfig.minMcap);
@@ -746,58 +847,51 @@ export function getConfiguredPoolThresholdVetoReason(candidate = {}, screeningCo
   return null;
 }
 
-function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
-  const accepted = [];
-  for (const pool of pools) {
-    const vetoReason = getConfiguredPoolThresholdVetoReason(pool, screeningConfig);
-    if (vetoReason) {
-      log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
-      pushFilteredReason(filteredOut, pool, vetoReason, { priority: true });
-      stageCounts.configured_threshold_reject = (stageCounts.configured_threshold_reject || 0) + 1;
-    } else {
-      accepted.push(pool);
-    }
-  }
-  stageCounts.configured_threshold_accept = accepted.length;
-  return accepted;
-}
-
 function filterPreEntryMomentumGates(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}) {
-  if (!screeningConfig.preEntryMomentumGates?.enabled) return pools;
-
   const accepted = [];
   for (const pool of pools) {
     const decision = evaluatePreEntryMomentumGates(pool, screeningConfig);
-    if (decision.warning) {
-      log("screening", `Pre-entry momentum gate warning for ${pool.name || pool.pool || "unknown"}: ${decision.reason}`);
-    }
-    if (decision.accepted) {
+    if (!decision.enabled) {
       accepted.push(pool);
-      stageCounts.pre_entry_momentum_accept = (stageCounts.pre_entry_momentum_accept || 0) + 1;
       continue;
     }
-
-    log("screening", `Pre-entry momentum gate: dropped ${pool.name || pool.pool || "unknown"} — ${decision.reason}`);
-    appendDecisionContext({
-      stage: "pre_entry_momentum_reject",
-      actor: "SCREENER",
-      pool: pool.pool,
-      poolName: pool.name,
-      baseMint: pool.base?.mint ?? null,
-      quoteMint: pool.quote?.mint ?? null,
-      reason: decision.reason,
-      metrics: {
-        ...buildCandidateDecisionContext(pool),
-        pre_entry_momentum: decision.snapshot,
-      },
-      source: "screening.pre_entry_momentum",
-    });
-    pushFilteredReason(filteredOut, pool, decision.reason, {
-      priority: true,
-      audit: decision.snapshot,
-    });
-    stageCounts.pre_entry_momentum_reject = (stageCounts.pre_entry_momentum_reject || 0) + 1;
+    pool.pre_entry_momentum_gate = decision;
+    if (!decision.accepted) {
+      log("screening", `Pre-entry momentum gate: dropped ${pool.name || pool.pool || "unknown"} — ${decision.reason}`);
+      pushFilteredReason(filteredOut, pool, decision.reason, { priority: true });
+      stageCounts.pre_entry_momentum_reject = (stageCounts.pre_entry_momentum_reject || 0) + 1;
+    } else {
+      if (decision.warning) {
+        log("screening", `Pre-entry momentum gate warning for ${pool.name || pool.pool || "unknown"} — ${decision.reason}`);
+      }
+      accepted.push(pool);
+    }
   }
+  stageCounts.pre_entry_momentum_accept = accepted.length;
+  return accepted;
+}
+
+export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {}, filteredOut = [], stageCounts = {}, rangePolicy = {}) {
+  const accepted = [];
+  for (const pool of pools) {
+    const enrichedPool = attachTwoLaneClassification(
+      enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy }),
+      screeningConfig,
+    );
+    const vetoReason = getConfiguredPoolThresholdVetoReason(enrichedPool, screeningConfig);
+    appendTwoLaneClassification(enrichedPool, screeningConfig, {
+      liveVetoReason: vetoReason,
+      liveAccepted: !vetoReason,
+    });
+    if (vetoReason) {
+      log("screening", `Configured threshold filter: dropped ${pool.name || pool.pool || "unknown"} — ${vetoReason}`);
+      pushFilteredReason(filteredOut, enrichedPool, vetoReason, { priority: true });
+      stageCounts.configured_threshold_reject = (stageCounts.configured_threshold_reject || 0) + 1;
+    } else {
+      accepted.push(enrichedPool);
+    }
+  }
+  stageCounts.configured_threshold_accept = accepted.length;
   return accepted;
 }
 
@@ -1265,8 +1359,7 @@ export function resolveMultiSourceDiscovery({
       if (candidate) sourceCandidates[sourceName] = candidate;
     }
     const discoverySources = Object.keys(sourceCandidates);
-    const hasOverlap = discoverySources.length > 1;
-    if (hasOverlap) {
+    if (discoverySources.length > 1) {
       counts.pool_overlap += 1;
       const preferred = sourceCandidates.meteora || sourceCandidates.okx_discovery || sourceCandidates.gmgn;
       candidates.push(mergeMultiCandidateSources(sourceCandidates, {
@@ -1457,6 +1550,8 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   const totalScreened = discovery.total ?? pools.length;
   const filteredOut = Array.isArray(discovery.filtered_examples) ? [...discovery.filtered_examples] : [];
   const postDiscoveryStageCounts = {};
+  const activeStrategy = getActiveStrategy();
+  const activeRangePolicy = resolveStrategyRangePolicy(activeStrategy, config);
 
   if (source === "gmgn") {
     const before = pools.length;
@@ -1481,6 +1576,7 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     config.screening,
     filteredOut,
     postDiscoveryStageCounts,
+    activeRangePolicy,
   );
   pools = filterPreEntryMomentumGates(
     pools,
@@ -1739,6 +1835,12 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
+  eligible.splice(
+    0,
+    eligible.length,
+    ...applyScoutTailLossShadowDecisions(eligible, config.screening, { filteredOut }),
+  );
+
   const ranked = rankCandidatesByDarwin(eligible);
 
   return {
@@ -1778,7 +1880,7 @@ export async function getPoolDetail({ pool_address, timeframe = "5m" }) {
  * Raw API returns ~100+ fields per pool. The LLM only needs ~20.
  */
 function condensePool(p) {
-  return {
+  const condensed = {
     pool: p.pool_address,
     name: p.name,
     base: {
@@ -1842,6 +1944,11 @@ function condensePool(p) {
     fee_change_pct: fix(p.fee_change_pct, 1),
     swap_count: p.swap_count,
     unique_traders: p.unique_traders,
+  };
+  return {
+    ...condensed,
+    volume_active_tvl_multiple: computeVolumeActiveTvlMultiple(condensed),
+    fee_velocity_usd_per_min: estimateFeeVelocityUsdPerMin(condensed, config.screening),
   };
 }
 

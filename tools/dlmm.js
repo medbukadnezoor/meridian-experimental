@@ -93,7 +93,10 @@ const URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS = 750_000;
 
 function getConnection() {
   if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, "confirmed");
+    _connection = new Connection(process.env.RPC_URL, {
+      commitment: "confirmed",
+      wsEndpoint: process.env.RPC_WS_URL || undefined,
+    });
   }
   return _connection;
 }

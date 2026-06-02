@@ -7,50 +7,37 @@
   "llmApiKey": "env:DEEPSEEK_API_KEY",
   "llmModel": "deepseek-v4-flash",
   "dryRun": false,
-
   "deployAmountSol": 0.15,
   "maxPositions": 3,
   "minSolToOpen": 0.12,
   "maxDeployAmount": 0.15,
   "gasReserve": 0.08,
   "positionSizePct": 0.5,
-
   "strategy": "bid_ask",
   "binsBelow": 70,
   "forceSingleSidedSolBidAsk": true,
   "minSingleSidedSolBins": 25,
   "minSingleSidedSolDownsidePct": 0.5,
-
   "timeframe": "4h",
   "category": "trending",
   "discoveryPageSize": 100,
-  "discoveryExtraCategories": ["new"],
+  "discoveryExtraCategories": [
+    "new"
+  ],
   "excludeHighSupplyConcentration": false,
   "excludeHighSingleOwnership": false,
-
   "minTvl": 5000,
   "maxTvl": 500000,
-  "minVolume": 3000,
+  "minVolume": 500,
   "minOrganic": 45,
   "minQuoteOrganic": 40,
   "minHolders": 75,
   "minMcap": 15000,
-  "maxMcap": 3000000,
-  "minBinStep": 80,
+  "maxMcap": 1000000,
+  "minBinStep": 40,
   "maxBinStep": 300,
-  "minFeeActiveTvlRatio": 0.06,
-  "minTokenFeesSol": 5,
-  "screening": {
-    "preEntryMomentumGates": {
-      "enabled": true,
-      "minReturnPct": 0,
-      "maxReturnPct": 250,
-      "minVolumeRatio": 1.0,
-      "maxVolumeRatio": 5.0,
-      "missingDataPolicy": "warn"
-    }
-  },
-
+  "minFeeActiveTvlRatio": 0.01,
+  "minTokenFeesSol": 2,
   "avoidPvpSymbols": false,
   "blockPvpSymbols": false,
   "useDiscordSignals": false,
@@ -86,15 +73,13 @@
       "minBuySellRatio": 1.1
     }
   },
-
   "maxBundlePct": 50,
   "maxBotHoldersPct": 60,
   "maxTop10Pct": 85,
-
   "allowedLaunchpads": [],
   "blockedLaunchpads": [],
   "minTokenAgeHours": 0.25,
-  "maxTokenAgeHours": 48,
+  "maxTokenAgeHours": 240,
   "athFilterPct": null,
   "fallingKnifeVetoEnabled": true,
   "fallingKnifeMaxPriceChange1hPct": -40,
@@ -102,16 +87,14 @@
   "fallingKnifeMinSellBuyRatio": 1.35,
   "fallingKnifeRequireOversoldRsi": false,
   "suspiciousVolumeVetoEnabled": false,
-
   "minClaimAmount": 1,
   "autoSwapAfterClaim": true,
   "outOfRangeBinsToClose": 50,
-  "outOfRangeWaitMinutes": 15,
-  "outOfRangeHardCloseMinutes": 40,
+  "outOfRangeWaitMinutes": 30,
+  "outOfRangeHardCloseMinutes": 90,
   "oorCooldownTriggerCount": 2,
   "oorCooldownHours": 1,
   "minVolumeToRebalance": 250,
-
   "repeatDeployCooldownEnabled": true,
   "repeatDeployCooldownTriggerCount": 2,
   "repeatDeployCooldownHours": 4,
@@ -122,7 +105,6 @@
   "repeatLowYieldCooldownLookbackHours": 24,
   "repeatLowYieldCooldownHours": 4,
   "repeatLowYieldCooldownScope": "token",
-
   "stopLossPct": -6,
   "stopLossConfirmDelayMs": 15000,
   "hardStopLossPct": -10,
@@ -138,7 +120,6 @@
   "earlyDumpPct": -6,
   "earlyDumpMaxAgeMin": 20,
   "stopLossCooldownHours": 1,
-
   "takeProfitPct": 18,
   "takeProfitFeePct": 2,
   "minFeePerTvl24h": 3,
@@ -158,6 +139,56 @@
   "pnlSnapshotDebug": false,
   "pnlSnapshotBotName": "meridian-oracle-scout",
   "solMode": true,
+  "managementIntervalMin": 3,
+  "screeningIntervalMin": 5,
+  "healthCheckIntervalMin": 30,
+  "temperature": 0.373,
+  "maxTokens": 4096,
+  "maxSteps": 20,
+  "managementModel": "deepseek-v4-flash",
+  "screeningModel": "deepseek-v4-flash",
+  "generalModel": "deepseek-v4-flash",
+  "screeningBaseUrl": "https://api.deepseek.com",
+  "screeningApiKey": "env:DEEPSEEK_API_KEY",
+  "screeningReasoningEffort": null,
+  "screeningFallbackModel": null,
+  "screeningFallbackBaseUrl": null,
+  "screeningFallbackApiKey": null,
+  "managementBaseUrl": "https://api.deepseek.com",
+  "managementApiKey": "env:DEEPSEEK_API_KEY",
+  "generalBaseUrl": "https://api.deepseek.com",
+  "generalApiKey": "env:DEEPSEEK_API_KEY",
+  "darwinEnabled": false,
+  "autoresearchEnabled": false,
+  "hiveMindUrl": "https://api.agentmeridian.xyz",
+  "hiveMindPullMode": "disabled",
+  "agentId": "meridian-oracle-scout",
+  "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
+  "lpAgentRelayEnabled": true,
+  "chartIndicators": {
+    "enabled": true,
+    "entryPreset": "rsi_momentum",
+    "exitPreset": null,
+    "rsiLength": 14,
+    "intervals": [
+      "15_MINUTE"
+    ],
+    "requireAllIntervals": false,
+    "rsiOversold": 35,
+    "rsiOverbought": 80,
+    "rsiMomentumMin": 60,
+    "rsiMomentumMax": 90
+  },
+  "screening": {
+    "preEntryMomentumGates": {
+      "enabled": true,
+      "minReturnPct": 0,
+      "maxReturnPct": 250,
+      "minVolumeRatio": 1,
+      "maxVolumeRatio": 5,
+      "missingDataPolicy": "warn"
+    }
+  },
   "feeExitPolicy": {
     "enabled": true,
     "shadowOnly": true,
@@ -183,50 +214,7 @@
     "maxHoldTimeoutMinutes": 10,
     "maxHoldTimeoutMinNetPnlPct": -2
   },
-
-  "managementIntervalMin": 3,
-  "screeningIntervalMin": 5,
-  "healthCheckIntervalMin": 30,
   "monitoring": {
     "pnlPollIntervalMs": 15000
-  },
-
-  "temperature": 0.373,
-  "maxTokens": 4096,
-  "maxSteps": 20,
-  "managementModel": "deepseek-v4-flash",
-  "screeningModel": "deepseek-v4-flash",
-  "generalModel": "deepseek-v4-flash",
-  "screeningBaseUrl": "https://api.deepseek.com",
-  "screeningApiKey": "env:DEEPSEEK_API_KEY",
-  "screeningReasoningEffort": null,
-  "screeningFallbackModel": null,
-  "screeningFallbackBaseUrl": null,
-  "screeningFallbackApiKey": null,
-  "managementBaseUrl": "https://api.deepseek.com",
-  "managementApiKey": "env:DEEPSEEK_API_KEY",
-  "generalBaseUrl": "https://api.deepseek.com",
-  "generalApiKey": "env:DEEPSEEK_API_KEY",
-
-  "darwinEnabled": false,
-  "autoresearchEnabled": false,
-
-  "hiveMindUrl": "https://api.agentmeridian.xyz",
-  "hiveMindPullMode": "disabled",
-  "agentId": "meridian-oracle-scout",
-  "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
-  "lpAgentRelayEnabled": true,
-
-  "chartIndicators": {
-    "enabled": true,
-    "entryPreset": "rsi_momentum",
-    "exitPreset": null,
-    "rsiLength": 14,
-    "intervals": ["15_MINUTE"],
-    "requireAllIntervals": false,
-    "rsiOversold": 35,
-    "rsiOverbought": 80,
-    "rsiMomentumMin": 60,
-    "rsiMomentumMax": 90
   }
 }

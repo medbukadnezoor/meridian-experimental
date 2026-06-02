@@ -7,14 +7,14 @@ import { agentLoop } from "./agent.js";
 import { log, logAction } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin } from "./tools/screening.js";
+import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, applyScoutTailLossShadowDecisions } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
-import { startPolling, stopPolling, sendMessage, sendHTML, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
+import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
-import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy } from "./strategy-library.js";
+import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy, computeDownsideBinsForPct } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -29,10 +29,7 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
-import { ActiveBinOracleRecorder } from "./active-bin-oracle.js";
-import { createPoolLiquidityFlowProvider } from "./lp-withdrawal-shadow-provider.js";
-import { createLiquidityShapeProvider } from "./lptele2-shape-provider.js";
-import { createSwapPressureProvider } from "./lptele4-swap-pressure-provider.js";
+import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 import { getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
 import {
@@ -53,30 +50,6 @@ startHiveMindBackgroundSync();
 
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
-const poolLiquidityFlowProvider = createPoolLiquidityFlowProvider({
-  rpcUrl: process.env.RPC_URL,
-  signatureLimit: config.oracle?.providers?.whaleEscape?.signatureLimit,
-  maxWindowMs: config.oracle?.providers?.whaleEscape?.maxWindowMs,
-  logger: log,
-});
-const lptele2LiquidityShapeProvider = createLiquidityShapeProvider({
-  rpcUrl: process.env.RPC_URL,
-  binsBelow: config.oracle?.providers?.liquidityShape?.binsBelow,
-  binsAbove: config.oracle?.providers?.liquidityShape?.binsAbove,
-  logger: log,
-});
-const lptele4SwapPressureProvider = createSwapPressureProvider({
-  rpcUrl: process.env.RPC_URL,
-  signatureLimit: config.oracle?.providers?.swapPressure?.signatureLimit,
-  sellThresholdUsd: config.oracle?.providers?.swapPressure?.sellThresholdUsd,
-  logger: log,
-});
-const activeBinOracleRecorder = new ActiveBinOracleRecorder({
-  lpteleProviderConfig: config.oracle?.providers,
-  getPoolLiquidityFlowFn: poolLiquidityFlowProvider,
-  getLptele2LiquidityShapeFn: lptele2LiquidityShapeProvider,
-  getLptele4SwapPressureFn: lptele4SwapPressureProvider,
-});
 
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
@@ -122,10 +95,8 @@ const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 const PNL_SNAPSHOT_LOG_DIR = "./logs";
-const DIRECT_CLOSE_IN_FLIGHT_TTL_MS = 5 * 60 * 1000;
 let _pnlSnapshotWarningLogged = false;
 let _ohlcvDrawdownShadowWarningLogged = false;
-const _directCloseInFlight = new Map();
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
@@ -133,103 +104,91 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(num) ? num : null;
 }
 
+function buildPnlSnapshotRangeState(position = {}) {
+  const sourceInRange = typeof position.in_range === "boolean" ? position.in_range : null;
+  const lowerBin = finiteNumberOrNull(position.lower_bin ?? position.min_bin ?? position.bin_range?.min);
+  const upperBin = finiteNumberOrNull(position.upper_bin ?? position.max_bin ?? position.bin_range?.max);
+  const activeBin = finiteNumberOrNull(position.active_bin ?? position.bin_range?.active);
+  const derivedRangeSide = deriveRangeSide({
+    active_bin: activeBin,
+    lower_bin: lowerBin,
+    upper_bin: upperBin,
+  });
+  const derivedInRange = derivedRangeSide === "unknown" ? null : derivedRangeSide === "in_range";
+  const rangeStateMismatch = sourceInRange != null && derivedInRange != null
+    ? sourceInRange !== derivedInRange
+    : false;
+
+  return {
+    sourceInRange,
+    derivedRangeSide,
+    derivedInRange,
+    lowerBin,
+    upperBin,
+    activeBin,
+    rangeStateMismatch,
+  };
+}
+
+function normalizeRangeSide(value) {
+  if (value === "in_range" || value === "above_range" || value === "below_range") return value;
+  return null;
+}
+
+function buildPositionDisplayRangeState(position = {}) {
+  const sourceInRange = typeof position.in_range === "boolean" ? position.in_range : null;
+  const lowerBin = finiteNumberOrNull(position.lower_bin ?? position.min_bin ?? position.bin_range?.min);
+  const upperBin = finiteNumberOrNull(position.upper_bin ?? position.max_bin ?? position.bin_range?.max);
+  const activeBin = finiteNumberOrNull(position.active_bin ?? position.bin_range?.active);
+  const derivedRangeSide = normalizeRangeSide(
+    position.derivedRangeSide ?? position.derived_range_side ?? position.range_side,
+  ) ?? normalizeRangeSide(deriveRangeSide({
+    active_bin: activeBin,
+    lower_bin: lowerBin,
+    upper_bin: upperBin,
+  }));
+  const derivedInRange = derivedRangeSide == null ? null : derivedRangeSide === "in_range";
+  const preferredInRange = derivedInRange ?? sourceInRange;
+  const rangeStateMismatch = sourceInRange != null && derivedInRange != null
+    ? sourceInRange !== derivedInRange
+    : false;
+
+  return {
+    sourceInRange,
+    derivedRangeSide,
+    derivedInRange,
+    preferredInRange,
+    rangeStateMismatch,
+  };
+}
+
+function formatPositionRangeLabel(position = {}, { icon = true } = {}) {
+  const state = buildPositionDisplayRangeState(position);
+  const minutes = position.minutes_out_of_range ?? 0;
+  const derivedLabel = state.derivedRangeSide === "in_range"
+    ? "IN"
+    : state.derivedRangeSide === "above_range"
+      ? `OOR above ${minutes}m`
+      : state.derivedRangeSide === "below_range"
+        ? `OOR below ${minutes}m`
+        : state.sourceInRange === true
+          ? "IN"
+          : state.sourceInRange === false
+            ? `OOR ${minutes}m`
+            : "range unknown";
+  const sourceLabel = state.sourceInRange === true
+    ? "API: IN"
+    : state.sourceInRange === false
+      ? `API: OOR ${minutes}m`
+      : "API: unknown";
+  const prefix = icon ? (state.preferredInRange === false ? "🔴 " : state.preferredInRange === true ? "🟢 " : "⚪ ") : "";
+  const mismatch = state.rangeStateMismatch ? ` ⚠ API/derived mismatch (${sourceLabel})` : "";
+  return `${prefix}${derivedLabel}${mismatch}`;
+}
+
 function formatPct(value) {
   const num = finiteNumberOrNull(value);
   return num == null ? "?" : num.toFixed(2);
-}
-
-function tryMarkDirectCloseInFlight(positionAddress, { pair, source, reason } = {}) {
-  if (!positionAddress) return { marked: false, skipped: true };
-
-  const now = Date.now();
-  const existing = _directCloseInFlight.get(positionAddress);
-  const label = pair || positionAddress.slice(0, 8);
-  if (existing) {
-    const ageMs = now - existing.startedAt;
-    if (ageMs <= DIRECT_CLOSE_IN_FLIGHT_TTL_MS) {
-      log(
-        "state_warn",
-        `[Direct close guard] Skipping duplicate close for ${label}: ${source || "unknown source"} requested "${reason || "close"}" while ${existing.source || "another source"} is still closing (${Math.round(ageMs / 1000)}s old)`,
-      );
-      return {
-        marked: false,
-        skipped: true,
-        result: { success: true, close_in_flight: true, skipped: true, position: positionAddress },
-      };
-    }
-    log(
-      "state_warn",
-      `[Direct close guard] Replacing stale close-in-flight marker for ${label}: previous ${existing.source || "unknown source"} marker is ${Math.round(ageMs / 1000)}s old`,
-    );
-  }
-
-  const marker = {
-    positionAddress,
-    pair: label,
-    source: source || "direct close",
-    reason: reason || "close",
-    startedAt: now,
-  };
-  _directCloseInFlight.set(positionAddress, marker);
-  return { marked: true, marker };
-}
-
-function finishDirectCloseInFlight(positionAddress, marker) {
-  if (!positionAddress || !marker) return;
-  if (_directCloseInFlight.get(positionAddress) === marker) {
-    _directCloseInFlight.delete(positionAddress);
-  }
-}
-
-async function executeMarkedDirectClose(marker, {
-  positionAddress,
-  pair,
-  reason,
-  urgent = false,
-  source,
-  successLog,
-  failureLog,
-  errorLog,
-  fallbackLog,
-} = {}) {
-  _pollTriggeredAt = Date.now();
-  try {
-    const result = await executeTool("close_position", {
-      position_address: positionAddress,
-      reason,
-      urgent,
-    });
-    if (result?.success) {
-      if (successLog) log("state", successLog(result));
-    } else {
-      if (failureLog) log("state", failureLog(result));
-      if (fallbackLog) runManagementCycle({ silent: true }).catch((e) => log("cron_error", `${fallbackLog}: ${e.message}`));
-    }
-    return result;
-  } catch (error) {
-    log("cron_error", errorLog ? errorLog(error) : `[${source || "Direct close"}] close error for ${pair || positionAddress}: ${error.message}`);
-    if (fallbackLog) runManagementCycle({ silent: true }).catch((e) => log("cron_error", `${fallbackLog}: ${e.message}`));
-    return { success: false, error: error.message, position: positionAddress };
-  } finally {
-    finishDirectCloseInFlight(positionAddress, marker);
-  }
-}
-
-async function runDirectCloseWithGuard(options = {}) {
-  const positionAddress = options.positionAddress;
-  const guard = tryMarkDirectCloseInFlight(positionAddress, options);
-  if (!guard.marked) return guard.result;
-  return executeMarkedDirectClose(guard.marker, options);
-}
-
-function startDirectCloseWithGuard(options = {}) {
-  const positionAddress = options.positionAddress;
-  const guard = tryMarkDirectCloseInFlight(positionAddress, options);
-  if (!guard.marked) return false;
-  executeMarkedDirectClose(guard.marker, options).catch((error) => {
-    log("cron_error", `[Direct close guard] Unhandled direct close error for ${options.pair || positionAddress}: ${error.message}`);
-  });
-  return true;
 }
 
 function isSoftStopLossCandidate(position, managementConfig) {
@@ -248,6 +207,7 @@ function appendPnlSnapshot(wallet, position, exit = null) {
     fs.mkdirSync(PNL_SNAPSHOT_LOG_DIR, { recursive: true });
     const now = new Date();
     const tracked = getTrackedPosition(position.position);
+    const rangeState = buildPnlSnapshotRangeState(position);
     const entry = {
       ts: now.toISOString(),
       event: "pnl_snapshot",
@@ -261,7 +221,14 @@ function appendPnlSnapshot(wallet, position, exit = null) {
       pnlPct: finiteNumberOrNull(position.pnl_pct),
       peakPnlPct: finiteNumberOrNull(tracked?.peak_pnl_pct),
       trailingActive: Boolean(tracked?.trailing_active),
-      inRange: typeof position.in_range === "boolean" ? position.in_range : null,
+      inRange: rangeState.sourceInRange,
+      sourceInRange: rangeState.sourceInRange,
+      derivedRangeSide: rangeState.derivedRangeSide,
+      derivedInRange: rangeState.derivedInRange,
+      lowerBin: rangeState.lowerBin,
+      upperBin: rangeState.upperBin,
+      activeBin: rangeState.activeBin,
+      rangeStateMismatch: rangeState.rangeStateMismatch,
       stopCandidate: exit?.action === "STOP_LOSS_CANDIDATE" || isSoftStopLossCandidate(position, config.management),
     };
     const dateStr = now.toISOString().slice(0, 10);
@@ -281,6 +248,13 @@ function appendPnlSnapshot(wallet, position, exit = null) {
         peak_pnl_pct: entry.peakPnlPct,
         trailing_active: entry.trailingActive,
         in_range: entry.inRange,
+        source_in_range: entry.sourceInRange,
+        derived_range_side: entry.derivedRangeSide,
+        derived_in_range: entry.derivedInRange,
+        lower_bin: entry.lowerBin,
+        upper_bin: entry.upperBin,
+        active_bin: entry.activeBin,
+        range_state_mismatch: entry.rangeStateMismatch,
         stop_candidate: entry.stopCandidate,
       },
       source: `pnl-snapshots-${dateStr}.jsonl`,
@@ -393,25 +367,8 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
       );
       if (resolved?.confirmed) {
-        const pair = result?.positions?.find((p) => p.position === positionAddress)?.pair ?? positionAddress.slice(0, 8);
-        if (config.management.tpDirectCloseEnabled) {
-          const urgent = config.management.tpDirectCloseUrgent === true;
-          log("state", `[Trailing recheck] Confirmed trailing exit for ${pair} — closing directly (no LLM, no relay)`);
-          startDirectCloseWithGuard({
-            positionAddress,
-            pair,
-            reason: resolved.reason,
-            urgent,
-            source: "Trailing recheck",
-            successLog: (closeResult) => `[Trailing recheck] Direct trailing close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
-            failureLog: (closeResult) => `[Trailing recheck] Direct trailing close failed for ${pair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
-            errorLog: (error) => `Direct trailing close error for ${pair}: ${error.message}`,
-            fallbackLog: "Trailing fallback management failed",
-          });
-        } else {
-          log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
-          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
-        }
+        log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
+        runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing recheck management failed: ${e.message}`));
       }
     } catch (error) {
       log("state_warn", `Trailing drop confirmation failed for ${positionAddress}: ${error.message}`);
@@ -455,17 +412,23 @@ function scheduleStopLossConfirmation(position, exit) {
       if (confirmation.confirmed) {
         const reason = confirmation.closeReason;
         log("state", confirmation.logMessage);
-        await runDirectCloseWithGuard({
-          positionAddress,
-          pair: latestPair,
-          reason,
-          urgent: true,
-          source: "Stop loss confirmed",
-          successLog: (closeResult) => `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
-          failureLog: (closeResult) => `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
-          errorLog: (error) => `Confirmed stop-loss close error: ${error.message}`,
-          fallbackLog: "Fallback management failed",
-        });
+        _pollTriggeredAt = Date.now();
+        try {
+          const closeResult = await executeTool("close_position", {
+            position_address: positionAddress,
+            reason,
+            urgent: true,
+          });
+          if (closeResult?.success) {
+            log("state", `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
+          } else {
+            log("state", `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
+            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+          }
+        } catch (error) {
+          log("cron_error", `Confirmed stop-loss close error: ${error.message}`);
+          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+        }
         return;
       }
 
@@ -482,7 +445,8 @@ function scheduleStopLossConfirmation(position, exit) {
 function isEmergencyDirectExit(exit) {
   return !!exit?.urgent && (
     exit.action === "STOP_LOSS" ||
-    exit.action === "PROFIT_GIVEBACK"
+    exit.action === "PROFIT_GIVEBACK" ||
+    exit.action === "MAX_HOLD"
   );
 }
 
@@ -490,16 +454,16 @@ async function closeEmergencyDirect(position, exit, source = "management") {
   const pair = position?.pair || position?.pool_name || position?.position || "position";
   const reason = exit?.reason || "Emergency exit";
   log("state", `[${source}] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
-  const result = await runDirectCloseWithGuard({
-    positionAddress: position.position,
-    pair,
+  const result = await executeTool("close_position", {
+    position_address: position.position,
     reason,
     urgent: true,
-    source,
-    successLog: (closeResult) => `[${source}] Emergency direct close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
-    failureLog: (closeResult) => `[${source}] Emergency direct close failed for ${pair}: ${closeResult?.error ?? "unknown"}`,
-    errorLog: (error) => `[${source}] Emergency direct close error for ${pair}: ${error.message}`,
   });
+  if (result?.success) {
+    log("state", `[${source}] Emergency direct close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+  } else {
+    log("cron_error", `[${source}] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
+  }
   return result;
 }
 
@@ -531,10 +495,7 @@ async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL p
 
   appendFeeExitPolicyDecision(position, evaluation);
   const label = decision.shadowOnly ? "SHADOW" : "LIVE";
-  log(
-    "state",
-    `[${source}] ${label} fee-exit policy: ${position?.pair ?? position?.position ?? "position"} — ${decision.rule}: ${decision.reason}`,
-  );
+  log("state", `[${source}] ${label} fee-exit policy: ${position?.pair ?? position?.position ?? "position"} — ${decision.rule}: ${decision.reason}`);
 
   if (decision.shadowOnly) return false;
 
@@ -686,6 +647,15 @@ async function runOorRepositionAfterConfirmedClose(position, closeRule, closeRes
 }
 
 function formatActiveBinOracleExitReason(row) {
+  if (row.active_bin_below_range_emergency_shadow_decision === "blocked") {
+    return [
+      `Active-bin below-range emergency: ${(row.active_bin_below_range_emergency_shadow_reasons || []).join(", ") || "below_range_negative_pnl"}`,
+      `active_bin=${row.active_bin ?? "?"}`,
+      `lower_bin=${row.lower_bin ?? "?"}`,
+      `upper_bin=${row.upper_bin ?? "?"}`,
+      `pnl=${formatPct(row.pnl_pct)}%`,
+    ].join("; ");
+  }
   return [
     `Active-bin rug velocity: ${row.shadow_velocity_reason || "rug_like_extreme"}`,
     `active_bin=${row.active_bin ?? "?"}`,
@@ -709,7 +679,13 @@ activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
   if (!result?.success) {
     _activeBinOracleEmergencyInFlight.delete(positionAddress);
   }
-}, { enabled: true, maxPnlPct: 2 });
+}, {
+  enabled: true,
+  maxPnlPct: 2,
+  belowRangeEnabled: config.management.activeBinBelowRangeEmergencyLiveEnabled === true,
+  belowRangePnlPct: config.management.activeBinBelowRangeEmergencyPnlPct,
+  belowRangeEntryDrawdownPct: config.management.activeBinBelowRangeEmergencyEntryDrawdownPct,
+});
 
 
 async function runBriefing() {
@@ -921,24 +897,17 @@ export async function runManagementCycle({ silent = false } = {}) {
           );
         }
         if (closeRule.rule === 4 && isOorRepositionEnabled(config) && isOorRepositionEligibleRangeSide(closeRule.rangeSide)) {
-          const result = await runDirectCloseWithGuard({
-            positionAddress: p.position,
-            pair: p.pair,
+          const result = await executeTool("close_position", {
+            position_address: p.position,
             reason: closeRule.reason,
             urgent: !!closeRule.urgent,
-            source: "Management cycle OOR reposition",
-            successLog: (closeResult) => `[Management cycle OOR reposition] Direct close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
-            failureLog: (closeResult) => `[Management cycle OOR reposition] Direct close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}`,
-            errorLog: (error) => `[Management cycle OOR reposition] Direct close error for ${p.pair}: ${error.message}`,
           });
           actionMap.set(p.position, {
             action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
             reason: closeRule.reason,
             result,
           });
-          if (!result?.close_in_flight) {
-            await runOorRepositionAfterConfirmedClose(p, closeRule, result);
-          }
+          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
           continue;
         }
         actionMap.set(p.position, closeRule);
@@ -960,7 +929,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = p.in_range ? "🟢 IN" : `🔴 OOR ${p.minutes_out_of_range ?? 0}m`;
+      const inRange = formatPositionRangeLabel(p);
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
@@ -1279,10 +1248,26 @@ export async function runScreeningCycle({ silent = false } = {}) {
       const darwinContext = Array.isArray(pool.darwin_top_signals) && pool.darwin_top_signals.length > 0
         ? `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}% | top drivers ${pool.darwin_top_signals.map((signal) => `${signal.signal}=${signal.value}`).join(", ")}`
         : `  darwin: ${pool.darwin_score ?? "?"}/100 | coverage ${pool.darwin_coverage_pct ?? "?"}%`;
+      const feeVelocityContext = pool.volume_active_tvl_multiple != null || pool.fee_velocity_usd_per_min != null || pool.target_downside_profile
+        ? [
+            `vol/aTVL=${pool.volume_active_tvl_multiple ?? "?"}`,
+            `fee_velocity=$${pool.fee_velocity_usd_per_min ?? "?"}/min`,
+            pool.target_downside_profile?.target_downside_pct != null
+              ? `target_downside=${pool.target_downside_profile.target_downside_pct}% (${pool.target_downside_profile.target_downside_bins ?? "?"} bins)`
+              : null,
+            pool.target_downside_profile?.target_downside_min_pct != null || pool.target_downside_profile?.target_downside_max_pct != null
+              ? `target_range=${pool.target_downside_profile.target_downside_min_pct ?? "?"}-${pool.target_downside_profile.target_downside_max_pct ?? "?"}%`
+              : null,
+            pool.fee_velocity_shadow?.same_ticker_surf
+              ? `same_ticker_surf=${pool.fee_velocity_shadow.same_ticker_surf.enabled ? "enabled" : "shadow"}`
+              : null,
+          ].filter(Boolean).join(", ")
+        : null;
 
       const block = [
         `POOL: ${pool.name} (${pool.pool})`,
         `  metrics: bin_step=${pool.bin_step}, fee_pct=${pool.fee_pct}%, fee_tvl=${pool.fee_active_tvl_ratio}, vol=$${pool.volume_window}, tvl=$${pool.active_tvl}, volatility=${pool.volatility}, mcap=$${pool.mcap}, organic=${pool.organic_score}${pool.token_age_hours != null ? `, age=${pool.token_age_hours}h` : ""}`,
+        feeVelocityContext ? `  fee_velocity: ${feeVelocityContext}` : null,
         `  audit: top10=${top10Pct}%, bots=${botPct}%, fees=${feesSol}SOL${launchpad ? `, launchpad=${launchpad}` : ""}`,
         darwinContext,
         pvpLine,
@@ -1334,7 +1319,7 @@ ${candidateBlocks.join("\n\n")}
 STEPS:
 1. Pick the best candidate based on narrative quality, smart wallets, and pool metrics.
 2. Call deploy_position (active_bin is pre-fetched above — no need to call get_active_bin).
-   lp_strategy: MUST be "${activeStrategy?.lp_strategy ?? 'bid_ask'}" — taken from ACTIVE STRATEGY above. Do NOT use "spot". Do NOT change this value.
+   lp_strategy: MUST be "${activeStrategy?.lp_strategy ?? (config.strategy?.strategy || 'bid_ask')}" — taken from ACTIVE STRATEGY above. Do NOT change this value. Use exactly the strategy shown.
    Range policy: ${activeRangeGuidance}.
    If bins_below bounds are configured by the active strategy, keep bins_below inside those bounds. Do not use volatility expansion unless the strategy JSON explicitly defines it.
    For single-side SOL deploys, do not invent upside:
@@ -1463,19 +1448,10 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
   const pnlPollIntervalMs = Math.max(5_000, Number(config.schedule.pnlPollIntervalMs ?? 30_000));
   let _pnlPollBusy = false;
-  let _pnlPollIntervalMs = 4_000;
-  const _pnlPollMinMs = 4_000;
-  const _pnlPollMaxMs = 8_000;
-  let _pnlPoll429Count = 0;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
-    // Adaptive backoff: skip polls if we need to slow down
-    if (_pnlPollIntervalMs > _pnlPollMinMs) {
-      const skipChance = 1 - (_pnlPollMinMs / _pnlPollIntervalMs);
-      if (Math.random() < skipChance) { _pnlPollBusy = false; return; }
-    }
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       activeBinOracleRecorder.updatePositions(result?.positions || []);
@@ -1516,43 +1492,29 @@ Summarize the current portfolio health, total fees earned, and performance of al
             }
             continue;
           }
-          // Confirmed trailing TP (recheck window) — close directly if tpDirectCloseEnabled
-          if (exit.action === "TRAILING_TP" && exit.confirmed_recheck) {
-            if (config.management.tpDirectCloseEnabled) {
-              const urgent = config.management.tpDirectCloseUrgent === true;
-              log("state", `[PnL poll] Confirmed trailing TP: ${p.pair} — ${exit.reason} — closing directly (no LLM, no relay)`);
-              const started = startDirectCloseWithGuard({
-                positionAddress: p.position,
-                pair: p.pair,
-                reason: exit.reason,
-                urgent,
-                source: "PnL poll trailing TP",
-                successLog: (closeResult) => `[PnL poll] Direct trailing close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
-                failureLog: (closeResult) => `[PnL poll] Direct trailing close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
-                errorLog: (error) => `Direct trailing close error: ${error.message}`,
-                fallbackLog: "Trailing fallback management failed",
-              });
-              if (!started) continue;
-              break;
-            }
-            // tpDirectCloseEnabled=false: fall through to management trigger below
-          }
           // Stop-loss is time-critical — bypass cooldown AND skip LLM, close directly
           const isStopLoss = exit.action === "STOP_LOSS";
           if (isStopLoss) {
             log("state", `[PnL poll] URGENT stop-loss: ${p.pair} — ${exit.reason} — closing directly (no cooldown, no LLM)`);
-            const started = startDirectCloseWithGuard({
-              positionAddress: p.position,
-              pair: p.pair,
-              reason: exit.reason,
-              urgent: true,
-              source: "PnL poll stop-loss",
-              successLog: (result) => `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
-              failureLog: (result) => `[PnL poll] Direct stop-loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`,
-              errorLog: (error) => `Direct stop-loss close error: ${error.message}`,
-              fallbackLog: "Fallback management failed",
-            });
-            if (!started) continue;
+            _pollTriggeredAt = Date.now();
+            (async () => {
+              try {
+                const result = await executeTool("close_position", {
+                  position_address: p.position,
+                  reason: exit.reason,
+                  urgent: true,
+                });
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("state", `[PnL poll] Direct stop-loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Direct stop-loss close error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              }
+            })();
             break;
           }
           const bypassPollCooldown = !!exit.urgent;
@@ -1588,6 +1550,33 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
+        // Max-hold time exit closes stale positions; it is not an adverse-signal cooldown.
+        const maxHoldMinutes = config.management.maxHoldMinutes;
+        if (maxHoldMinutes != null) {
+          const tracked = getTrackedPosition(p.position);
+          const deployedAt = tracked?.deployed_at ? new Date(tracked.deployed_at).getTime() : null;
+          if (deployedAt != null && Number.isFinite(deployedAt)) {
+            const ageMinutes = (Date.now() - deployedAt) / 60000;
+            if (ageMinutes >= maxHoldMinutes) {
+              log("state", `[PnL poll] Max hold exit: ${p.pair} — age ${ageMinutes.toFixed(1)}m >= ${maxHoldMinutes}m — closing directly (no LLM)`);
+              _pollTriggeredAt = Date.now();
+              try {
+                const result = await closeEmergencyDirect(p, {
+                  action: "MAX_HOLD",
+                  reason: `Max hold time: ${maxHoldMinutes}m exceeded (age: ${ageMinutes.toFixed(1)}m)`,
+                  urgent: true,
+                }, "PnL poll max hold");
+                if (!result?.success) {
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Max hold fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Max hold close error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Max hold fallback management failed: ${e2.message}`));
+              }
+              break;
+            }
+          }
+        }
         const feeExitEvaluation = evaluateFeeExitPolicy({
           position: p,
           tracked: getTrackedPosition(p.position),
@@ -1607,38 +1596,26 @@ Summarize the current portfolio health, total fees earned, and performance of al
           const isStopLossRule = closeRule.rule === 1;
           if (isStopLossRule) {
             log("state", `[PnL poll] URGENT deterministic stop-loss: ${p.pair} — Rule 1: ${closeRule.reason} — closing directly`);
-            const started = startDirectCloseWithGuard({
-              positionAddress: p.position,
-              pair: p.pair,
-              reason: closeRule.reason,
-              urgent: true,
-              source: "PnL poll deterministic stop-loss",
-              successLog: (result) => `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
-              failureLog: (result) => `Direct deterministic stop-loss failed for ${p.pair}: ${result?.error ?? "unknown"}`,
-              errorLog: (error) => `Direct deterministic stop-loss error: ${error.message}`,
-              fallbackLog: "Fallback management failed",
-            });
-            if (!started) continue;
+            _pollTriggeredAt = Date.now();
+            (async () => {
+              try {
+                const result = await executeTool("close_position", {
+                  position_address: p.position,
+                  reason: closeRule.reason,
+                  urgent: true,
+                });
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("cron_error", `Direct deterministic stop-loss failed for ${p.pair}: ${result?.error ?? "unknown"}`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+                }
+              } catch (e) {
+                log("cron_error", `Direct deterministic stop-loss error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              }
+            })();
             break;
-          }
-          // Rule 2 (take profit) — bypass cooldown and LLM when tpDirectCloseEnabled
-          const isTpRule = closeRule.rule === 2;
-          if (isTpRule && config.management.tpDirectCloseEnabled) {
-            const urgent = config.management.tpDirectCloseUrgent === true;
-            log("state", `[PnL poll] Direct TP: ${p.pair} — Rule 2: ${closeRule.reason} — closing directly (no LLM, no relay)`);
-            const started = startDirectCloseWithGuard({
-              positionAddress: p.position,
-              pair: p.pair,
-              reason: closeRule.reason,
-              urgent,
-              source: "PnL poll direct TP",
-              successLog: (result) => `[PnL poll] Direct TP close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
-              failureLog: (result) => `[PnL poll] Direct TP close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`,
-              errorLog: (error) => `Direct TP close error: ${error.message}`,
-              fallbackLog: "TP fallback management failed",
-            });
-            if (!started) continue;
-            break; // eslint-disable-line no-unreachable -- break is outside the IIFE, inside the for loop
           }
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
           if ((closeRule.indicatorPolicy ?? "confirm") !== "bypass") {
@@ -1665,12 +1642,6 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
-      }
-    } catch (pollErr429) {
-      if (String(pollErr429?.message || "").includes("429") || String(pollErr429?.message || "").includes("Too many")) {
-        _pnlPoll429Count++;
-        _pnlPollIntervalMs = Math.min(_pnlPollMaxMs, _pnlPollIntervalMs + 2000);
-        log("state_warn", `PnL poll 429 backoff #${_pnlPoll429Count}: interval now ${_pnlPollIntervalMs}ms`);
       }
     } finally {
       _pnlPollBusy = false;
@@ -2036,6 +2007,55 @@ async function showSettingsMenu({ messageId = null, page = "main" } = {}) {
   }
 }
 
+const SETTINGS_MENU_MUTATION_ALLOWLIST = new Set([]);
+const SETTINGS_MENU_BLOCKED_KEYS = new Set([
+  "deployAmountSol",
+  "maxDeployAmount",
+  "maxPositions",
+  "strategy",
+  "lpAgentRelayEnabled",
+  "solMode",
+  "gasReserve",
+  "takeProfitPct",
+  "stopLossPct",
+  "trailingTakeProfit",
+  "trailingTriggerPct",
+  "trailingDropPct",
+  "profitGivebackEmergencyEnabled",
+  "profitGivebackTriggerPct",
+  "profitGivebackFloorPct",
+  "repeatDeployCooldownEnabled",
+  "repeatDeployCooldownTriggerCount",
+  "repeatDeployCooldownHours",
+  "repeatDeployCooldownMinFeeEarnedPct",
+  "useDiscordSignals",
+  "blockPvpSymbols",
+  "managementIntervalMin",
+  "screeningIntervalMin",
+  "chartIndicatorsEnabled",
+  "indicatorEntryPreset",
+  "indicatorExitPreset",
+  "indicatorIntervals",
+  "requireAllIntervals",
+  "rsiLength",
+]);
+
+function isSettingsMenuMutationAllowed(key) {
+  return SETTINGS_MENU_MUTATION_ALLOWLIST.has(key) && !SETTINGS_MENU_BLOCKED_KEYS.has(key);
+}
+
+async function blockSettingsMenuMutation(msg, key) {
+  const label = key ? `Blocked: ${key}` : "Blocked";
+  await answerCallbackQuery(msg.callbackQueryId, label);
+  if (msg.messageId) {
+    await editMessageWithButtons(
+      `${formatConfigSnapshot()}\n\nScout settings menu is read-only. ${key ? `Blocked button change: ${key}.` : "Button changes are blocked."}`,
+      msg.messageId,
+      [[settingButton("Back", "cfg:page:main")]]
+    );
+  }
+}
+
 function normalizeMenuValue(key, raw) {
   if (key === "indicatorIntervals") {
     if (raw === "both") return ["5_MINUTE", "15_MINUTE"];
@@ -2072,6 +2092,11 @@ async function applySettingsMenuCallback(msg) {
   }
 
   const key = parts[2];
+  if (!isSettingsMenuMutationAllowed(key)) {
+    await blockSettingsMenuMutation(msg, key);
+    return;
+  }
+
   let value;
   if (action === "toggle") {
     value = !Boolean(settingValue(key));
@@ -2126,6 +2151,7 @@ function formatHelpText() {
     "/closeall — close all open positions",
     "/set <n> <note> — set note/instruction on position",
     "/config — show important runtime config",
+    "/settings — read-only inline settings menu",
     "/setcfg <key> <value> — update persisted config",
     "/cooldowns — active pool + token cooldowns with countdown",
     "/screen — refresh deterministic candidate list",
@@ -2167,6 +2193,10 @@ async function deployLatestCandidate(index) {
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
+  const tailLossChecked = applyScoutTailLossShadowDecisions([candidate], config.screening);
+  if (tailLossChecked.length === 0) {
+    throw new Error("Tail-loss protection live block rejected cached candidate. Run /screen for a fresh candidate list.");
+  }
   if (config.darwin?.enabled && candidate.pool) {
     const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
     stageSignals(candidate.pool, {
@@ -2176,8 +2206,22 @@ async function deployLatestCandidate(index) {
   }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
-  const binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
   const binsAbove = activeRangePolicy.binsAbove ?? 0;
+
+  // Compute bins_below: if strategy uses target_downside_pct, derive from pool bin_step
+  let binsBelow;
+  if (activeRangePolicy.targetDownsidePct != null && candidate.bin_step) {
+    const computed = computeDownsideBinsForPct(activeRangePolicy.targetDownsidePct, candidate.bin_step);
+    const minBins = config.strategy.minSingleSidedSolBins ?? 1;
+    const clamped = computed != null ? Math.max(minBins, computed) : null;
+    // Also clamp to strategy min/max if set
+    const clampedMin = activeRangePolicy.binsBelowMin != null ? Math.max(activeRangePolicy.binsBelowMin, clamped ?? 0) : clamped;
+    const clampedMax = activeRangePolicy.binsBelowMax != null && clampedMin != null ? Math.min(activeRangePolicy.binsBelowMax, clampedMin) : clampedMin;
+    binsBelow = clampedMax;
+    log("deploy", `[target_downside] bins_below=${binsBelow} computed from targetDownsidePct=${activeRangePolicy.targetDownsidePct}% bin_step=${candidate.bin_step} (min=${minBins})`);
+  } else {
+    binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
+  }
   const result = await executeTool("deploy_position", {
     pool_address: candidate.pool,
     amount_y: deployAmount,
@@ -2222,8 +2266,19 @@ async function drainTelegramQueue() {
 }
 
 async function telegramHandler(msg) {
-  const text = msg?.text?.trim();
+  const text = (msg?.callbackData || msg?.text || "").trim();
   if (!text) return;
+
+  if (text.startsWith("cfg:")) {
+    await applySettingsMenuCallback(msg);
+    return;
+  }
+
+  if (["/settings", "/menu", "/configmenu"].includes(text)) {
+    await showSettingsMenu();
+    return;
+  }
+
   if (_managementBusy || _screeningBusy || busy) {
     if (_telegramQueue.length < 5) {
       _telegramQueue.push(msg);
@@ -2317,8 +2372,8 @@ async function telegramHandler(msg) {
       const lines = positions.map((p, i) => {
         const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const range = formatPositionRangeLabel(p);
+        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age} | ${range}`;
       });
       await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
@@ -2339,7 +2394,7 @@ async function telegramHandler(msg) {
         `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
         `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
         `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${pos.in_range ? "IN RANGE" : `OOR ${pos.minutes_out_of_range ?? 0}m`}`,
+        `Age: ${pos.age_minutes ?? "?"}m | ${formatPositionRangeLabel(pos)}`,
         pos.instruction ? `Note: ${pos.instruction}` : null,
       ].filter(Boolean).join("\n"));
     } catch (e) {
@@ -2608,7 +2663,7 @@ if (isTTY) {
     if (positions.total_positions > 0) {
       console.log("Open positions:");
       for (const p of positions.positions) {
-        const status = p.in_range ? "in-range ✓" : "OUT OF RANGE ⚠";
+        const status = formatPositionRangeLabel(p, { icon: false });
         console.log(`  ${p.pair.padEnd(16)} ${status}  fees: $${p.unclaimed_fees_usd}`);
       }
       console.log();
@@ -2701,7 +2756,7 @@ Commands:
         console.log(`\nWallet: ${wallet.sol} SOL  ($${wallet.sol_usd})`);
         console.log(`Positions: ${positions.total_positions}`);
         for (const p of positions.positions) {
-          const status = p.in_range ? "in-range ✓" : "OUT OF RANGE ⚠";
+          const status = formatPositionRangeLabel(p, { icon: false });
           console.log(`  ${p.pair.padEnd(16)} ${status}  fees: ${config.management.solMode ? "◎" : "$"}${p.unclaimed_fees_usd}`);
         }
         console.log();
@@ -2867,6 +2922,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
       const { content } = await agentLoop(`
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
+When reporting open positions, use derived bin range state (range_side from active/lower/upper bins) as the range truth when available. If in_range says true but range_side is above_range or below_range, explicitly report an API/derived range mismatch and do not describe the position as simply healthy in range.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, null, {
         onToolStart: async ({ name }) => { await startupLiveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await startupLiveMessage?.toolFinish(name, result, success); },
