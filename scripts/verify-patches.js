@@ -36,6 +36,7 @@ const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstre
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH = join(__dirname, "verify-post-close-autoswap-logging.js");
+const DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH = join(__dirname, "verify-direct-close-inflight-guard.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -322,6 +323,22 @@ function runPostCloseAutoswapLoggingProof() {
     const stderr = result.stderr?.trim() || "(no stderr)";
     const stdout = result.stdout?.trim() || "(no stdout)";
     throw new Error(`verify-post-close-autoswap-logging failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runDirectCloseInflightGuardProof() {
+  const result = spawnSync(process.execPath, [DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-direct-close-inflight-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   }
 
   return JSON.parse(result.stdout);
@@ -620,6 +637,7 @@ function buildChecks() {
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
   const postCloseAutoswapLoggingProof = runPostCloseAutoswapLoggingProof();
+  const directCloseInflightGuardProof = runDirectCloseInflightGuardProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -888,6 +906,16 @@ function buildChecks() {
         postCloseAutoswapLoggingProof?.checks?.includes("successful post-close autoswap records SOL received") &&
         postCloseAutoswapLoggingProof?.checks?.includes("deploy is blocked by residual non-SOL token value") &&
         postCloseAutoswapLoggingProof?.checks?.includes("close action summary includes post-close swap truth fields"),
+    },
+    {
+      file: "index.js",
+      label: "[Runtime] direct TP/SL close paths are guarded against duplicate in-flight closes",
+      test: () =>
+        directCloseInflightGuardProof?.success === true &&
+        directCloseInflightGuardProof?.checks?.includes("per-position close-in-flight map exists") &&
+        directCloseInflightGuardProof?.checks?.includes("fresh duplicate close attempts are skipped") &&
+        directCloseInflightGuardProof?.checks?.includes("all index.js close_position calls route through guarded helper") &&
+        directCloseInflightGuardProof?.checks?.includes("PnL poll duplicate skips continue scanning other positions"),
     },
     {
       file: "config-builder.js",

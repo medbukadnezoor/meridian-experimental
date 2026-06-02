@@ -122,8 +122,10 @@ const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_DROP_CONFIRM_TOLERANCE_PCT = 1.0;
 const PNL_SNAPSHOT_LOG_DIR = "./logs";
+const DIRECT_CLOSE_IN_FLIGHT_TTL_MS = 5 * 60 * 1000;
 let _pnlSnapshotWarningLogged = false;
 let _ohlcvDrawdownShadowWarningLogged = false;
+const _directCloseInFlight = new Map();
 
 function finiteNumberOrNull(value) {
   if (value == null || value === "") return null;
@@ -134,6 +136,100 @@ function finiteNumberOrNull(value) {
 function formatPct(value) {
   const num = finiteNumberOrNull(value);
   return num == null ? "?" : num.toFixed(2);
+}
+
+function tryMarkDirectCloseInFlight(positionAddress, { pair, source, reason } = {}) {
+  if (!positionAddress) return { marked: false, skipped: true };
+
+  const now = Date.now();
+  const existing = _directCloseInFlight.get(positionAddress);
+  const label = pair || positionAddress.slice(0, 8);
+  if (existing) {
+    const ageMs = now - existing.startedAt;
+    if (ageMs <= DIRECT_CLOSE_IN_FLIGHT_TTL_MS) {
+      log(
+        "state_warn",
+        `[Direct close guard] Skipping duplicate close for ${label}: ${source || "unknown source"} requested "${reason || "close"}" while ${existing.source || "another source"} is still closing (${Math.round(ageMs / 1000)}s old)`,
+      );
+      return {
+        marked: false,
+        skipped: true,
+        result: { success: true, close_in_flight: true, skipped: true, position: positionAddress },
+      };
+    }
+    log(
+      "state_warn",
+      `[Direct close guard] Replacing stale close-in-flight marker for ${label}: previous ${existing.source || "unknown source"} marker is ${Math.round(ageMs / 1000)}s old`,
+    );
+  }
+
+  const marker = {
+    positionAddress,
+    pair: label,
+    source: source || "direct close",
+    reason: reason || "close",
+    startedAt: now,
+  };
+  _directCloseInFlight.set(positionAddress, marker);
+  return { marked: true, marker };
+}
+
+function finishDirectCloseInFlight(positionAddress, marker) {
+  if (!positionAddress || !marker) return;
+  if (_directCloseInFlight.get(positionAddress) === marker) {
+    _directCloseInFlight.delete(positionAddress);
+  }
+}
+
+async function executeMarkedDirectClose(marker, {
+  positionAddress,
+  pair,
+  reason,
+  urgent = false,
+  source,
+  successLog,
+  failureLog,
+  errorLog,
+  fallbackLog,
+} = {}) {
+  _pollTriggeredAt = Date.now();
+  try {
+    const result = await executeTool("close_position", {
+      position_address: positionAddress,
+      reason,
+      urgent,
+    });
+    if (result?.success) {
+      if (successLog) log("state", successLog(result));
+    } else {
+      if (failureLog) log("state", failureLog(result));
+      if (fallbackLog) runManagementCycle({ silent: true }).catch((e) => log("cron_error", `${fallbackLog}: ${e.message}`));
+    }
+    return result;
+  } catch (error) {
+    log("cron_error", errorLog ? errorLog(error) : `[${source || "Direct close"}] close error for ${pair || positionAddress}: ${error.message}`);
+    if (fallbackLog) runManagementCycle({ silent: true }).catch((e) => log("cron_error", `${fallbackLog}: ${e.message}`));
+    return { success: false, error: error.message, position: positionAddress };
+  } finally {
+    finishDirectCloseInFlight(positionAddress, marker);
+  }
+}
+
+async function runDirectCloseWithGuard(options = {}) {
+  const positionAddress = options.positionAddress;
+  const guard = tryMarkDirectCloseInFlight(positionAddress, options);
+  if (!guard.marked) return guard.result;
+  return executeMarkedDirectClose(guard.marker, options);
+}
+
+function startDirectCloseWithGuard(options = {}) {
+  const positionAddress = options.positionAddress;
+  const guard = tryMarkDirectCloseInFlight(positionAddress, options);
+  if (!guard.marked) return false;
+  executeMarkedDirectClose(guard.marker, options).catch((error) => {
+    log("cron_error", `[Direct close guard] Unhandled direct close error for ${options.pair || positionAddress}: ${error.message}`);
+  });
+  return true;
 }
 
 function isSoftStopLossCandidate(position, managementConfig) {
@@ -301,21 +397,16 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         if (config.management.tpDirectCloseEnabled) {
           const urgent = config.management.tpDirectCloseUrgent === true;
           log("state", `[Trailing recheck] Confirmed trailing exit for ${pair} — closing directly (no LLM, no relay)`);
-          _pollTriggeredAt = Date.now();
-          executeTool("close_position", {
-            position_address: positionAddress,
+          startDirectCloseWithGuard({
+            positionAddress,
+            pair,
             reason: resolved.reason,
             urgent,
-          }).then((closeResult) => {
-            if (closeResult?.success) {
-              log("state", `[Trailing recheck] Direct trailing close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
-            } else {
-              log("state", `[Trailing recheck] Direct trailing close failed for ${pair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
-              runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing fallback management failed: ${e.message}`));
-            }
-          }).catch((e) => {
-            log("cron_error", `Direct trailing close error for ${pair}: ${e.message}`);
-            runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Trailing fallback management failed: ${e2.message}`));
+            source: "Trailing recheck",
+            successLog: (closeResult) => `[Trailing recheck] Direct trailing close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
+            failureLog: (closeResult) => `[Trailing recheck] Direct trailing close failed for ${pair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
+            errorLog: (error) => `Direct trailing close error for ${pair}: ${error.message}`,
+            fallbackLog: "Trailing fallback management failed",
           });
         } else {
           log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
@@ -364,23 +455,17 @@ function scheduleStopLossConfirmation(position, exit) {
       if (confirmation.confirmed) {
         const reason = confirmation.closeReason;
         log("state", confirmation.logMessage);
-        _pollTriggeredAt = Date.now();
-        try {
-          const closeResult = await executeTool("close_position", {
-            position_address: positionAddress,
-            reason,
-            urgent: true,
-          });
-          if (closeResult?.success) {
-            log("state", `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
-          } else {
-            log("state", `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
-            runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
-          }
-        } catch (error) {
-          log("cron_error", `Confirmed stop-loss close error: ${error.message}`);
-          runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
-        }
+        await runDirectCloseWithGuard({
+          positionAddress,
+          pair: latestPair,
+          reason,
+          urgent: true,
+          source: "Stop loss confirmed",
+          successLog: (closeResult) => `[Stop loss confirmed] Direct close succeeded: ${latestPair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
+          failureLog: (closeResult) => `[Stop loss confirmed] Direct close failed for ${latestPair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
+          errorLog: (error) => `Confirmed stop-loss close error: ${error.message}`,
+          fallbackLog: "Fallback management failed",
+        });
         return;
       }
 
@@ -405,16 +490,16 @@ async function closeEmergencyDirect(position, exit, source = "management") {
   const pair = position?.pair || position?.pool_name || position?.position || "position";
   const reason = exit?.reason || "Emergency exit";
   log("state", `[${source}] Emergency direct close: ${pair} — ${reason} — closing directly (no MANAGER)`);
-  const result = await executeTool("close_position", {
-    position_address: position.position,
+  const result = await runDirectCloseWithGuard({
+    positionAddress: position.position,
+    pair,
     reason,
     urgent: true,
+    source,
+    successLog: (closeResult) => `[${source}] Emergency direct close succeeded: ${pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
+    failureLog: (closeResult) => `[${source}] Emergency direct close failed for ${pair}: ${closeResult?.error ?? "unknown"}`,
+    errorLog: (error) => `[${source}] Emergency direct close error for ${pair}: ${error.message}`,
   });
-  if (result?.success) {
-    log("state", `[${source}] Emergency direct close succeeded: ${pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
-  } else {
-    log("cron_error", `[${source}] Emergency direct close failed for ${pair}: ${result?.error ?? "unknown"}`);
-  }
   return result;
 }
 
@@ -836,17 +921,24 @@ export async function runManagementCycle({ silent = false } = {}) {
           );
         }
         if (closeRule.rule === 4 && isOorRepositionEnabled(config) && isOorRepositionEligibleRangeSide(closeRule.rangeSide)) {
-          const result = await executeTool("close_position", {
-            position_address: p.position,
+          const result = await runDirectCloseWithGuard({
+            positionAddress: p.position,
+            pair: p.pair,
             reason: closeRule.reason,
             urgent: !!closeRule.urgent,
+            source: "Management cycle OOR reposition",
+            successLog: (closeResult) => `[Management cycle OOR reposition] Direct close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
+            failureLog: (closeResult) => `[Management cycle OOR reposition] Direct close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}`,
+            errorLog: (error) => `[Management cycle OOR reposition] Direct close error for ${p.pair}: ${error.message}`,
           });
           actionMap.set(p.position, {
             action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
             reason: closeRule.reason,
             result,
           });
-          await runOorRepositionAfterConfirmedClose(p, closeRule, result);
+          if (!result?.close_in_flight) {
+            await runOorRepositionAfterConfirmedClose(p, closeRule, result);
+          }
           continue;
         }
         actionMap.set(p.position, closeRule);
@@ -1371,10 +1463,19 @@ Summarize the current portfolio health, total fees earned, and performance of al
   // Lightweight PnL poller — updates trailing TP state between management cycles, no LLM.
   const pnlPollIntervalMs = Math.max(5_000, Number(config.schedule.pnlPollIntervalMs ?? 30_000));
   let _pnlPollBusy = false;
+  let _pnlPollIntervalMs = 4_000;
+  const _pnlPollMinMs = 4_000;
+  const _pnlPollMaxMs = 8_000;
+  let _pnlPoll429Count = 0;
   const pnlPollInterval = setInterval(async () => {
     if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
+    // Adaptive backoff: skip polls if we need to slow down
+    if (_pnlPollIntervalMs > _pnlPollMinMs) {
+      const skipChance = 1 - (_pnlPollMinMs / _pnlPollIntervalMs);
+      if (Math.random() < skipChance) { _pnlPollBusy = false; return; }
+    }
     try {
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       activeBinOracleRecorder.updatePositions(result?.positions || []);
@@ -1420,25 +1521,18 @@ Summarize the current portfolio health, total fees earned, and performance of al
             if (config.management.tpDirectCloseEnabled) {
               const urgent = config.management.tpDirectCloseUrgent === true;
               log("state", `[PnL poll] Confirmed trailing TP: ${p.pair} — ${exit.reason} — closing directly (no LLM, no relay)`);
-              _pollTriggeredAt = Date.now();
-              (async () => {
-                try {
-                  const closeResult = await executeTool("close_position", {
-                    position_address: p.position,
-                    reason: exit.reason,
-                    urgent,
-                  });
-                  if (closeResult?.success) {
-                    log("state", `[PnL poll] Direct trailing close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`);
-                  } else {
-                    log("state", `[PnL poll] Direct trailing close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}, falling back to management`);
-                    runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Trailing fallback management failed: ${e.message}`));
-                  }
-                } catch (e) {
-                  log("cron_error", `Direct trailing close error: ${e.message}`);
-                  runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Trailing fallback management failed: ${e2.message}`));
-                }
-              })();
+              const started = startDirectCloseWithGuard({
+                positionAddress: p.position,
+                pair: p.pair,
+                reason: exit.reason,
+                urgent,
+                source: "PnL poll trailing TP",
+                successLog: (closeResult) => `[PnL poll] Direct trailing close succeeded: ${p.pair} PnL=${closeResult.pnl_pct?.toFixed(2) ?? "?"}%`,
+                failureLog: (closeResult) => `[PnL poll] Direct trailing close failed for ${p.pair}: ${closeResult?.error ?? "unknown"}, falling back to management`,
+                errorLog: (error) => `Direct trailing close error: ${error.message}`,
+                fallbackLog: "Trailing fallback management failed",
+              });
+              if (!started) continue;
               break;
             }
             // tpDirectCloseEnabled=false: fall through to management trigger below
@@ -1447,25 +1541,18 @@ Summarize the current portfolio health, total fees earned, and performance of al
           const isStopLoss = exit.action === "STOP_LOSS";
           if (isStopLoss) {
             log("state", `[PnL poll] URGENT stop-loss: ${p.pair} — ${exit.reason} — closing directly (no cooldown, no LLM)`);
-            _pollTriggeredAt = Date.now();
-            (async () => {
-              try {
-                const result = await executeTool("close_position", {
-                  position_address: p.position,
-                  reason: exit.reason,
-                  urgent: true,
-                });
-                if (result?.success) {
-                  log("state", `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
-                } else {
-                  log("state", `[PnL poll] Direct stop-loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
-                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
-                }
-              } catch (e) {
-                log("cron_error", `Direct stop-loss close error: ${e.message}`);
-                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
-              }
-            })();
+            const started = startDirectCloseWithGuard({
+              positionAddress: p.position,
+              pair: p.pair,
+              reason: exit.reason,
+              urgent: true,
+              source: "PnL poll stop-loss",
+              successLog: (result) => `[PnL poll] Direct stop-loss close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
+              failureLog: (result) => `[PnL poll] Direct stop-loss close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`,
+              errorLog: (error) => `Direct stop-loss close error: ${error.message}`,
+              fallbackLog: "Fallback management failed",
+            });
+            if (!started) continue;
             break;
           }
           const bypassPollCooldown = !!exit.urgent;
@@ -1520,25 +1607,18 @@ Summarize the current portfolio health, total fees earned, and performance of al
           const isStopLossRule = closeRule.rule === 1;
           if (isStopLossRule) {
             log("state", `[PnL poll] URGENT deterministic stop-loss: ${p.pair} — Rule 1: ${closeRule.reason} — closing directly`);
-            _pollTriggeredAt = Date.now();
-            (async () => {
-              try {
-                const result = await executeTool("close_position", {
-                  position_address: p.position,
-                  reason: closeRule.reason,
-                  urgent: true,
-                });
-                if (result?.success) {
-                  log("state", `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
-                } else {
-                  log("cron_error", `Direct deterministic stop-loss failed for ${p.pair}: ${result?.error ?? "unknown"}`);
-                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
-                }
-              } catch (e) {
-                log("cron_error", `Direct deterministic stop-loss error: ${e.message}`);
-                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
-              }
-            })();
+            const started = startDirectCloseWithGuard({
+              positionAddress: p.position,
+              pair: p.pair,
+              reason: closeRule.reason,
+              urgent: true,
+              source: "PnL poll deterministic stop-loss",
+              successLog: (result) => `[PnL poll] Direct deterministic stop-loss succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
+              failureLog: (result) => `Direct deterministic stop-loss failed for ${p.pair}: ${result?.error ?? "unknown"}`,
+              errorLog: (error) => `Direct deterministic stop-loss error: ${error.message}`,
+              fallbackLog: "Fallback management failed",
+            });
+            if (!started) continue;
             break;
           }
           // Rule 2 (take profit) — bypass cooldown and LLM when tpDirectCloseEnabled
@@ -1546,25 +1626,18 @@ Summarize the current portfolio health, total fees earned, and performance of al
           if (isTpRule && config.management.tpDirectCloseEnabled) {
             const urgent = config.management.tpDirectCloseUrgent === true;
             log("state", `[PnL poll] Direct TP: ${p.pair} — Rule 2: ${closeRule.reason} — closing directly (no LLM, no relay)`);
-            _pollTriggeredAt = Date.now();
-            (async () => {
-              try {
-                const result = await executeTool("close_position", {
-                  position_address: p.position,
-                  reason: closeRule.reason,
-                  urgent,
-                });
-                if (result?.success) {
-                  log("state", `[PnL poll] Direct TP close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
-                } else {
-                  log("state", `[PnL poll] Direct TP close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`);
-                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `TP fallback management failed: ${e.message}`));
-                }
-              } catch (e) {
-                log("cron_error", `Direct TP close error: ${e.message}`);
-                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `TP fallback management failed: ${e2.message}`));
-              }
-            })();
+            const started = startDirectCloseWithGuard({
+              positionAddress: p.position,
+              pair: p.pair,
+              reason: closeRule.reason,
+              urgent,
+              source: "PnL poll direct TP",
+              successLog: (result) => `[PnL poll] Direct TP close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`,
+              failureLog: (result) => `[PnL poll] Direct TP close failed for ${p.pair}: ${result?.error ?? "unknown"}, falling back to management`,
+              errorLog: (error) => `Direct TP close error: ${error.message}`,
+              fallbackLog: "TP fallback management failed",
+            });
+            if (!started) continue;
             break; // eslint-disable-line no-unreachable -- break is outside the IIFE, inside the for loop
           }
           // Non-stop-loss deterministic rules: check indicator confirmation before triggering management
@@ -1592,6 +1665,12 @@ Summarize the current portfolio health, total fees earned, and performance of al
           }
           break;
         }
+      }
+    } catch (pollErr429) {
+      if (String(pollErr429?.message || "").includes("429") || String(pollErr429?.message || "").includes("Too many")) {
+        _pnlPoll429Count++;
+        _pnlPollIntervalMs = Math.min(_pnlPollMaxMs, _pnlPollIntervalMs + 2000);
+        log("state_warn", `PnL poll 429 backoff #${_pnlPoll429Count}: interval now ${_pnlPollIntervalMs}ms`);
       }
     } finally {
       _pnlPollBusy = false;
