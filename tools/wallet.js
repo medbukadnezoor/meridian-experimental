@@ -35,6 +35,7 @@ export function getWalletPublicKey() {
 const JUPITER_PRICE_API = "https://api.jup.ag/price/v3";
 const JUPITER_SWAP_V2_API = "https://api.jup.ag/swap/v2";
 const DEFAULT_JUPITER_API_KEY = "b15d42e9-e0e4-4f90-a424-ae41ceeaa382";
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 function getJupiterApiKey() {
   return config.jupiter.apiKey || process.env.JUPITER_API_KEY || DEFAULT_JUPITER_API_KEY;
@@ -57,6 +58,142 @@ function getJupiterReferralParams() {
     return null;
   }
   return { referralAccount, referralFee: Math.round(referralFee) };
+}
+
+function toNumber(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function roundNumber(value, digits = 6) {
+  if (!Number.isFinite(value)) return null;
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
+}
+
+function bpsDelta(actualRaw, expectedRaw) {
+  const actual = toNumber(actualRaw);
+  const expected = toNumber(expectedRaw);
+  if (actual == null || expected == null || expected === 0) return null;
+  return roundNumber(((actual - expected) / expected) * 10_000, 2);
+}
+
+function routeSummary(routePlan) {
+  if (!Array.isArray(routePlan)) return [];
+  return routePlan.map((route) => ({
+    label: route?.swapInfo?.label ?? null,
+    ammKey: route?.swapInfo?.ammKey ?? null,
+    percent: toNumber(route?.percent),
+    bps: toNumber(route?.bps),
+    usdValue: toNumber(route?.usdValue),
+    inputMint: route?.swapInfo?.inputMint ?? null,
+    outputMint: route?.swapInfo?.outputMint ?? null,
+    inAmount: route?.swapInfo?.inAmount ?? null,
+    outAmount: route?.swapInfo?.outAmount ?? null,
+  }));
+}
+
+export function sanitizeJupiterOrder(order = {}) {
+  return {
+    requestId: order.requestId ?? null,
+    quoteId: order.quoteId ?? null,
+    mode: order.mode ?? null,
+    router: order.router ?? order.swapType ?? null,
+    inputMint: order.inputMint ?? null,
+    outputMint: order.outputMint ?? null,
+    inAmount: order.inAmount ?? null,
+    outAmount: order.outAmount ?? null,
+    inUsdValue: toNumber(order.inUsdValue),
+    outUsdValue: toNumber(order.outUsdValue),
+    swapUsdValue: toNumber(order.swapUsdValue),
+    priceImpact: toNumber(order.priceImpact),
+    priceImpactBps: toNumber(order.priceImpact) != null ? roundNumber(toNumber(order.priceImpact) * 10_000, 2) : null,
+    otherAmountThreshold: order.otherAmountThreshold ?? null,
+    swapMode: order.swapMode ?? null,
+    slippageBps: toNumber(order.slippageBps),
+    feeBps: toNumber(order.feeBps),
+    feeMint: order.feeMint ?? null,
+    platformFee: order.platformFee ? {
+      amount: order.platformFee.amount ?? null,
+      feeBps: toNumber(order.platformFee.feeBps),
+      feeMint: order.platformFee.feeMint ?? null,
+    } : null,
+    signatureFeeLamports: toNumber(order.signatureFeeLamports),
+    prioritizationFeeLamports: toNumber(order.prioritizationFeeLamports),
+    rentFeeLamports: toNumber(order.rentFeeLamports),
+    gasless: order.gasless ?? null,
+    lastValidBlockHeight: order.lastValidBlockHeight ?? null,
+    totalTime: toNumber(order.totalTime),
+    expireAt: order.expireAt ?? null,
+    errorCode: order.errorCode ?? null,
+    errorMessage: order.errorMessage ?? order.error ?? null,
+    routePlan: routeSummary(order.routePlan),
+  };
+}
+
+export function sanitizeJupiterExecute(result = {}) {
+  return {
+    status: result.status ?? null,
+    signature: result.signature ?? null,
+    slot: result.slot ?? null,
+    code: result.code ?? null,
+    error: result.error ?? null,
+    totalInputAmount: result.totalInputAmount ?? null,
+    totalOutputAmount: result.totalOutputAmount ?? null,
+    inputAmountResult: result.inputAmountResult ?? null,
+    outputAmountResult: result.outputAmountResult ?? null,
+    swapEvents: Array.isArray(result.swapEvents)
+      ? result.swapEvents.map((event) => ({
+        inputMint: event?.inputMint ?? null,
+        inputAmount: event?.inputAmount ?? null,
+        outputMint: event?.outputMint ?? null,
+        outputAmount: event?.outputAmount ?? null,
+      }))
+      : [],
+  };
+}
+
+export function buildSwapTrace({ order, execute = null, requestedAt = null, executedAt = null } = {}) {
+  const sanitizedOrder = sanitizeJupiterOrder(order);
+  const sanitizedExecute = execute ? sanitizeJupiterExecute(execute) : null;
+  const requestedMs = requestedAt ? Date.parse(requestedAt) : null;
+  const executedMs = executedAt ? Date.parse(executedAt) : null;
+  const expectedOutRaw = sanitizedOrder.outAmount;
+  const actualOutRaw = sanitizedExecute?.outputAmountResult ?? null;
+  const minOutRaw = sanitizedOrder.otherAmountThreshold;
+  const actualOutputValueUsd = sanitizedExecute?.outputAmountResult != null &&
+    sanitizedOrder.outAmount != null &&
+    sanitizedOrder.outUsdValue != null &&
+    Number(sanitizedOrder.outAmount) !== 0
+    ? (Number(sanitizedExecute.outputAmountResult) / Number(sanitizedOrder.outAmount)) * sanitizedOrder.outUsdValue
+    : null;
+  const valueLeakUsd = sanitizedOrder.outUsdValue != null && actualOutputValueUsd != null
+    ? actualOutputValueUsd - sanitizedOrder.outUsdValue
+    : null;
+  return {
+    order_requested_at: requestedAt,
+    execute_completed_at: executedAt,
+    quote_to_execute_ms: requestedMs != null && executedMs != null ? executedMs - requestedMs : null,
+    order: sanitizedOrder,
+    execute: sanitizedExecute,
+    expected_out_raw: expectedOutRaw,
+    actual_out_raw: actualOutRaw,
+    min_out_raw: minOutRaw,
+    actual_vs_expected_bps: bpsDelta(actualOutRaw, expectedOutRaw),
+    actual_vs_min_out_bps: bpsDelta(actualOutRaw, minOutRaw),
+    price_impact_bps: sanitizedOrder.priceImpactBps,
+    pre_swap_value_usd: sanitizedOrder.inUsdValue,
+    expected_output_value_usd: sanitizedOrder.outUsdValue,
+    actual_output_value_usd: actualOutputValueUsd != null ? roundNumber(actualOutputValueUsd, 6) : null,
+    value_leak_usd: valueLeakUsd != null ? roundNumber(valueLeakUsd, 6) : null,
+    value_leak_bps: sanitizedOrder.outUsdValue && valueLeakUsd != null ? roundNumber((valueLeakUsd / sanitizedOrder.outUsdValue) * 10_000, 2) : null,
+    route_labels: sanitizedOrder.routePlan.map((route) => route.label).filter(Boolean),
+    route_count: sanitizedOrder.routePlan.length,
+    router: sanitizedOrder.router,
+    mode: sanitizedOrder.mode,
+    fee_bps_total: sanitizedOrder.feeBps,
+  };
 }
 
 /**
@@ -132,12 +269,9 @@ export async function getWalletBalances() {
 /**
  * Swap tokens via Jupiter Swap API V2 (order → sign → execute).
  */
-const SOL_MINT = "So11111111111111111111111111111111111111112";
-
 // Normalize any SOL-like address to the correct wrapped SOL mint
 export function normalizeMint(mint) {
   if (!mint) return mint;
-  const SOL_MINT = "So11111111111111111111111111111111111111112";
   if (
     mint === "SOL" || 
     mint === "native" || 
@@ -147,6 +281,77 @@ export function normalizeMint(mint) {
     return SOL_MINT;
   }
   return mint;
+}
+
+async function tokenDecimals(connection, inputMint) {
+  if (inputMint === config.tokens.SOL || inputMint === SOL_MINT) return 9;
+  const mintInfo = await connection.getParsedAccountInfo(new PublicKey(inputMint));
+  return mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+}
+
+async function getJupiterOrder({
+  input_mint,
+  output_mint,
+  amount,
+  taker = null,
+  includeReferral = false,
+}) {
+  const connection = getConnection();
+  const decimals = await tokenDecimals(connection, input_mint);
+  const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
+  const search = new URLSearchParams({
+    inputMint: input_mint,
+    outputMint: output_mint,
+    amount: amountStr,
+  });
+  if (taker) search.set("taker", taker);
+  const referralParams = includeReferral ? getJupiterReferralParams() : null;
+  if (referralParams) {
+    search.set("referralAccount", referralParams.referralAccount);
+    search.set("referralFee", String(referralParams.referralFee));
+  }
+  const jupiterApiKey = getJupiterApiKey();
+  const requestedAt = new Date().toISOString();
+  const orderRes = await fetch(`${JUPITER_SWAP_V2_API}/order?${search.toString()}`, {
+    headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
+  });
+  if (!orderRes.ok) {
+    const body = await orderRes.text();
+    throw new Error(`Swap V2 order failed: ${orderRes.status} ${body}`);
+  }
+  const order = await orderRes.json();
+  if (order.errorCode || order.errorMessage) {
+    throw new Error(`Swap V2 order error: ${order.errorMessage || order.errorCode}`);
+  }
+  return { order, amountStr, requestedAt, referralParams };
+}
+
+export async function quoteSwapToken({
+  input_mint,
+  output_mint,
+  amount,
+}) {
+  input_mint = normalizeMint(input_mint);
+  output_mint = normalizeMint(output_mint);
+  try {
+    const { order, requestedAt } = await getJupiterOrder({
+      input_mint,
+      output_mint,
+      amount,
+      taker: null,
+      includeReferral: false,
+    });
+    return {
+      success: true,
+      input_mint,
+      output_mint,
+      amount,
+      swap_trace: buildSwapTrace({ order, requestedAt }),
+    };
+  } catch (error) {
+    log("swap_warn", `Quote-only swap observer failed: ${error.message}`);
+    return { success: false, input_mint, output_mint, amount, error: error.message };
+  }
 }
 
 export async function swapToken({
@@ -168,43 +373,13 @@ export async function swapToken({
   try {
     log("swap", `${amount} of ${input_mint} → ${output_mint}`);
     const wallet = getWallet();
-    const connection = getConnection();
-
-    // ─── Convert to smallest unit ──────────────────────────────
-    let decimals = 9; // SOL default
-    if (input_mint !== config.tokens.SOL) {
-      const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
-      decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
-    }
-    const amountStr = Math.floor(amount * Math.pow(10, decimals)).toString();
-
-    // ─── Get Swap V2 order (unsigned tx + requestId) ───────────
-    const search = new URLSearchParams({
-      inputMint: input_mint,
-      outputMint: output_mint,
-      amount: amountStr,
+    const { order, requestedAt, referralParams } = await getJupiterOrder({
+      input_mint,
+      output_mint,
+      amount,
       taker: wallet.publicKey.toString(),
+      includeReferral: true,
     });
-    const referralParams = getJupiterReferralParams();
-    if (referralParams) {
-      search.set("referralAccount", referralParams.referralAccount);
-      search.set("referralFee", String(referralParams.referralFee));
-    }
-    const orderUrl = `${JUPITER_SWAP_V2_API}/order?${search.toString()}`;
-    const jupiterApiKey = getJupiterApiKey();
-
-    const orderRes = await fetch(orderUrl, {
-      headers: jupiterApiKey ? { "x-api-key": jupiterApiKey } : {},
-    });
-    if (!orderRes.ok) {
-      const body = await orderRes.text();
-      throw new Error(`Swap V2 order failed: ${orderRes.status} ${body}`);
-    }
-
-    const order = await orderRes.json();
-    if (order.errorCode || order.errorMessage) {
-      throw new Error(`Swap V2 order error: ${order.errorMessage || order.errorCode}`);
-    }
 
     const { transaction: unsignedTx, requestId } = order;
 
@@ -214,6 +389,7 @@ export async function swapToken({
     const signedTx = Buffer.from(tx.serialize()).toString("base64");
 
     // ─── Execute ───────────────────────────────────────────────
+    const jupiterApiKey = getJupiterApiKey();
     const execRes = await fetch(`${JUPITER_SWAP_V2_API}/execute`, {
       method: "POST",
       headers: {
@@ -227,8 +403,19 @@ export async function swapToken({
     }
 
     const result = await execRes.json();
+    const executedAt = new Date().toISOString();
+    const swapTrace = buildSwapTrace({ order, execute: result, requestedAt, executedAt });
     if (result.status === "Failed") {
-      throw new Error(`Swap failed on-chain: code=${result.code}`);
+      return {
+        success: false,
+        error: `Swap failed on-chain: code=${result.code}`,
+        tx: result.signature,
+        input_mint,
+        output_mint,
+        amount_in: result.inputAmountResult,
+        amount_out: result.outputAmountResult,
+        swap_trace: swapTrace,
+      };
     }
 
     log("swap", `SUCCESS tx: ${result.signature}`);
@@ -250,6 +437,7 @@ export async function swapToken({
       referral_fee_bps_requested: referralParams?.referralFee || 0,
       fee_bps_applied: order.feeBps ?? null,
       fee_mint: order.feeMint ?? null,
+      swap_trace: swapTrace,
     };
   } catch (error) {
     log("swap_error", error.message);

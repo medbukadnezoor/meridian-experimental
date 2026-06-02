@@ -36,6 +36,8 @@ const UPSTREAM_SECURITY_HARDENING_VERIFIER_PATH = join(__dirname, "verify-upstre
 const RELAY_GUARD_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-guard-evidence.js");
 const RELAY_RETRY_EVIDENCE_VERIFIER_PATH = join(__dirname, "verify-relay-retry-evidence.js");
 const POST_CLOSE_AUTOSWAP_LOGGING_VERIFIER_PATH = join(__dirname, "verify-post-close-autoswap-logging.js");
+const SWAP_EXPOSURE_OBSERVER_VERIFIER_PATH = join(__dirname, "verify-swap-exposure-observer.js");
+const SOL_BALANCE_TRACKER_VERIFIER_PATH = join(__dirname, "verify-sol-balance-tracker.js");
 const GPT54_RISK_REPORT_PATH = join(__dirname, "report-gpt54-risk.js");
 const SCREENER_TRIAL_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-screener-trial-telemetry.js");
 const DECISION_CONTEXT_LOGGING_VERIFIER_PATH = join(__dirname, "verify-decision-context-logging.js");
@@ -327,6 +329,38 @@ function runPostCloseAutoswapLoggingProof() {
   return JSON.parse(result.stdout);
 }
 
+function runSwapExposureObserverProof() {
+  const result = spawnSync(process.execPath, [SWAP_EXPOSURE_OBSERVER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-swap-exposure-observer failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runSolBalanceTrackerProof() {
+  const result = spawnSync(process.execPath, [SOL_BALANCE_TRACKER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-sol-balance-tracker failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runGpt54RiskReportSelfTest() {
   const result = spawnSync(process.execPath, [GPT54_RISK_REPORT_PATH, "--self-test"], {
     cwd: ROOT,
@@ -604,6 +638,8 @@ function buildChecks() {
   const relayGuardEvidenceProof = runRelayGuardEvidenceSelfTest();
   const relayRetryEvidenceProof = runRelayRetryEvidenceProof();
   const postCloseAutoswapLoggingProof = runPostCloseAutoswapLoggingProof();
+  const swapExposureObserverProof = runSwapExposureObserverProof();
+  const solBalanceTrackerProof = runSolBalanceTrackerProof();
   const gpt54RiskReportProof = runGpt54RiskReportSelfTest();
   const screenerTrialTelemetryProof = runScreenerTrialTelemetryProof();
   const decisionContextLoggingProof = runDecisionContextLoggingProof();
@@ -712,10 +748,10 @@ function buildChecks() {
     },
     {
       file: "scripts/verify-scout-strategy-library-config.js",
-      label: "[Scout strategy library] direct Spot runtime and tracked bid_ask example are strategy/config-driven",
+      label: "[Scout strategy library] tight bid_ask runtime and tracked Spot example are strategy/config-driven",
       test: () =>
         scoutStrategyLibraryConfigProof?.success === true &&
-        scoutStrategyLibraryConfigProof?.spot_strategy_verified === true &&
+        scoutStrategyLibraryConfigProof?.tight_bidask_strategy_verified === true &&
         scoutStrategyLibraryConfigProof?.range_policy_from_json === true &&
         scoutStrategyLibraryConfigProof?.clamps_low_bins_to_min === true &&
         scoutStrategyLibraryConfigProof?.clamps_high_bins_to_max === true &&
@@ -883,6 +919,31 @@ function buildChecks() {
         postCloseAutoswapLoggingProof?.checks?.includes("successful post-close autoswap records SOL received") &&
         postCloseAutoswapLoggingProof?.checks?.includes("deploy is blocked by residual non-SOL token value") &&
         postCloseAutoswapLoggingProof?.checks?.includes("close action summary includes post-close swap truth fields"),
+    },
+    {
+      file: "scripts/verify-swap-exposure-observer.js",
+      label: "[Swap exposure observer] quote-only residual and executed swap traces are sanitized",
+      test: () =>
+        swapExposureObserverProof?.success === true &&
+        swapExposureObserverProof?.checks?.includes("Jupiter order sanitizer drops transaction payload") &&
+        swapExposureObserverProof?.checks?.includes("executed swap trace computes expected vs actual output deltas") &&
+        swapExposureObserverProof?.checks?.includes("manual/external position disappearance is carried into observer rows") &&
+        swapExposureObserverProof?.checks?.includes("quote-only residual rows never contain execute data") &&
+        swapExposureObserverProof?.checks?.includes("swap exposure summary ranks leak and residual quote rows"),
+    },
+    {
+      file: "scripts/verify-sol-balance-tracker.js",
+      label: "[SOL equity tracker] read-only balance/PnL verifier synthetic proof passes",
+      test: () =>
+        solBalanceTrackerProof?.success === true &&
+        solBalanceTrackerProof?.cases?.ownerDepositExcluded === "verified" &&
+        solBalanceTrackerProof?.cases?.deployFreeSolDrop === "verified" &&
+        solBalanceTrackerProof?.cases?.pricedResidual === "verified_with_residuals" &&
+        solBalanceTrackerProof?.cases?.unpricedResidual === "unresolved_residual_exposure" &&
+        solBalanceTrackerProof?.cases?.missingCloseEvidence === "missing_close_or_swap_evidence" &&
+        solBalanceTrackerProof?.cases?.fabriqDivergence === "fabriq_divergence" &&
+        solBalanceTrackerProof?.sourceSafety?.imports_executor_or_mutation_tool === false &&
+        solBalanceTrackerProof?.sourceSafety?.sends_transactions === false,
     },
     {
       file: "config-builder.js",

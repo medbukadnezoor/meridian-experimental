@@ -50,11 +50,11 @@ const active = runtimeStrategyExists ? getActiveStrategy() : tightStrategy;
 if (runtimeStrategyExists) {
   assert.ok(active, "getActiveStrategy returns a strategy");
   assert.ok(KNOWN_SCOUT_STRATEGIES.includes(active.id), `active strategy id must be a known scout strategy (got: ${active.id})`);
-  assert.strictEqual(active.id, "scout_single_sided_sol_spot_scalp_v1", "runtime active strategy is direct Spot scalp");
-  assert.strictEqual(active.lp_strategy, "spot", "runtime active strategy is Spot");
+  assert.strictEqual(active.id, "scout_tight_bidask_retrace", "runtime active strategy is tight bid_ask retrace");
+  assert.strictEqual(active.lp_strategy, "bid_ask", "runtime active strategy is bid_ask");
   assert.strictEqual(active.entry?.single_side, "sol", "runtime active strategy is single-sided SOL");
-  assert.strictEqual(active.range?.type, "target_downside", "runtime Spot strategy uses target downside policy");
-  assert.strictEqual(active.range?.bins_above, 0, "runtime Spot strategy pins bins_above to zero");
+  assert.strictEqual(active.range?.type, "tight", "runtime bid_ask strategy uses tight range policy");
+  assert.strictEqual(active.range?.bins_above, 0, "runtime bid_ask strategy pins bins_above to zero");
 }
 
 const policy = resolveStrategyRangePolicy(tightStrategy, { strategy: { strategy: "bid_ask", binsBelow: 85 } });
@@ -190,7 +190,7 @@ console.log(JSON.stringify({
   active_strategy_non_null: runtimeStrategyExists ? true : null,
   active_strategy_is_known_scout_strategy: true,
   runtime_active_strategy: runtimeStrategyExists ? active.id : null,
-  spot_strategy_verified: runtimeStrategyExists ? active.lp_strategy === "spot" : true,
+  tight_bidask_strategy_verified: runtimeStrategyExists ? active.lp_strategy === "bid_ask" : true,
   range_policy_from_json: true,
   clamps_low_bins_to_min: low.args.bins_below === 29,
   clamps_high_bins_to_max: high.args.bins_below === 35,
