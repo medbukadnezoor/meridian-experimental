@@ -97,6 +97,36 @@ export function reloadScreeningThresholds() {
     if (fresh.ohlcvEntryVetoExtremePriceChangePct !== undefined) s.ohlcvEntryVetoExtremePriceChangePct = fresh.ohlcvEntryVetoExtremePriceChangePct;
     if (fresh.ohlcvEntryVetoRequireCompound !== undefined) s.ohlcvEntryVetoRequireCompound = fresh.ohlcvEntryVetoRequireCompound;
     if (Array.isArray(fresh.ohlcvEntryVetoLiveReasonCodes)) s.ohlcvEntryVetoLiveReasonCodes = fresh.ohlcvEntryVetoLiveReasonCodes;
+    const freshScreening = fresh.screening ?? {};
+    if (freshScreening.targetPoolNeedleVetoShadowEnabled !== undefined || fresh.targetPoolNeedleVetoShadowEnabled !== undefined) {
+      s.targetPoolNeedleVetoShadowEnabled = freshScreening.targetPoolNeedleVetoShadowEnabled ?? fresh.targetPoolNeedleVetoShadowEnabled;
+    }
+    if (freshScreening.targetPoolNeedleVetoLiveEnabled !== undefined || fresh.targetPoolNeedleVetoLiveEnabled !== undefined) {
+      s.targetPoolNeedleVetoLiveEnabled = freshScreening.targetPoolNeedleVetoLiveEnabled ?? fresh.targetPoolNeedleVetoLiveEnabled;
+    }
+    if (freshScreening.targetPoolNeedleVetoLookbackMinutes !== undefined || fresh.targetPoolNeedleVetoLookbackMinutes !== undefined) {
+      s.targetPoolNeedleVetoLookbackMinutes = freshScreening.targetPoolNeedleVetoLookbackMinutes ?? fresh.targetPoolNeedleVetoLookbackMinutes;
+    }
+    if (freshScreening.targetPoolNeedleVetoAggregateMin !== undefined || fresh.targetPoolNeedleVetoAggregateMin !== undefined) {
+      s.targetPoolNeedleVetoAggregateMin = freshScreening.targetPoolNeedleVetoAggregateMin ?? fresh.targetPoolNeedleVetoAggregateMin;
+    }
+    if (freshScreening.targetPoolNeedleVetoShortlistLimit !== undefined || fresh.targetPoolNeedleVetoShortlistLimit !== undefined) {
+      s.targetPoolNeedleVetoShortlistLimit = freshScreening.targetPoolNeedleVetoShortlistLimit ?? fresh.targetPoolNeedleVetoShortlistLimit;
+    }
+    if (freshScreening.targetPoolNeedleVetoMinWindowRows !== undefined || fresh.targetPoolNeedleVetoMinWindowRows !== undefined) {
+      s.targetPoolNeedleVetoMinWindowRows = freshScreening.targetPoolNeedleVetoMinWindowRows ?? fresh.targetPoolNeedleVetoMinWindowRows;
+    }
+    if (freshScreening.targetPoolNeedleVetoHighDrawdownPct !== undefined || fresh.targetPoolNeedleVetoHighDrawdownPct !== undefined) {
+      s.targetPoolNeedleVetoHighDrawdownPct = freshScreening.targetPoolNeedleVetoHighDrawdownPct ?? fresh.targetPoolNeedleVetoHighDrawdownPct;
+    }
+    if (freshScreening.targetPoolNeedleVetoMinHighRunupPct !== undefined || fresh.targetPoolNeedleVetoMinHighRunupPct !== undefined) {
+      s.targetPoolNeedleVetoMinHighRunupPct = freshScreening.targetPoolNeedleVetoMinHighRunupPct ?? fresh.targetPoolNeedleVetoMinHighRunupPct;
+    }
+    if (Array.isArray(freshScreening.targetPoolNeedleVetoLiveReasonCodes) || Array.isArray(fresh.targetPoolNeedleVetoLiveReasonCodes)) {
+      s.targetPoolNeedleVetoLiveReasonCodes = Array.isArray(freshScreening.targetPoolNeedleVetoLiveReasonCodes)
+        ? freshScreening.targetPoolNeedleVetoLiveReasonCodes
+        : fresh.targetPoolNeedleVetoLiveReasonCodes;
+    }
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
