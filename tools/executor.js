@@ -1,4 +1,4 @@
-import { discoverPools, getPoolDetail, getTopCandidates } from "./screening.js";
+import { discoverPools, evaluateTargetPoolNeedleDeployGuard, getPoolDetail, getTopCandidates } from "./screening.js";
 import {
   getActiveBin,
   deployPosition,
@@ -176,6 +176,14 @@ const toolMap = {
       suspiciousVolumeMinGlobalFeesSol: ["screening", "suspiciousVolumeMinGlobalFeesSol"],
       suspiciousVolumeMaxTokenAgeHours: ["screening", "suspiciousVolumeMaxTokenAgeHours"],
       suspiciousVolumeMinPriceDropPct: ["screening", "suspiciousVolumeMinPriceDropPct"],
+      targetPoolNeedleVetoShadowEnabled: ["screening", "targetPoolNeedleVetoShadowEnabled"],
+      targetPoolNeedleVetoLiveEnabled: ["screening", "targetPoolNeedleVetoLiveEnabled"],
+      targetPoolNeedleVetoLookbackMinutes: ["screening", "targetPoolNeedleVetoLookbackMinutes"],
+      targetPoolNeedleVetoAggregateMin: ["screening", "targetPoolNeedleVetoAggregateMin"],
+      targetPoolNeedleVetoMinWindowRows: ["screening", "targetPoolNeedleVetoMinWindowRows"],
+      targetPoolNeedleVetoHighDrawdownPct: ["screening", "targetPoolNeedleVetoHighDrawdownPct"],
+      targetPoolNeedleVetoMinHighRunupPct: ["screening", "targetPoolNeedleVetoMinHighRunupPct"],
+      targetPoolNeedleVetoLiveReasonCodes: ["screening", "targetPoolNeedleVetoLiveReasonCodes"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -567,6 +575,22 @@ export async function executeTool(name, args) {
     if (forcedDeploy.repaired) {
       log("deploy", `[forced-single-side-bidask] Repaired deploy args: ${JSON.stringify(forcedDeploy.repairs)}`);
       args = forcedDeploy.args;
+    }
+
+    const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard({
+      ...args,
+      pool: args?.pool_address,
+      pool_address: args?.pool_address,
+      name: args?.pool_name,
+      base_mint: args?.base_mint,
+    }, config.screening);
+    if (targetPoolNeedleGuard.decision === "blocked") {
+      return {
+        success: false,
+        blocked: true,
+        reason: "target-pool needle veto live block",
+        details: targetPoolNeedleGuard,
+      };
     }
   }
 

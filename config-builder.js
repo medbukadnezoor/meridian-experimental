@@ -223,6 +223,7 @@ export function applyUserConfigToEnv(userConfig, env = process.env) {
 
 export function buildConfig(userConfig = {}, env = process.env) {
   const u = userConfig ?? {};
+  const s = u.screening ?? {};
   const g = u.gmgn ?? {};
   const indicatorUserConfig = u.chartIndicators ?? {};
   const performanceUserConfig = u.performance ?? {};
@@ -277,6 +278,19 @@ export function buildConfig(userConfig = {}, env = process.env) {
       ohlcvEntryVetoLiveReasonCodes: Array.isArray(u.ohlcvEntryVetoLiveReasonCodes)
         ? u.ohlcvEntryVetoLiveReasonCodes
         : ["high_drawdown_with_extreme_positive_candidate_price_change"],
+      targetPoolNeedleVetoShadowEnabled: s.targetPoolNeedleVetoShadowEnabled ?? u.targetPoolNeedleVetoShadowEnabled ?? true,
+      targetPoolNeedleVetoLiveEnabled: s.targetPoolNeedleVetoLiveEnabled ?? u.targetPoolNeedleVetoLiveEnabled ?? false,
+      targetPoolNeedleVetoLookbackMinutes: s.targetPoolNeedleVetoLookbackMinutes ?? u.targetPoolNeedleVetoLookbackMinutes ?? 60,
+      targetPoolNeedleVetoAggregateMin: s.targetPoolNeedleVetoAggregateMin ?? u.targetPoolNeedleVetoAggregateMin ?? 1,
+      targetPoolNeedleVetoShortlistLimit: s.targetPoolNeedleVetoShortlistLimit ?? u.targetPoolNeedleVetoShortlistLimit ?? 3,
+      targetPoolNeedleVetoMinWindowRows: s.targetPoolNeedleVetoMinWindowRows ?? u.targetPoolNeedleVetoMinWindowRows ?? 3,
+      targetPoolNeedleVetoHighDrawdownPct: s.targetPoolNeedleVetoHighDrawdownPct ?? u.targetPoolNeedleVetoHighDrawdownPct ?? -45,
+      targetPoolNeedleVetoMinHighRunupPct: s.targetPoolNeedleVetoMinHighRunupPct ?? u.targetPoolNeedleVetoMinHighRunupPct ?? 50,
+      targetPoolNeedleVetoLiveReasonCodes: Array.isArray(s.targetPoolNeedleVetoLiveReasonCodes)
+        ? s.targetPoolNeedleVetoLiveReasonCodes
+        : Array.isArray(u.targetPoolNeedleVetoLiveReasonCodes)
+        ? u.targetPoolNeedleVetoLiveReasonCodes
+        : ["target_pool_high_needle_retrace"],
       preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
       minOrganic: u.minOrganic ?? 60,
       minQuoteOrganic: u.minQuoteOrganic ?? 60,
@@ -378,9 +392,9 @@ export function buildConfig(userConfig = {}, env = process.env) {
       oorCooldownHours: u.oorCooldownHours ?? 12,
       stopLossCooldownHours: u.stopLossCooldownHours ?? 12,
       repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
-      repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 3,
-      repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 12,
-      repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "token",
+      repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 1,
+      repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 1,
+      repeatDeployCooldownScope: u.repeatDeployCooldownScope ?? "pool",
       repeatDeployCooldownMinFeeEarnedPct: u.repeatDeployCooldownMinFeeEarnedPct ?? u.repeatDeployCooldownMinFeeYieldPct ?? 0,
       repeatLowYieldCooldownEnabled: u.repeatLowYieldCooldownEnabled ?? false,
       repeatLowYieldCooldownTriggerCount: u.repeatLowYieldCooldownTriggerCount ?? 3,

@@ -7,7 +7,7 @@ import { agentLoop } from "./agent.js";
 import { log, logAction } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances } from "./tools/wallet.js";
-import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, applyScoutTailLossShadowDecisions } from "./tools/screening.js";
+import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, applyScoutTailLossShadowDecisions, evaluateTargetPoolNeedleDeployGuard } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
@@ -2243,6 +2243,10 @@ async function deployLatestCandidate(index) {
   const candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
+  }
+  const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard(candidate, config.screening);
+  if (targetPoolNeedleGuard.decision === "blocked") {
+    throw new Error("Target-pool needle veto live block rejected cached candidate. Run /screen for a fresh candidate list.");
   }
   const tailLossChecked = applyScoutTailLossShadowDecisions([candidate], config.screening);
   if (tailLossChecked.length === 0) {

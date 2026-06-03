@@ -3,6 +3,7 @@ const BIRDEYE_OHLCV_V3 = "https://public-api.birdeye.so/defi/v3/ohlcv";
 const CACHE_TTL_MS = 60_000;
 const CACHE_BUCKET_SEC = 60;
 const REQUEST_TIMEOUT_MS = 4_000;
+const TOKEN_CONTEXT_TIMEOUT_MS = 750;
 const BACKOFF_DURATION_MS = 300_000;
 
 const ohlcvCache = new Map();
@@ -170,6 +171,86 @@ async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp =
   const gecko = await fetchGeckoTerminalOhlcv(pool, opts);
   if (gecko && gecko.rows.length > 0) return gecko;
   return null;
+}
+
+async function fetchTargetPoolOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null } = {}) {
+  const opts = { aggregateMin, beforeTimestamp };
+  const poolSpecific = await fetchGeckoTerminalOhlcv(pool, opts);
+  let tokenContext = null;
+  if (tokenMint && process.env.BIRDEYE_API_KEY) {
+    tokenContext = await Promise.race([
+      fetchBirdeyeOhlcv(tokenMint, opts).catch(() => null),
+      new Promise((resolve) => setTimeout(() => resolve(null), TOKEN_CONTEXT_TIMEOUT_MS)),
+    ]);
+  }
+  return {
+    poolSpecific,
+    tokenContext,
+  };
+}
+
+export async function getTargetPoolOhlcvEvidence({
+  candidate = null,
+  pool = null,
+  tokenMint = null,
+  aggregateMin = 1,
+  lookbackMinutes = 60,
+  nowMs = Date.now(),
+} = {}) {
+  const poolAddress = pool ?? candidate?.pool ?? candidate?.pool_address ?? candidate?.address ?? null;
+  const mint = tokenMint ?? candidate?.base?.mint ?? candidate?.base_mint ?? candidate?.mint ?? null;
+  if (!poolAddress) return null;
+
+  const nowSec = Math.floor(nowMs / 1000);
+  const lookbackMs = Math.max(1, Number(lookbackMinutes) || 60) * 60_000;
+  const { poolSpecific, tokenContext } = await fetchTargetPoolOhlcv(poolAddress, mint, {
+    aggregateMin,
+    beforeTimestamp: nowSec,
+  });
+  const ohlcv = poolSpecific;
+  if (!ohlcv || !Array.isArray(ohlcv.rows) || ohlcv.rows.length === 0) return null;
+
+  const sinceSec = Math.floor((nowMs - lookbackMs) / 1000);
+  const windowRows = ohlcv.rows.filter((row) => row.timestamp >= sinceSec && row.timestamp <= nowSec);
+  if (windowRows.length === 0) return null;
+  const rows = windowRows;
+  const first = rows[0] ?? null;
+  const current = selectCurrentRow(rows, nowMs);
+  const high = rows.reduce((best, row) => (row.high != null && (!best || row.high > best.high) ? row : best), null);
+  const low = rows.reduce((best, row) => (row.low != null && (!best || row.low < best.low) ? row : best), null);
+  const entryPrice = finiteNumberOrNull(first?.open ?? first?.close);
+  const currentPrice = finiteNumberOrNull(current?.close);
+  const highPrice = finiteNumberOrNull(high?.high);
+  const lowPrice = finiteNumberOrNull(low?.low);
+
+  return {
+    source: ohlcv.source,
+    aggregateMin: ohlcv.aggregateMin,
+    lookbackMinutes: Math.max(1, Number(lookbackMinutes) || 60),
+    rowCount: ohlcv.rows.length,
+    windowRowCount: rows.length,
+    entry: first,
+    current,
+    high,
+    low,
+    entryPrice,
+    currentPrice,
+    highPrice,
+    lowPrice,
+    entryDrawdownPct: pctChange(currentPrice, entryPrice),
+    highDrawdownPct: pctChange(currentPrice, highPrice),
+    peakRetracePct: pctChange(lowPrice, highPrice),
+    lowDrawdownPct: pctChange(lowPrice, entryPrice),
+    highRunupPct: pctChange(highPrice, entryPrice),
+    highLowRangePct: pctChange(highPrice, lowPrice),
+    decisiveEvidence: "pool_specific",
+    tokenContext: tokenContext ? {
+      source: tokenContext.source,
+      aggregateMin: tokenContext.aggregateMin,
+      rowCount: Array.isArray(tokenContext.rows) ? tokenContext.rows.length : 0,
+      contextOnly: true,
+    } : null,
+  };
 }
 
 function selectEntryReference(rows, deployedAtMs) {
@@ -353,6 +434,9 @@ export async function getOhlcvDrawdownShadowRows({
 export const __test = {
   normalizeRows,
   normalizeBirdeyeRows,
+  fetchOhlcv,
+  fetchTargetPoolOhlcv,
+  getTargetPoolOhlcvEvidence,
   summarizeOhlcv,
   makeRuleRows,
   pctChange,

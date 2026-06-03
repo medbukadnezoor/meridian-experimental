@@ -10,6 +10,8 @@ import { scoreSignalSnapshot } from "../signal-weights.js";
 import { getPerformanceHistory } from "../lessons.js";
 import { evaluateSamePoolPostWinDecay } from "../post-win-decay-gate.js";
 import { evaluateOhlcvEntryVetoShadow } from "../ohlcv-entry-veto-shadow.js";
+import { evaluateTargetPoolNeedleVetoShadow } from "../target-pool-needle-veto-shadow.js";
+import { getTargetPoolOhlcvEvidence } from "../ohlcv-drawdown-shadow.js";
 import {
   computeVolumeActiveTvlMultiple,
   enrichFeeVelocityCandidate,
@@ -95,6 +97,10 @@ function extractCandidateOhlcvEvidence(candidate = {}) {
   };
 }
 
+function extractCandidateTargetPoolOhlcvEvidence(candidate = {}) {
+  return candidate.target_pool_ohlcv_evidence ?? candidate.targetPoolOhlcvEvidence ?? null;
+}
+
 function getRecentCloseRecordsForTailLoss(screeningConfig = {}) {
   const hours = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackHours) ?? 168;
   const limit = finiteNumberOrNull(screeningConfig.samePoolPostWinLookbackLimit) ?? 250;
@@ -143,7 +149,101 @@ export function evaluateScoutTailLossCandidateShadows(candidate = {}, {
         samePoolPriorOutcome,
         config: screeningConfig,
       });
-  return { samePoolPostWinDecay, ohlcvEntryVetoShadow };
+  const targetPoolNeedleVetoShadow = screeningConfig.targetPoolNeedleVetoShadowEnabled === false
+    ? {
+        event: "target_pool_needle_veto_shadow",
+        decision: "disabled",
+        reasonCodes: ["shadow_disabled"],
+        shadowOnly: true,
+        liveBlockingEnabled: false,
+        bluntHighDrawdownOnlyForbidden: true,
+      }
+    : evaluateTargetPoolNeedleVetoShadow(candidate, {
+        ohlcv: extractCandidateTargetPoolOhlcvEvidence(candidate),
+        config: screeningConfig,
+      });
+  return { samePoolPostWinDecay, ohlcvEntryVetoShadow, targetPoolNeedleVetoShadow };
+}
+
+export async function attachTargetPoolOhlcvEvidence(candidates = [], screeningConfig = config.screening, {
+  nowMs = Date.now(),
+} = {}) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return candidates;
+  if (screeningConfig.targetPoolNeedleVetoShadowEnabled === false) return candidates;
+
+  const aggregateMin = screeningConfig.targetPoolNeedleVetoAggregateMin ?? 1;
+  const lookbackMinutes = screeningConfig.targetPoolNeedleVetoLookbackMinutes ?? 60;
+  await Promise.all(candidates.map(async (candidate) => {
+    try {
+      const evidence = await getTargetPoolOhlcvEvidence({
+        candidate,
+        aggregateMin,
+        lookbackMinutes,
+        nowMs,
+      });
+      candidate.target_pool_ohlcv_evidence = evidence;
+    } catch (error) {
+      candidate.target_pool_ohlcv_evidence_error = error.message;
+      log("screening_warn", `Target-pool OHLCV evidence unavailable for ${candidate.name || candidate.pool}: ${error.message}`);
+    }
+  }));
+  return candidates;
+}
+
+export async function evaluateTargetPoolNeedleDeployGuard(candidate = {}, screeningConfig = config.screening, {
+  nowMs = Date.now(),
+  appendContext = true,
+} = {}) {
+  let evidence = extractCandidateTargetPoolOhlcvEvidence(candidate);
+  if (screeningConfig.targetPoolNeedleVetoShadowEnabled !== false && !evidence) {
+    try {
+      evidence = await getTargetPoolOhlcvEvidence({
+        candidate,
+        aggregateMin: screeningConfig.targetPoolNeedleVetoAggregateMin ?? 1,
+        lookbackMinutes: screeningConfig.targetPoolNeedleVetoLookbackMinutes ?? 60,
+        nowMs,
+      });
+      candidate.target_pool_ohlcv_evidence = evidence;
+    } catch (error) {
+      candidate.target_pool_ohlcv_evidence_error = error.message;
+      log("screening_warn", `Last-chance target-pool OHLCV evidence unavailable for ${candidate.name || candidate.pool || candidate.pool_address}: ${error.message}`);
+    }
+  }
+
+  const decision = screeningConfig.targetPoolNeedleVetoShadowEnabled === false
+    ? {
+        event: "target_pool_needle_veto_shadow",
+        decision: "disabled",
+        reasonCodes: ["shadow_disabled"],
+        shadowOnly: true,
+        liveBlockingEnabled: false,
+        bluntHighDrawdownOnlyForbidden: true,
+      }
+    : evaluateTargetPoolNeedleVetoShadow(candidate, {
+        ohlcv: evidence,
+        config: screeningConfig,
+      });
+
+  candidate.target_pool_needle_veto_shadow = decision;
+
+  if (appendContext) {
+    appendDecisionContext({
+      stage: "deploy_guard_target_pool_needle",
+      actor: "SCREENER",
+      pool: candidatePoolAddress(candidate),
+      poolName: candidate.name ?? candidate.pool_name ?? null,
+      baseMint: candidateBaseMint(candidate),
+      quoteMint: candidate.quote?.mint ?? candidate.quote_mint ?? null,
+      reason: (decision.reasonCodes || []).join("; ") || decision.decision,
+      metrics: {
+        ...buildCandidateDecisionContext(candidate),
+        targetPoolNeedleVetoShadow: decision,
+      },
+      source: "screening.deploy_guard_target_pool_needle",
+    });
+  }
+
+  return decision;
 }
 
 export function applyScoutTailLossShadowDecisions(candidates = [], screeningConfig = config.screening, {
@@ -162,8 +262,14 @@ export function applyScoutTailLossShadowDecisions(candidates = [], screeningConf
     });
     candidate.same_pool_post_win_decay_decision = decisions.samePoolPostWinDecay;
     candidate.ohlcv_entry_veto_shadow = decisions.ohlcvEntryVetoShadow;
+    candidate.target_pool_needle_veto_shadow = decisions.targetPoolNeedleVetoShadow;
 
     if (appendContext) {
+      const reason = [
+        decisions.samePoolPostWinDecay?.reasonCode,
+        ...(decisions.ohlcvEntryVetoShadow?.reasonCodes || []),
+        ...(decisions.targetPoolNeedleVetoShadow?.reasonCodes || []),
+      ].filter(Boolean).join("; ");
       appendDecisionContext({
         stage: "tail_loss_shadow_decision",
         actor: "SCREENER",
@@ -171,21 +277,20 @@ export function applyScoutTailLossShadowDecisions(candidates = [], screeningConf
         poolName: candidate.name,
         baseMint: candidateBaseMint(candidate),
         quoteMint: candidate.quote?.mint ?? candidate.quote_mint ?? null,
-        reason: [
-          decisions.samePoolPostWinDecay?.reasonCode,
-          ...(decisions.ohlcvEntryVetoShadow?.reasonCodes || []),
-        ].filter(Boolean).join("; "),
+        reason: reason || "tail-loss shadows evaluated",
         metrics: {
           ...buildCandidateDecisionContext(candidate),
           samePoolPostWinDecay: decisions.samePoolPostWinDecay,
           ohlcvEntryVetoShadow: decisions.ohlcvEntryVetoShadow,
+          targetPoolNeedleVetoShadow: decisions.targetPoolNeedleVetoShadow,
         },
         source: "screening.tail_loss_shadow",
       });
     }
 
     const liveBlocked = decisions.samePoolPostWinDecay?.decision === "blocked" ||
-      decisions.ohlcvEntryVetoShadow?.decision === "blocked";
+      decisions.ohlcvEntryVetoShadow?.decision === "blocked" ||
+      decisions.targetPoolNeedleVetoShadow?.decision === "blocked";
     if (liveBlocked) {
       pushFilteredReason(filteredOut, candidate, "tail-loss protection live block", {
         priority: true,
@@ -1835,13 +1940,17 @@ export async function getTopCandidates({ limit = 10 } = {}) {
     }
   }
 
-  eligible.splice(
+  const rankedBeforeTailLoss = rankCandidatesByDarwin(eligible);
+  const targetPoolNeedleShortlistLimit = Math.max(
     0,
-    eligible.length,
-    ...applyScoutTailLossShadowDecisions(eligible, config.screening, { filteredOut }),
+    Math.floor(Number(config.screening.targetPoolNeedleVetoShortlistLimit ?? 3)),
+  );
+  await attachTargetPoolOhlcvEvidence(
+    rankedBeforeTailLoss.slice(0, targetPoolNeedleShortlistLimit),
+    config.screening,
   );
 
-  const ranked = rankCandidatesByDarwin(eligible);
+  const ranked = applyScoutTailLossShadowDecisions(rankedBeforeTailLoss, config.screening, { filteredOut });
 
   return {
     candidates: ranked,

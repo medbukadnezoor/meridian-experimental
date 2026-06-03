@@ -55,6 +55,7 @@ const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-disco
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
+const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -634,6 +635,22 @@ function runTwoLaneGateProof() {
   return JSON.parse(result.stdout);
 }
 
+function runTargetPoolNeedleVetoProof() {
+  const result = spawnSync(process.execPath, [TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-target-pool-needle-veto failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -674,8 +691,21 @@ function buildChecks() {
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
   const twoLaneGateProof = runTwoLaneGateProof();
+  const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
 
   return [
+    {
+      file: "scripts/verify-target-pool-needle-veto.js",
+      label: "[Target-pool needle veto] pool-specific OHLCV evidence is decisive, default shadow-only, and live blocks only allow-listed reasons",
+      test: () =>
+        targetPoolNeedleVetoProof?.ok === true &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.missing?.decision === "missing_evidence" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.decision === "would_block" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.ohlcv?.source === "geckoterminal" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.liveNeedle?.decision === "blocked" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.liveNotAllowListed?.decision === "would_block" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.deployGuard?.decision === "blocked",
+    },
     {
       file: "scripts/verify-two-lane-gate.js",
       label: "[Scout two-lane gate] T1 is pure shadow and preserves live candidate acceptance",
@@ -1910,9 +1940,9 @@ function buildChecks() {
       label: "[Runtime] repeat deploy defaults resolve cleanly under explicit proof path",
       test: () =>
         defaultProof.management?.repeatDeployCooldownEnabled === true &&
-        Number(defaultProof.management?.repeatDeployCooldownTriggerCount) === 3 &&
-        Number(defaultProof.management?.repeatDeployCooldownHours) === 12 &&
-        defaultProof.management?.repeatDeployCooldownScope === "token" &&
+        Number(defaultProof.management?.repeatDeployCooldownTriggerCount) === 1 &&
+        Number(defaultProof.management?.repeatDeployCooldownHours) === 1 &&
+        defaultProof.management?.repeatDeployCooldownScope === "pool" &&
         Number(defaultProof.management?.repeatDeployCooldownMinFeeEarnedPct) === 0,
     },
     {
