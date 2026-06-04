@@ -83,6 +83,8 @@ export function evaluateTargetPoolNeedleVetoShadow(candidate = {}, {
         highLowRangePct,
         entryDrawdownPct: finiteNumber(ohlcv.entryDrawdownPct),
         lowDrawdownPct: finiteNumber(ohlcv.lowDrawdownPct),
+        decisiveEvidence: ohlcv.decisiveEvidence ?? null,
+        poolSpecificAvailable: ohlcv.poolSpecificAvailable ?? null,
       } : null,
       decision,
       reasonCodes,

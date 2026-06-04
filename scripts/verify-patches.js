@@ -696,12 +696,15 @@ function buildChecks() {
   return [
     {
       file: "scripts/verify-target-pool-needle-veto.js",
-      label: "[Target-pool needle veto] pool-specific OHLCV evidence is decisive, default shadow-only, and live blocks only allow-listed reasons",
+      label: "[Target-pool needle veto] Meteora pool OHLCV is decisive, GMGN fallback is labeled, default shadow-only, and live blocks only allow-listed reasons",
       test: () =>
         targetPoolNeedleVetoProof?.ok === true &&
         targetPoolNeedleVetoProof?.sampleDecisions?.missing?.decision === "missing_evidence" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.decision === "would_block" &&
-        targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.ohlcv?.source === "geckoterminal" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.ohlcv?.source === "meteora_dlmm" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.shadowNeedle?.ohlcv?.decisiveEvidence === "pool_specific" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.gmgnFallbackNeedle?.ohlcv?.source === "gmgn_kline" &&
+        targetPoolNeedleVetoProof?.sampleDecisions?.gmgnFallbackNeedle?.ohlcv?.decisiveEvidence === "token_fallback" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.liveNeedle?.decision === "blocked" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.liveNotAllowListed?.decision === "would_block" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.deployGuard?.decision === "blocked",

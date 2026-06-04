@@ -56,12 +56,18 @@ function makePosition(position, overrides = {}) {
 
 function stubOhlcvPayload(rows) {
   return {
-    data: {
-      attributes: {
-        ohlcv_list: rows,
-      },
-    },
-    meta: { proof: true },
+    data: rows.map(([timestamp, open, high, low, close, volume]) => ({
+      timestamp,
+      timestamp_str: new Date(timestamp * 1000).toISOString(),
+      open,
+      high,
+      low,
+      close,
+      volume,
+    })),
+    start_time: rows[0]?.[0] ?? null,
+    end_time: rows[rows.length - 1]?.[0] ?? null,
+    timeframe: "5m",
   };
 }
 
@@ -70,7 +76,7 @@ function installFetchStub(rowsByPool) {
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
     const parsed = new URL(String(url));
-    const match = parsed.pathname.match(/\/pools\/([^/]+)\/ohlcv\/minute$/);
+    const match = parsed.pathname.match(/\/pools\/([^/]+)\/ohlcv$/);
     const pool = match?.[1];
     const rows = rowsByPool[pool] ?? rowsByPool.default ?? [];
     return {
@@ -248,7 +254,7 @@ async function main() {
     assert(combinedRows.every((row) => row.event === "ohlcv_drawdown_shadow"), "rows should use OHLCV shadow event");
     assert(combinedRows.every((row) => row.shadowOnly === true), "rows must be shadow-only");
     assert(combinedRows.every((row) => row.source === "ohlcv-drawdown-shadow"), "rows should identify source module");
-    assert(combinedRows.every((row) => ["geckoterminal", "birdeye"].includes(row.ohlcv?.source)), "rows should carry OHLCV source");
+    assert(combinedRows.every((row) => ["meteora_dlmm", "gmgn_kline", "birdeye"].includes(row.ohlcv?.source)), "rows should carry OHLCV source");
     assert(combinedRows.every((row) => row.rule?.entryDrawdownPct === -20), "rows should carry configured thresholds");
     assert(combinedMarked === true, "combined rows should mark only after append succeeds");
     assert(combinedRepeatRows.length === 0, "combined rules should dedupe after append/mark");
@@ -265,15 +271,43 @@ async function main() {
     assert(rows.every((row) => row.shadowOnly === true), "written rows must force shadowOnly true");
     assert(rows.every((row) => row.wallet === "wallet-proof"), "written rows should preserve wallet");
     assert(calls.length >= 3, "fetch stub should be used for enabled samples");
-    assert(calls.every((call) => call.url.includes("/networks/solana/pools/")), "fetch should use Solana pool OHLCV path");
-    assert(calls.every((call) => call.url.includes("token=base")), "fetch should request base-token OHLCV");
+    assert(calls.every((call) => call.url.includes("dlmm.datapi.meteora.ag/pools/")), "fetch should use Meteora DLMM pool OHLCV path");
+    assert(calls.every((call) => call.url.includes("timeframe=5m")), "fetch should request Meteora's shortest documented pool timeframe");
 
     process.chdir(originalCwd);
     fs.rmSync(tempDir, { recursive: true, force: true });
     tempDirRemoved = !fs.existsSync(tempDir);
 
-    // ── Birdeye normalizer proof ──────────────────────────────────────────────
-    const { normalizeBirdeyeRows } = (await import(pathToFileURL(join(ROOT, "ohlcv-drawdown-shadow.js")).href)).__test;
+    // ── Provider normalizer proof ─────────────────────────────────────────────
+    const {
+      normalizeBirdeyeRows,
+      normalizeMeteoraRows,
+      normalizeGmgnRows,
+    } = (await import(pathToFileURL(join(ROOT, "ohlcv-drawdown-shadow.js")).href)).__test;
+    const meteoraRows = normalizeMeteoraRows({
+      data: [
+        { timestamp: 1000, timestamp_str: "1970-01-01T00:16:40.000Z", open: 100, high: 110, low: 95, close: 105, volume: 500 },
+        { timestamp: 1060, open: 105, high: 108, low: 70, close: 76, volume: 1400 },
+        { timestamp: null, open: 1, high: 2, low: 0.5, close: null, volume: 10 },
+      ],
+    });
+    assert(meteoraRows.length === 2, "meteora normalizer should filter null close/timestamp");
+    assert(meteoraRows[0].timestamp === 1000, "meteora normalizer should map timestamp");
+    assert(meteoraRows[0].volumeUsd === 500, "meteora normalizer should map volume");
+
+    const gmgnRows = normalizeGmgnRows({
+      data: {
+        list: [
+          { time: 1_000_000_000_000, open: "100", high: "110", low: "95", close: "105", volume: "500" },
+          { time: 1_000_060_000_000, open: "105", high: "108", low: "70", close: "76", volume: "1400" },
+          { time: null, open: "1", high: "2", low: "0.5", close: null, volume: "10" },
+        ],
+      },
+    });
+    assert(gmgnRows.length === 2, "gmgn normalizer should filter null close/timestamp");
+    assert(gmgnRows[0].timestamp === 1_000_000_000, "gmgn normalizer should convert millisecond timestamps");
+    assert(gmgnRows[0].open === 100, "gmgn normalizer should parse numeric strings");
+
     const birdeyePayload = {
       data: {
         items: [
@@ -294,7 +328,7 @@ async function main() {
     assert(birdeyeRows[0].volumeUsd === 500, "birdeye normalizer should map v_usd → volumeUsd");
     assert(typeof birdeyeRows[0].iso === "string", "birdeye normalizer should produce ISO string");
     assert(birdeyeRows[1].timestamp === 1060, "birdeye rows should sort ascending");
-    const birdeyeNormalizerOk = true;
+    const providerNormalizersOk = true;
 
     const summary = {
       success: true,
@@ -313,7 +347,7 @@ async function main() {
       tempStateFileCreated,
       tempDirRemoved,
       fetchCalls: calls.length,
-      birdeyeNormalizerOk,
+      providerNormalizersOk,
     };
     console.log(JSON.stringify(summary, null, 2));
   } finally {
