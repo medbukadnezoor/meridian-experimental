@@ -21,8 +21,9 @@ const candidate = {
   quote: { mint: "So11111111111111111111111111111111111111112", symbol: "SOL" },
 };
 const decisivePoolEvidence = {
-  source: "geckoterminal",
+  source: "meteora_dlmm",
   decisiveEvidence: "pool_specific",
+  poolSpecificAvailable: true,
   aggregateMin: 1,
   lookbackMinutes: 60,
   rowCount: 12,
@@ -36,7 +37,7 @@ const decisivePoolEvidence = {
   highRunupPct: 100,
   highLowRangePct: 344.44444444444446,
   tokenContext: {
-    source: "birdeye",
+    source: "gmgn_kline",
     contextOnly: true,
     rowCount: 12,
   },
@@ -73,9 +74,23 @@ const shadowNeedle = evaluateTargetPoolNeedleVetoShadow(candidate, {
   config: defaultConfig,
 });
 assert.equal(shadowNeedle.decision, "would_block", "default target-pool needle policy shadows the veto");
-assert.equal(shadowNeedle.ohlcv.source, "geckoterminal", "pool-specific OHLCV is preserved as decisive evidence");
+assert.equal(shadowNeedle.ohlcv.source, "meteora_dlmm", "Meteora pool-specific OHLCV is preserved as decisive evidence");
+assert.equal(shadowNeedle.ohlcv.decisiveEvidence, "pool_specific", "decisive evidence provenance is logged");
 assert.equal(shadowNeedle.ohlcv.highDrawdownPct, -76, "pool-specific drawdown drives the decision");
 assert.equal(shadowNeedle.ohlcv.peakRetracePct, -77.5, "pool-specific wick retrace is preserved");
+
+const gmgnFallbackNeedle = evaluateTargetPoolNeedleVetoShadow(candidate, {
+  ohlcv: {
+    ...decisivePoolEvidence,
+    source: "gmgn_kline",
+    decisiveEvidence: "token_fallback",
+    poolSpecificAvailable: false,
+    tokenContext: null,
+  },
+  config: defaultConfig,
+});
+assert.equal(gmgnFallbackNeedle.decision, "would_block", "GMGN fallback can still shadow a token-level needle");
+assert.equal(gmgnFallbackNeedle.ohlcv.decisiveEvidence, "token_fallback", "GMGN fallback provenance is logged");
 
 const preWindowPumpNeedle = evaluateTargetPoolNeedleVetoShadow(candidate, {
   ohlcv: {
@@ -160,7 +175,9 @@ const configSource = readFileSync(join(ROOT, "config.js"), "utf8");
 
 assert(ohlcvSource.includes("fetchTargetPoolOhlcv"), "production target-pool OHLCV helper exists");
 assert(ohlcvSource.includes("poolSpecific"), "target-pool helper names pool-specific evidence");
-assert(ohlcvSource.includes("decisiveEvidence: \"pool_specific\""), "target-pool helper marks decisive pool evidence");
+assert(ohlcvSource.includes("fetchMeteoraDlmmPoolOhlcv"), "target-pool helper tries Meteora DLMM pool OHLCV first");
+assert(ohlcvSource.includes("fetchGmgnKlineOhlcv"), "target-pool helper falls back to GMGN kline");
+assert(ohlcvSource.includes("decisiveEvidence: ohlcv === poolSpecific ? \"pool_specific\" : \"token_fallback\""), "target-pool helper marks GMGN fallback provenance");
 assert(ohlcvSource.includes("TOKEN_CONTEXT_TIMEOUT_MS"), "context-only token OHLCV has a short timeout");
 assert(ohlcvSource.includes("if (windowRows.length === 0) return null"), "stale-only target-pool OHLCV becomes missing evidence");
 assert(ohlcvSource.includes("peakRetracePct"), "target-pool helper emits high-to-low wick retrace evidence");
@@ -181,6 +198,7 @@ console.log(JSON.stringify({
     "nested config-builder keys resolve",
     "missing target-pool evidence never live-blocks",
     "pool-specific OHLCV is decisive; token context is context-only",
+    "Meteora DLMM pool OHLCV is first and GMGN kline fallback is provenance-labeled",
     "pre-window pump retrace is caught by high-to-low target-pool wick evidence",
     "stale-only rows and slow context-only token data do not become decisive evidence",
     "target-pool evidence fetch is limited to Darwin-ranked shortlist",
@@ -189,5 +207,5 @@ console.log(JSON.stringify({
     "last-chance deploy guard returns and logs the same decision family",
     "production code does not import __test OHLCV helpers",
   ],
-  sampleDecisions: { missing, shadowNeedle, preWindowPumpNeedle, liveNeedle, liveNotAllowListed, deployGuard },
+  sampleDecisions: { missing, shadowNeedle, gmgnFallbackNeedle, preWindowPumpNeedle, liveNeedle, liveNotAllowListed, deployGuard },
 }, null, 2));
