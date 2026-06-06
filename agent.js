@@ -625,6 +625,12 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
 
       // If it's a rate limit, wait and retry
       if (error.status === 429) {
+        log("rpc_pressure", JSON.stringify({
+          provider: "llm",
+          lane: "fetch",
+          method: "agent_loop",
+          error_bucket: "rate_limited",
+        }));
         log("agent", "Rate limited, waiting 30s...");
         await sleep(30000);
         continue;

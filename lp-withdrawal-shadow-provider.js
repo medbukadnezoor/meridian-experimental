@@ -1,7 +1,8 @@
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { createHash } from "crypto";
 import bs58 from "bs58";
 import { createMeteoraTxDecodeCache } from "./tx-decode-cache.js";
+import { getSharedConnection } from "./tools/rpc.js";
 
 export const METEORA_DLMM_PROGRAM_ID = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 
@@ -189,7 +190,7 @@ export function createPoolLiquidityFlowProvider({
   const stateByPool = new Map();
   const selfWallet = inferWalletAddress(walletAddress);
   const cache = decodeCache || createMeteoraTxDecodeCache({ connection, rpcUrl, signatureLimit });
-  const getConnection = () => connection || new Connection(rpcUrl, "confirmed");
+  const getConnection = () => connection || getSharedConnection(rpcUrl);
 
   async function fetchTransactions(pool, poolState, nowMs) {
     if (poolState.backoffUntilMs && nowMs < poolState.backoffUntilMs) {

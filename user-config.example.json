@@ -204,6 +204,15 @@
   "managementIntervalMin": 5,
   "screeningIntervalMin": 15,
   "healthCheckIntervalMin": 60,
+  "rpcPressure": {
+    "enabled": true,
+    "readReqPerSec": 6,
+    "sendReqPerSec": 1,
+    "deployCooldownMs": 1200000,
+    "telemetryMinQueueMs": 250,
+    "screeningActiveBinConcurrency": 1,
+    "screeningCycleBudgetMs": 240000
+  },
 
   "temperature": 0.373,
   "maxTokens": 4096,

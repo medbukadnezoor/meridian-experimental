@@ -1,6 +1,7 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import { createHash } from "crypto";
 import bs58 from "bs58";
+import { getSharedConnection, RPC_PRIORITY, withRpcPriority } from "./tools/rpc.js";
 
 export const METEORA_DLMM_PROGRAM_ID = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 const REMOVE_INSTRUCTIONS = new Set(["removeLiquidity", "removeLiquidityByRange", "removeAllLiquidity"]);
@@ -102,7 +103,7 @@ export function createMeteoraTxDecodeCache({
   signatureLimit = 50,
 } = {}) {
   const stateByPool = new Map();
-  const getConnection = () => connection || new Connection(rpcUrl, "confirmed");
+  const getConnection = () => connection || getSharedConnection(rpcUrl);
   const swapDiscriminators = new Map([
     [anchorDiscriminator("swap"), "swap"],
     [anchorDiscriminator("swapExactOut"), "swapExactOut"],
@@ -121,7 +122,11 @@ export function createMeteoraTxDecodeCache({
     const conn = getConnection();
     const options = { limit: signatureLimit };
     if (state.lastSeenSignature) options.until = state.lastSeenSignature;
-    const signatures = await conn.getSignaturesForAddress(new PublicKey(pool), options, "confirmed");
+    const signatures = await withRpcPriority(
+      RPC_PRIORITY.SCREENING,
+      "helius_rpc.tx_decode_signatures",
+      () => conn.getSignaturesForAddress(new PublicKey(pool), options, "confirmed"),
+    );
     const fresh = [];
     for (const info of signatures || []) {
       if (!info?.signature || state.seenSignatures.has(info.signature)) continue;
@@ -131,10 +136,14 @@ export function createMeteoraTxDecodeCache({
 
     const decodedEvents = [];
     for (const signature of fresh.reverse()) {
-      const tx = await conn.getTransaction(signature, {
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: 0,
-      });
+      const tx = await withRpcPriority(
+        RPC_PRIORITY.SCREENING,
+        "helius_rpc.tx_decode_transaction",
+        () => conn.getTransaction(signature, {
+          commitment: "confirmed",
+          maxSupportedTransactionVersion: 0,
+        }),
+      );
       state.seenSignatures.add(signature);
       if (!tx) continue;
       const signers = [...getSignerSet(tx)];

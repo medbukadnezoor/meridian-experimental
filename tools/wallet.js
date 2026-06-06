@@ -1,5 +1,4 @@
 import {
-  Connection,
   PublicKey,
   LAMPORTS_PER_SOL,
   VersionedTransaction,
@@ -8,15 +7,13 @@ import {
 import bs58 from "bs58";
 import { log } from "../logger.js";
 import { config } from "../config.js";
+import { getSharedConnection, RPC_PRIORITY, withRpcPriority } from "./rpc.js";
 
 let _connection = null;
 let _wallet = null;
 
 function getConnection() {
-  if (!_connection) _connection = new Connection(process.env.RPC_URL, {
-    commitment: "confirmed",
-    wsEndpoint: process.env.RPC_WS_URL || undefined,
-  });
+  if (!_connection) _connection = getSharedConnection();
   return _connection;
 }
 
@@ -219,6 +216,14 @@ export async function getWalletBalances() {
     const res = await fetch(url);
     
     if (!res.ok) {
+      if (res.status === 429) {
+        log("rpc_pressure", JSON.stringify({
+          provider: "helius_wallet_api",
+          lane: "fetch",
+          method: "wallet_balances",
+          error_bucket: "rate_limited",
+        }));
+      }
       throw new Error(`Helius API error: ${res.status} ${res.statusText}`);
     }
 
@@ -285,7 +290,11 @@ export function normalizeMint(mint) {
 
 async function tokenDecimals(connection, inputMint) {
   if (inputMint === config.tokens.SOL || inputMint === SOL_MINT) return 9;
-  const mintInfo = await connection.getParsedAccountInfo(new PublicKey(inputMint));
+  const mintInfo = await withRpcPriority(
+    RPC_PRIORITY.MANAGEMENT,
+    "helius_rpc.wallet_token_decimals",
+    () => connection.getParsedAccountInfo(new PublicKey(inputMint)),
+  );
   return mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
 }
 
@@ -317,6 +326,14 @@ async function getJupiterOrder({
   });
   if (!orderRes.ok) {
     const body = await orderRes.text();
+    if (orderRes.status === 429) {
+      log("rpc_pressure", JSON.stringify({
+        provider: "jupiter",
+        lane: "fetch",
+        method: "swap_order",
+        error_bucket: "rate_limited",
+      }));
+    }
     throw new Error(`Swap V2 order failed: ${orderRes.status} ${body}`);
   }
   const order = await orderRes.json();
@@ -399,6 +416,14 @@ export async function swapToken({
       body: JSON.stringify({ signedTransaction: signedTx, requestId }),
     });
     if (!execRes.ok) {
+      if (execRes.status === 429) {
+        log("rpc_pressure", JSON.stringify({
+          provider: "jupiter",
+          lane: "fetch",
+          method: "swap_execute",
+          error_bucket: "rate_limited",
+        }));
+      }
       throw new Error(`Swap V2 execute failed: ${execRes.status} ${await execRes.text()}`);
     }
 

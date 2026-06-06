@@ -1,8 +1,9 @@
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
-import { Connection, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
+import { LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.js";
 import { config } from "./config.js";
+import { getSharedConnection, RPC_PRIORITY, withRpcPriority } from "./tools/rpc.js";
 
 export const DEFAULT_SOL_BALANCE_TRACKER_CONFIG = Object.freeze({
   enabled: true,
@@ -299,8 +300,12 @@ export function computeEquitySnapshot({
 
 export async function getFreeSolViaRpc({ rpcUrl = process.env.RPC_URL, wallet }) {
   if (!rpcUrl) throw new Error("RPC_URL not set");
-  const connection = new Connection(rpcUrl, "confirmed");
-  const lamports = await connection.getBalance(new PublicKey(wallet), "confirmed");
+  const connection = getSharedConnection(rpcUrl);
+  const lamports = await withRpcPriority(
+    RPC_PRIORITY.MANAGEMENT,
+    "helius_rpc.sol_equity_balance",
+    () => connection.getBalance(new PublicKey(wallet), "confirmed"),
+  );
   return roundSol(lamports / LAMPORTS_PER_SOL);
 }
 

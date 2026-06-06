@@ -1068,6 +1068,27 @@ After executing, write a brief one-line result per position.
   return mgmtReport;
 }
 
+async function mapWithConcurrency(items, concurrency, mapper, { deadlineAt = null } = {}) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        results[index] = { status: "rejected", reason: new Error("screening active-bin prefetch budget expired") };
+        continue;
+      }
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 export async function runScreeningCycle({ silent = false } = {}) {
   if (_screeningBusy) {
     log("cron", "Screening skipped — previous cycle still running");
@@ -1080,11 +1101,12 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let prePositions, preBalance;
   let liveMessage = null;
   let screenReport = null;
+  const screeningDeadlineAt = Date.now() + Math.max(60_000, Number(config.rpcPressure?.screeningCycleBudgetMs ?? 4 * 60_000));
   if (!silent && telegramEnabled()) {
     liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...");
   }
   try {
-    [prePositions, preBalance] = await Promise.all([getMyPositions({ force: true }), getWalletBalances()]);
+    prePositions = await getMyPositions({ force: true });
     if (prePositions.total_positions >= config.risk.maxPositions) {
       log("cron", `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions})`);
       screenReport = `Screening skipped — max positions reached (${prePositions.total_positions}/${config.risk.maxPositions}).`;
@@ -1097,6 +1119,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
       _screeningBusy = false;
       return screenReport;
     }
+    preBalance = await getWalletBalances();
     const minRequired = config.management.deployAmountSol + config.management.gasReserve;
     const isDryRun = process.env.DRY_RUN === "true";
     if (!isDryRun && preBalance.sol < minRequired) {
@@ -1216,9 +1239,13 @@ export async function runScreeningCycle({ silent = false } = {}) {
       return screenReport;
     }
 
-    // Pre-fetch active_bin for all passing candidates in parallel
-    const activeBinResults = await Promise.allSettled(
-      passing.map(({ pool }) => getActiveBin({ pool_address: pool.pool }))
+    // Pre-fetch active_bin with bounded concurrency so screening cannot burst the RPC provider.
+    const activeBinConcurrency = Math.max(1, Number(config.rpcPressure?.screeningActiveBinConcurrency ?? 1));
+    const activeBinResults = await mapWithConcurrency(
+      passing,
+      activeBinConcurrency,
+      ({ pool }) => getActiveBin({ pool_address: pool.pool }),
+      { deadlineAt: screeningDeadlineAt },
     );
 
     const enrichedPassing = passing.map(({ pool, sw, n, ti, gmgn, mem }, i) => {
@@ -1491,7 +1518,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
   const pnlPollIntervalMs = Math.max(5_000, Number(config.schedule.pnlPollIntervalMs ?? 30_000));
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
-    if (_managementBusy || _screeningBusy || _pnlPollBusy) return;
+    if (_managementBusy || _pnlPollBusy) return;
     if (getTrackedPositions(true).length === 0) return;
     _pnlPollBusy = true;
     try {
