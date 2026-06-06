@@ -1,10 +1,11 @@
 import fs from "fs";
 import path from "path";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import { log } from "./logger.js";
 import { getActiveBin } from "./tools/dlmm.js";
 import { deriveRangeSide } from "./oor-reposition.js";
 import { evaluateActiveBinBelowRangeEmergency } from "./active-bin-emergency-shadow.js";
+import { getSharedConnection } from "./tools/rpc.js";
 
 const DEFAULT_DEBOUNCE_MS = 3_000;
 const DEFAULT_LOG_DIR = "./logs";
@@ -659,7 +660,7 @@ export class ActiveBinOracleRecorder {
       this.disabledReason = "RPC_URL not set";
       return null;
     }
-    this.connection = new Connection(this.rpcUrl, "confirmed");
+    this.connection = getSharedConnection(this.rpcUrl);
     return this.connection;
   }
 

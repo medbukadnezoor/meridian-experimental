@@ -1,11 +1,9 @@
 import {
-  Connection,
   Keypair,
   PublicKey,
   Transaction,
   VersionedTransaction,
   ComputeBudgetProgram,
-  sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import bs58 from "bs58";
@@ -34,6 +32,15 @@ import {
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
 import { deriveRangeSide } from "../oor-reposition.js";
+import {
+  RPC_PRIORITY,
+  assertDeployRpcCooldownClear,
+  getSharedConnection,
+  isRpcRateLimitError,
+  recordDeployRpcRateLimit,
+  sendAndConfirmTransactionWithPriority,
+  withRpcPriority,
+} from "./rpc.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -92,12 +99,7 @@ let _wallet = null;
 const URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS = 750_000;
 
 function getConnection() {
-  if (!_connection) {
-    _connection = new Connection(process.env.RPC_URL, {
-      commitment: "confirmed",
-      wsEndpoint: process.env.RPC_WS_URL || undefined,
-    });
-  }
+  if (!_connection) _connection = getSharedConnection();
   return _connection;
 }
 
@@ -122,14 +124,22 @@ async function prepareCloseTransactionForSend(tx, wallet, urgent) {
     tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS }));
   }
   tx.feePayer = wallet.publicKey;
-  const { blockhash, lastValidBlockHeight } = await getConnection().getLatestBlockhash("confirmed");
+  const { blockhash, lastValidBlockHeight } = await withRpcPriority(
+    urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.NORMAL_SEND,
+    urgent ? "helius_rpc.close_urgent_blockhash" : "helius_rpc.close_blockhash",
+    () => getConnection().getLatestBlockhash("confirmed"),
+  );
   tx.recentBlockhash = blockhash;
   tx.lastValidBlockHeight = lastValidBlockHeight;
   return tx;
 }
 
 async function positionAccountLooksClosed(positionPubKey) {
-  const account = await getConnection().getAccountInfo(positionPubKey, "confirmed");
+  const account = await withRpcPriority(
+    RPC_PRIORITY.URGENT_CLOSE,
+    "helius_rpc.close_account_check",
+    () => getConnection().getAccountInfo(positionPubKey, "confirmed"),
+  );
   return !account || !account.owner.equals(getDlmmProgramId());
 }
 
@@ -139,10 +149,19 @@ async function sendCloseTransactionWithRetry(tx, wallet, { urgent = false, posit
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const prepared = await prepareCloseTransactionForSend(tx, wallet, urgent);
-      return await sendAndConfirmTransaction(getConnection(), prepared, [wallet], {
-        commitment: "confirmed",
-        maxRetries: urgent ? 5 : 3,
-      });
+      return await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        prepared,
+        [wallet],
+        {
+          commitment: "confirmed",
+          maxRetries: urgent ? 5 : 3,
+        },
+        {
+          priority: urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.NORMAL_SEND,
+          source: urgent ? "helius_rpc.close_urgent_send" : "helius_rpc.close_send",
+        },
+      );
     } catch (error) {
       lastError = error;
       const message = error?.message || String(error);
@@ -520,7 +539,11 @@ async function assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, m
   const upper = new BN(Math.max(minBinId, maxBinId));
   const indexes = getBinArrayIndexesCoverage(lower, upper);
   const keys = getBinArrayKeysCoverage(lower, upper, poolPubkey, programId);
-  const accounts = await getConnection().getMultipleAccountsInfo(keys, "confirmed");
+  const accounts = await withRpcPriority(
+    RPC_PRIORITY.DEPLOY,
+    "helius_rpc.deploy_bin_array_check",
+    () => getConnection().getMultipleAccountsInfo(keys, "confirmed"),
+  );
   const missing = accounts
     .map((account, index) => account ? null : {
       index: indexes[index]?.toString?.() ?? String(index),
@@ -542,7 +565,11 @@ async function assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, m
     const needsBitmapExtension = indexes.some((index) => isOverflowDefaultBinArrayBitmap(index));
     if (needsBitmapExtension) {
       const [bitmapExtension] = deriveBinArrayBitmapExtension(poolPubkey, programId);
-      const account = await getConnection().getAccountInfo(bitmapExtension, "confirmed");
+      const account = await withRpcPriority(
+        RPC_PRIORITY.DEPLOY,
+        "helius_rpc.deploy_bitmap_check",
+        () => getConnection().getAccountInfo(bitmapExtension, "confirmed"),
+      );
       if (!account) {
         throw new Error(
           `Deploy skipped: selected range requires Meteora bin-array bitmap extension initialization ` +
@@ -597,11 +624,18 @@ function getDlmmInstructionDiscriminators(serialized) {
 const poolCache = new Map();
 const poolMetadataCache = new Map();
 
-async function getPool(poolAddress) {
+async function getPool(poolAddress, {
+  priority = RPC_PRIORITY.DEPLOY,
+  source = "helius_rpc.dlmm_create_pool",
+} = {}) {
   const key = poolAddress.toString();
   if (!poolCache.has(key)) {
     const { DLMM } = await getDLMM();
-    const pool = await DLMM.create(getConnection(), new PublicKey(poolAddress));
+    const pool = await withRpcPriority(
+      priority,
+      source,
+      () => DLMM.create(getConnection(), new PublicKey(poolAddress)),
+    );
     poolCache.set(key, pool);
   }
   return poolCache.get(key);
@@ -619,6 +653,14 @@ async function getPoolMetadata(poolAddress) {
   try {
     const res = await fetch(`https://dlmm.datapi.meteora.ag/pools/${key}`);
     if (!res.ok) {
+      if (res.status === 429) {
+        log("rpc_pressure", JSON.stringify({
+          provider: "meteora_datapi",
+          lane: "fetch",
+          method: "pool_metadata",
+          error_bucket: "rate_limited",
+        }));
+      }
       throw new Error(`Pool metadata API ${res.status}`);
     }
 
@@ -645,8 +687,15 @@ async function getPoolMetadata(poolAddress) {
 // ─── Get Active Bin ────────────────────────────────────────────
 export async function getActiveBin({ pool_address }) {
   pool_address = normalizeMint(pool_address);
-  const pool = await getPool(pool_address);
-  const activeBin = await pool.getActiveBin();
+  const pool = await getPool(pool_address, {
+    priority: RPC_PRIORITY.SCREENING,
+    source: "helius_rpc.screening_pool_create",
+  });
+  const activeBin = await withRpcPriority(
+    RPC_PRIORITY.SCREENING,
+    "helius_rpc.screening_active_bin",
+    () => pool.getActiveBin(),
+  );
 
   return {
     binId: activeBin.binId,
@@ -676,6 +725,20 @@ export async function deployPosition({
   initial_value_usd,
 }) {
   pool_address = normalizeMint(pool_address);
+  try {
+    assertDeployRpcCooldownClear();
+  } catch (error) {
+    log("deploy", error.message);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: error.message,
+      source: "dlmm.deploy.rpc_cooldown",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: error.deployRpcCooldown ?? null };
+  }
   const activeStrategy = strategy || config.strategy.strategy;
   let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
   let activeBinsAbove = bins_above ?? 0;
@@ -694,9 +757,30 @@ export async function deployPosition({
     return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
   }
 
-  const { StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM();
-  const pool = await getPool(pool_address);
-  const baseMint = pool.lbPair.tokenXMint.toString();
+  let StrategyType, getBinIdFromPrice, getPriceOfBinByBinId, pool, baseMint;
+  try {
+    ({ StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM());
+    pool = await getPool(pool_address, {
+      priority: RPC_PRIORITY.DEPLOY,
+      source: "helius_rpc.deploy_pool_create",
+    });
+    baseMint = pool.lbPair.tokenXMint.toString();
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_pool")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: error.message,
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
   if (isBaseMintOnCooldown(baseMint)) {
     log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
     appendDecisionContext({
@@ -711,7 +795,30 @@ export async function deployPosition({
     });
     return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
   }
-  const activeBin = await pool.getActiveBin();
+  let activeBin;
+  try {
+    activeBin = await withRpcPriority(
+      RPC_PRIORITY.DEPLOY,
+      "helius_rpc.deploy_active_bin",
+      () => pool.getActiveBin(),
+    );
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_active_bin")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
   const actualBinStep = pool.lbPair.binStep;
   const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
 
@@ -914,7 +1021,29 @@ export async function deployPosition({
     };
   }
 
-  await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+  try {
+    await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_bin_array")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: {
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
 
   // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
   const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
@@ -925,7 +1054,34 @@ export async function deployPosition({
   // Most Meteora pools base tokens are 6 or 9. To be safe, we should fetch.
   let totalXLamports = new BN(0);
   if (finalAmountX > 0) {
-    const mintInfo = await getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint));
+    let mintInfo;
+    try {
+      mintInfo = await withRpcPriority(
+        RPC_PRIORITY.DEPLOY,
+        "helius_rpc.deploy_mint_decimals",
+        () => getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint)),
+      );
+    } catch (error) {
+      const deployCooldown = isRpcRateLimitError(error)
+        ? recordDeployRpcRateLimit(error, "deploy_preflight_mint_decimals")
+        : null;
+      if (!deployCooldown) throw error;
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        reason: error.message,
+        deploy: {
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.rpc_preflight_error",
+      });
+      return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+    }
     const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
     totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
   }
@@ -1102,6 +1258,9 @@ export async function deployPosition({
         txs: normalizeExecutionSignatures(submit),
       };
     } catch (error) {
+      const deployCooldown = isRpcRateLimitError(error)
+        ? recordDeployRpcRateLimit(error, "deploy_relay")
+        : null;
       log("deploy_error", `Relay deploy failed: ${error.message}`);
       appendDecisionContext({
         stage: "deploy_reject",
@@ -1118,7 +1277,7 @@ export async function deployPosition({
         },
         source: "dlmm.deploy.relay_error",
       });
-      return { success: false, error: error.message };
+      return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
     }
   }
 
@@ -1150,7 +1309,13 @@ export async function deployPosition({
       const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
       for (let i = 0; i < createTxArray.length; i++) {
         const signers = i === 0 ? [wallet, newPosition] : [wallet];
-        const txHash = await sendAndConfirmTransaction(getConnection(), createTxArray[i], signers);
+        const txHash = await sendAndConfirmTransactionWithPriority(
+          getConnection(),
+          createTxArray[i],
+          signers,
+          {},
+          { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+        );
         txHashes.push(txHash);
         log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
       }
@@ -1166,7 +1331,13 @@ export async function deployPosition({
       });
       const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
       for (let i = 0; i < addTxArray.length; i++) {
-        const txHash = await sendAndConfirmTransaction(getConnection(), addTxArray[i], [wallet]);
+        const txHash = await sendAndConfirmTransactionWithPriority(
+          getConnection(),
+          addTxArray[i],
+          [wallet],
+          {},
+          { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+        );
         txHashes.push(txHash);
         log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
       }
@@ -1180,7 +1351,13 @@ export async function deployPosition({
         strategy: { maxBinId, minBinId, strategyType },
         slippage: 1000, // 10% in bps
       });
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet, newPosition]);
+      const txHash = await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        tx,
+        [wallet, newPosition],
+        {},
+        { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+      );
       txHashes.push(txHash);
     }
 
@@ -1275,6 +1452,9 @@ export async function deployPosition({
       txs: txHashes,
     };
   } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_position")
+      : null;
     log("deploy_error", error.message);
     appendDecisionContext({
       stage: "deploy_reject",
@@ -1291,7 +1471,7 @@ export async function deployPosition({
       },
       source: "dlmm.deploy.local_error",
     });
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
   }
 }
 
@@ -1626,7 +1806,11 @@ async function getDlmmPositionWalletOwner(positionAddress) {
   if (freshCached) return freshCached;
 
   try {
-    const account = await getConnection().getAccountInfo(new PublicKey(positionAddress), "confirmed");
+    const account = await withRpcPriority(
+      RPC_PRIORITY.MANAGEMENT,
+      "helius_rpc.position_owner_check",
+      () => getConnection().getAccountInfo(new PublicKey(positionAddress), "confirmed"),
+    );
     if (!account) {
       const ownership = { verified: true, owner: null, reason: "account missing or closed" };
       cacheVerifiedPositionOwner(positionAddress, ownership);
@@ -2110,7 +2294,13 @@ export async function claimFees({ position_address }) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+      const txHash = await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        tx,
+        [wallet],
+        {},
+        { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.claim_send" },
+      );
       txHashes.push(txHash);
     }
     log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
@@ -2464,7 +2654,12 @@ export async function closePosition({ position_address, reason, urgent }) {
     const localCloseStartedAt = Date.now();
     // Clear cached pool so SDK loads fresh position fee state
     poolCache.delete(poolAddress.toString());
-    const pool = await getPool(poolAddress);
+    const closePriority = urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.MANAGEMENT;
+    const closeSourcePrefix = urgent ? "helius_rpc.close_urgent" : "helius_rpc.close";
+    const pool = await getPool(poolAddress, {
+      priority: closePriority,
+      source: `${closeSourcePrefix}_pool_create`,
+    });
 
     const positionPubKey = new PublicKey(position_address);
     const claimTxHashes = [];
@@ -2482,14 +2677,28 @@ export async function closePosition({ position_address, reason, urgent }) {
           log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
         } else {
           log("close", `Step 1: Claiming fees for ${position_address}`);
-          const positionData = await pool.getPosition(positionPubKey);
-          const claimTxs = await pool.claimSwapFee({
-            owner: wallet.publicKey,
-            position: positionData,
-          });
+          const positionData = await withRpcPriority(
+            closePriority,
+            `${closeSourcePrefix}_claim_position`,
+            () => pool.getPosition(positionPubKey),
+          );
+          const claimTxs = await withRpcPriority(
+            closePriority,
+            `${closeSourcePrefix}_claim_tx_build`,
+            () => pool.claimSwapFee({
+              owner: wallet.publicKey,
+              position: positionData,
+            }),
+          );
           if (claimTxs && claimTxs.length > 0) {
             for (const tx of claimTxs) {
-              const claimHash = await sendAndConfirmTransaction(getConnection(), tx, [wallet]);
+              const claimHash = await sendAndConfirmTransactionWithPriority(
+                getConnection(),
+                tx,
+                [wallet],
+                {},
+                { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.close_claim_send" },
+              );
               claimTxHashes.push(claimHash);
             }
             log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
@@ -2505,7 +2714,11 @@ export async function closePosition({ position_address, reason, urgent }) {
     let closeFromBinId = -887272;
     let closeToBinId = 887272;
     try {
-      const positionDataForClose = await pool.getPosition(positionPubKey);
+      const positionDataForClose = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_position_state`,
+        () => pool.getPosition(positionPubKey),
+      );
       const processed = positionDataForClose?.positionData;
       if (processed) {
         closeFromBinId = processed.lowerBinId ?? closeFromBinId;
@@ -2519,14 +2732,18 @@ export async function closePosition({ position_address, reason, urgent }) {
 
     if (hasLiquidity) {
       log("close", `Step 2: Removing liquidity and closing account`);
-      const closeTx = await pool.removeLiquidity({
-        user: wallet.publicKey,
-        position: positionPubKey,
-        fromBinId: closeFromBinId,
-        toBinId: closeToBinId,
-        bps: new BN(10000),
-        shouldClaimAndClose: true,
-      });
+      const closeTx = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_remove_liquidity_tx_build`,
+        () => pool.removeLiquidity({
+          user: wallet.publicKey,
+          position: positionPubKey,
+          fromBinId: closeFromBinId,
+          toBinId: closeToBinId,
+          bps: new BN(10000),
+          shouldClaimAndClose: true,
+        }),
+      );
 
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
         const txHash = await sendCloseTransactionWithRetry(tx, wallet, {
@@ -2538,10 +2755,14 @@ export async function closePosition({ position_address, reason, urgent }) {
       }
     } else {
       log("close", `Step 2: No position liquidity detected, closing account`);
-      const closeTx = await pool.closePosition({
-        owner: wallet.publicKey,
-        position: { publicKey: positionPubKey },
-      });
+      const closeTx = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_close_position_tx_build`,
+        () => pool.closePosition({
+          owner: wallet.publicKey,
+          position: { publicKey: positionPubKey },
+        }),
+      );
       const txHash = await sendCloseTransactionWithRetry(closeTx, wallet, {
         urgent: !!urgent,
         positionPubKey,
@@ -2558,9 +2779,14 @@ export async function closePosition({ position_address, reason, urgent }) {
     _positionsCacheAt = 0;
 
     let closedConfirmed = false;
+    let closeVerificationRateLimited = false;
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        const refreshed = await getMyPositions({ force: true, silent: true });
+        const refreshed = await withRpcPriority(
+          urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.MANAGEMENT,
+          urgent ? "helius_rpc.close_urgent_verification" : "helius_rpc.close_verification",
+          () => getMyPositions({ force: true, silent: true }),
+        );
         const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
         if (!stillOpen) {
           closedConfirmed = true;
@@ -2568,6 +2794,7 @@ export async function closePosition({ position_address, reason, urgent }) {
         }
         log("close_warn", `Position ${position_address} still appears open after close txs (attempt ${attempt + 1}/4)`);
       } catch (e) {
+        if (isRpcRateLimitError(e)) closeVerificationRateLimited = true;
         log("close_warn", `Close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
       }
       if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
@@ -2575,6 +2802,23 @@ export async function closePosition({ position_address, reason, urgent }) {
 
     if (!closedConfirmed) {
       closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
+      if (closeVerificationRateLimited && closeTxHashes.length > 0) {
+        log("close_warn", `Close txs were sent but verification degraded by RPC rate limits; preserving tx evidence as successful degraded close`);
+        recordClose(position_address, reason || "agent decision");
+        return {
+          success: true,
+          verification_degraded: true,
+          close_verification_status: "rpc_rate_limited",
+          warning: "Close transactions sent; follow-up verification degraded by RPC rate limits",
+          position: position_address,
+          pool: poolAddress,
+          close_mode: closeModeAudit.selected_close_mode,
+          adaptive_close: closeModeContext(closeModeAudit),
+          claim_txs: claimTxHashes,
+          close_txs: closeTxHashes,
+          txs: txHashes,
+        };
+      }
       return {
         success: false,
         error: "Close transactions sent but position still appears open after verification window",

@@ -1,4 +1,5 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
+import { getSharedConnection, RPC_PRIORITY, withRpcPriority } from "./tools/rpc.js";
 
 const DEFAULT_BINS_BELOW = 5;
 const DEFAULT_BINS_ABOVE = 3;
@@ -107,7 +108,7 @@ export function createLiquidityShapeProvider({
   logger = () => {},
 } = {}) {
   const defaults = { tokenDecimals, quoteDecimals, tokenPriceUsd, quotePriceUsd };
-  const getConnection = () => connection || new Connection(rpcUrl, "confirmed");
+  const getConnection = () => connection || getSharedConnection(rpcUrl);
 
   return async function getLptele2LiquidityShape(telemetryContext = {}) {
     try {
@@ -132,8 +133,16 @@ export function createLiquidityShapeProvider({
         resolvedActiveBin = asNumber(result?.activeBin) ?? activeBin;
       } else {
         const DLMM = await loadDlmm();
-        const dlmmPool = await DLMM.create(getConnection(), new PublicKey(telemetryContext.pool));
-        const result = await dlmmPool.getBinsAroundActiveBin(binsBelow, binsAbove);
+        const dlmmPool = await withRpcPriority(
+          RPC_PRIORITY.SCREENING,
+          "helius_rpc.lptele2_pool_create",
+          () => DLMM.create(getConnection(), new PublicKey(telemetryContext.pool)),
+        );
+        const result = await withRpcPriority(
+          RPC_PRIORITY.SCREENING,
+          "helius_rpc.lptele2_bins",
+          () => dlmmPool.getBinsAroundActiveBin(binsBelow, binsAbove),
+        );
         bins = result.bins;
         resolvedActiveBin = asNumber(result.activeBin) ?? activeBin;
       }

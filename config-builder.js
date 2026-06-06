@@ -471,6 +471,16 @@ export function buildConfig(userConfig = {}, env = process.env) {
       pnlPollIntervalMs: normalizePositiveInteger(u.monitoring?.pnlPollIntervalMs ?? u.pnlPollIntervalMs, 30_000),
     },
 
+    rpcPressure: {
+      enabled: u.rpcPressure?.enabled ?? u.rpcPressureEnabled ?? true,
+      readReqPerSec: normalizeNullableNumber(u.rpcPressure?.readReqPerSec ?? u.rpcReadReqPerSec, 6),
+      sendReqPerSec: normalizeNullableNumber(u.rpcPressure?.sendReqPerSec ?? u.rpcSendReqPerSec, 1),
+      deployCooldownMs: normalizePositiveInteger(u.rpcPressure?.deployCooldownMs ?? u.rpcDeployCooldownMs, 20 * 60_000),
+      telemetryMinQueueMs: normalizePositiveInteger(u.rpcPressure?.telemetryMinQueueMs ?? u.rpcTelemetryMinQueueMs, 250),
+      screeningActiveBinConcurrency: normalizePositiveInteger(u.rpcPressure?.screeningActiveBinConcurrency ?? u.screeningActiveBinConcurrency, 1),
+      screeningCycleBudgetMs: normalizePositiveInteger(u.rpcPressure?.screeningCycleBudgetMs ?? u.screeningCycleBudgetMs, 4 * 60_000),
+    },
+
     llm: {
       temperature: u.temperature ?? 0.373,
       maxTokens: u.maxTokens ?? 4096,

@@ -56,6 +56,7 @@ const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
+const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -651,6 +652,22 @@ function runTargetPoolNeedleVetoProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRpcPressureGuardProof() {
+  const result = spawnSync(process.execPath, [RPC_PRESSURE_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-rpc-pressure-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -692,6 +709,7 @@ function buildChecks() {
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
   const twoLaneGateProof = runTwoLaneGateProof();
   const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
+  const rpcPressureGuardProof = runRpcPressureGuardProof();
 
   return [
     {
@@ -708,6 +726,19 @@ function buildChecks() {
         targetPoolNeedleVetoProof?.sampleDecisions?.liveNeedle?.decision === "blocked" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.liveNotAllowListed?.decision === "would_block" &&
         targetPoolNeedleVetoProof?.sampleDecisions?.deployGuard?.decision === "blocked",
+    },
+    {
+      file: "scripts/verify-rpc-pressure-guard.js",
+      label: "[RPC pressure guard] priority scheduler, deploy cooldown, provider attribution, and source scan pass",
+      test: () =>
+        rpcPressureGuardProof?.ok === true &&
+        rpcPressureGuardProof?.checks?.includes("all live Connection constructors route through tools/rpc.js") &&
+        rpcPressureGuardProof?.checks?.includes("urgent close read priority preempts screening backlog") &&
+        rpcPressureGuardProof?.checks?.includes("urgent close send priority preempts queued deploy send") &&
+        rpcPressureGuardProof?.checks?.includes("deploy 429 creates deploy-only cooldown") &&
+        Number(rpcPressureGuardProof?.urgentRead?.urgentQueuedMs) < 250 &&
+        Array.isArray(rpcPressureGuardProof?.urgentSend?.order) &&
+        rpcPressureGuardProof.urgentSend.order.join(",") === "initial_send,urgent_close_send,deploy_send",
     },
     {
       file: "scripts/verify-two-lane-gate.js",

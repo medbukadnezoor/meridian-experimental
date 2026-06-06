@@ -244,6 +244,15 @@ async function gmgnFetch(pathname, { method = "GET", params = {}, body = null } 
     const rateLimitResetHeader = res.headers.get("x-ratelimit-reset");
     if (res.ok && !codeFailure) return payload;
 
+    if (rateLimited) {
+      log("rpc_pressure", JSON.stringify({
+        provider: "gmgn",
+        lane: "fetch",
+        method: pathname,
+        error_bucket: "rate_limited",
+      }));
+    }
+
     if (rateLimited && attempt < maxRetries) {
       const retryAfter = Number(retryAfterHeader);
       const backoffMs = Number.isFinite(retryAfter)
