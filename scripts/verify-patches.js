@@ -18,7 +18,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const SYNCED_NANOCAP_USER_CONFIG_PATH = join(ROOT, "..", "archive", "vps-backups", "nanocap", "user-config.json");
-const NANOCAP_EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
+const NANOCAP_EXAMPLE_CONFIG_PATH = join(__dirname, "fixtures", "nanocap-v1-user-config.fixture.json");
 const NANOCAP_USER_CONFIG_PATH = existsSync(SYNCED_NANOCAP_USER_CONFIG_PATH)
   ? SYNCED_NANOCAP_USER_CONFIG_PATH
   : NANOCAP_EXAMPLE_CONFIG_PATH;
@@ -57,6 +57,7 @@ const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-sco
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
+const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -668,6 +669,22 @@ function runRpcPressureGuardProof() {
   return JSON.parse(result.stdout);
 }
 
+function runEvilPandaFeeDumpProof() {
+  const result = spawnSync(process.execPath, [EVIL_PANDA_FEE_DUMP_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-evil-panda-fee-dump-plan failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -710,8 +727,20 @@ function buildChecks() {
   const twoLaneGateProof = runTwoLaneGateProof();
   const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
   const rpcPressureGuardProof = runRpcPressureGuardProof();
+  const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
 
   return [
+    {
+      file: "scripts/verify-evil-panda-fee-dump-plan.js",
+      label: "[Main EvilPanda fee dump] patient fee-harvest profile, confluence exits, pool memory, and report grouping pass",
+      test: () =>
+        evilPandaFeeDumpProof?.success === true &&
+        evilPandaFeeDumpProof?.checks?.includes("no-fee abort waits 60m") &&
+        evilPandaFeeDumpProof?.checks?.includes("fee harvest requires 2-signal confluence") &&
+        evilPandaFeeDumpProof?.checks?.includes("pool memory blocks no-fee and velocity-stop pools/mints") &&
+        evilPandaFeeDumpProof?.checks?.includes("daily report groups by exit reason and strategy profile") &&
+        evilPandaFeeDumpProof?.checks?.includes("close verification degraded evidence remains preserved"),
+    },
     {
       file: "scripts/verify-target-pool-needle-veto.js",
       label: "[Target-pool needle veto] Meteora pool OHLCV is decisive, GMGN fallback is labeled, default shadow-only, and live blocks only allow-listed reasons",
@@ -1827,7 +1856,7 @@ function buildChecks() {
         defaultProof?.performance?.darwinExcludeNeutralOutcomes === true,
     },
     {
-      file: "user-config.example.json",
+      file: "scripts/fixtures/nanocap-v1-user-config.fixture.json",
       label: "[Runtime] nanocap example resolves post-LARP -8/-10/-15 emergency stop config",
       test: () =>
         exampleProof.userConfigExists === true &&
@@ -1907,7 +1936,7 @@ function buildChecks() {
         supertrendUrgentRuntimeProof?.sourceSafety?.callsTradingApis === false,
     },
     {
-      file: "user-config.example.json",
+      file: "scripts/fixtures/nanocap-v1-user-config.fixture.json",
       label: "[Runtime] nanocap example resolves falling-knife and suspicious-volume veto config",
       test: () =>
         exampleProof.userConfigExists === true &&
@@ -1923,7 +1952,7 @@ function buildChecks() {
         Number(exampleProof?.screening?.suspiciousVolumeMinPriceDropPct) === -25,
     },
     {
-      file: "user-config.example.json",
+      file: "scripts/fixtures/nanocap-v1-user-config.fixture.json",
       label: "[Runtime] nanocap example resolves expanded Meteora discovery recall",
       test: () =>
         exampleProof.userConfigExists === true &&
@@ -1933,7 +1962,7 @@ function buildChecks() {
         exampleProof?.screening?.excludeHighSingleOwnership === false,
     },
     {
-      file: "user-config.example.json",
+      file: "scripts/fixtures/nanocap-v1-user-config.fixture.json",
       label: "[Runtime] nanocap example resolves RSI2 5m entry gate",
       test: () =>
         exampleProof.userConfigExists === true &&
@@ -1959,7 +1988,7 @@ function buildChecks() {
         nanocapBollingerCanaryProof?.sourceSafety?.noBirdeyeInLiveRuntime === true,
     },
     {
-      file: "user-config.example.json",
+      file: "scripts/fixtures/nanocap-v1-user-config.fixture.json",
       label: "[Runtime] nanocap example resolves material win metrics config",
       test: () =>
         exampleProof.userConfigExists === true &&

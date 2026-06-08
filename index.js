@@ -29,8 +29,9 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
+import { evaluateFeeExitConfluenceFromRows, shouldGateFeeExitDecision } from "./fee-exit-confluence.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
-import { getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
+import { fetchOhlcv, getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
 import {
   buildOorRepositionDecision,
@@ -497,6 +498,47 @@ function appendFeeExitPolicyDecision(position, evaluation) {
   });
 }
 
+async function evaluateFeeExitConfluence(position, tracked, decision) {
+  const policy = config.management.feeExitPolicy ?? {};
+  if (!shouldGateFeeExitDecision(decision, policy)) {
+    return { enabled: false, accepted: true, reason: "fee-exit confluence not required" };
+  }
+
+  const pool = position?.pool ?? position?.pool_address ?? tracked?.pool ?? null;
+  const baseMint = position?.base_mint ?? tracked?.base_mint ?? null;
+  if (!pool) {
+    return { enabled: true, accepted: false, reason: "exit confluence unavailable: missing pool" };
+  }
+
+  try {
+    const aggregateMin = policy.exitConfluenceAggregateMin ?? 5;
+    const lookbackMinutes = Math.max(
+      policy.exitConfluenceLookbackMinutes ?? 180,
+      Math.ceil(Number(position?.age_minutes ?? 0) || 0),
+      60,
+    );
+    const ohlcv = await fetchOhlcv(pool, baseMint, {
+      aggregateMin,
+      beforeTimestamp: Math.floor(Date.now() / 1000),
+      lookbackMinutes,
+    });
+    if (!ohlcv?.rows?.length) {
+      return { enabled: true, accepted: false, reason: "exit confluence unavailable: no OHLCV rows" };
+    }
+    const result = evaluateFeeExitConfluenceFromRows(ohlcv.rows, policy);
+    return {
+      ...result,
+      ohlcv: {
+        source: ohlcv.source,
+        aggregateMin: ohlcv.aggregateMin,
+        rowCount: ohlcv.rows.length,
+      },
+    };
+  } catch (error) {
+    return { enabled: true, accepted: false, reason: `exit confluence unavailable: ${error.message}` };
+  }
+}
+
 async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL poll") {
   const decision = evaluation?.decision;
   if (!decision) return false;
@@ -506,6 +548,34 @@ async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL p
   log("state", `[${source}] ${label} fee-exit policy: ${position?.pair ?? position?.position ?? "position"} — ${decision.rule}: ${decision.reason}`);
 
   if (decision.shadowOnly) return false;
+
+  const tracked = getTrackedPosition(position.position);
+  const confluence = await evaluateFeeExitConfluence(position, tracked, decision);
+  if (confluence.enabled) {
+    appendDecisionContext({
+      ts: new Date().toISOString(),
+      stage: "fee_exit_confluence",
+      actor: "POLICY",
+      pool: position?.pool ?? position?.pool_address ?? tracked?.pool ?? null,
+      poolName: position?.pair ?? position?.pool_name ?? tracked?.pool_name ?? null,
+      baseMint: position?.base_mint ?? tracked?.base_mint ?? null,
+      position: position?.position ?? null,
+      reason: confluence.reason,
+      metrics: {
+        rule: decision.rule,
+        accepted: confluence.accepted,
+        signal_count: confluence.signalCount ?? null,
+        signals: confluence.signals ?? null,
+        confluence_metrics: confluence.metrics ?? null,
+        ohlcv: confluence.ohlcv ?? null,
+      },
+      source: "management.feeExitPolicy.confluence",
+    });
+  }
+  if (confluence.enabled && !confluence.accepted) {
+    log("state", `[${source}] Fee-exit held by confluence gate: ${position?.pair ?? position?.position ?? "position"} — ${confluence.reason}`);
+    return false;
+  }
 
   _pollTriggeredAt = Date.now();
   try {

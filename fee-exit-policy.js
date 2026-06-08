@@ -40,6 +40,7 @@ function buildDecision(rule, policy, normalized, reason, extra = {}) {
       current_equity_amount: normalized.currentEquityAmount,
       fee_pct_of_entry: normalized.feePctOfEntry,
       unclaimed_fee_pct_of_entry: normalized.unclaimedFeePctOfEntry,
+      strategy_profile: policy.strategyProfile ?? null,
       ...extra.metrics,
     },
   };

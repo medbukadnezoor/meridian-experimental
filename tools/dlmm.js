@@ -32,6 +32,7 @@ import {
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
 import { deriveRangeSide } from "../oor-reposition.js";
+import { getActiveStrategy } from "../strategy-library.js";
 import {
   RPC_PRIORITY,
   assertDeployRpcCooldownClear,
@@ -112,6 +113,15 @@ function getWallet() {
     log("init", `Wallet: ${_wallet.publicKey.toString()}`);
   }
   return _wallet;
+}
+
+function resolveRuntimeStrategyProfile() {
+  const activeId = getActiveStrategy()?.id ?? null;
+  const policyId = config.management?.feeExitPolicy?.strategyProfile ?? null;
+  if (activeId && policyId && activeId !== policyId) {
+    log("deploy_warn", `Active strategy profile ${activeId} differs from fee-exit policy profile ${policyId}; using active strategy profile`);
+  }
+  return activeId ?? policyId;
 }
 
 function hasComputeBudgetInstruction(tx) {
@@ -740,6 +750,7 @@ export async function deployPosition({
     return { success: false, error: error.message, deploy_rpc_cooldown: error.deployRpcCooldown ?? null };
   }
   const activeStrategy = strategy || config.strategy.strategy;
+  const strategyProfile = resolveRuntimeStrategyProfile();
   let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
   let activeBinsAbove = bins_above ?? 0;
 
@@ -826,6 +837,7 @@ export async function deployPosition({
     pool_address,
     pool_name: pool_name ?? null,
     strategy: activeStrategy,
+    strategy_profile: strategyProfile,
     amount_x: amount_x ?? null,
     amount_y: amount_y ?? null,
     amount_sol: amount_sol ?? null,
@@ -1172,6 +1184,7 @@ export async function deployPosition({
           pool: pool_address,
           pool_name,
           strategy: activeStrategy,
+          strategy_profile: strategyProfile,
           bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
           bin_step,
           volatility,
@@ -1200,6 +1213,7 @@ export async function deployPosition({
         metrics: {
           amount_sol: finalAmountY,
           strategy: activeStrategy,
+          strategy_profile: strategyProfile,
           active_bin: activeBin.binId,
           min_bin: minBinId,
           max_bin: maxBinId,
@@ -1220,6 +1234,7 @@ export async function deployPosition({
           base_fee: actualBaseFee,
           volatility: volatility ?? null,
           fee_tvl_ratio: fee_tvl_ratio ?? null,
+          strategy_profile: strategyProfile,
           organic_score: organic_score ?? null,
         },
         deploy: {
@@ -1227,6 +1242,7 @@ export async function deployPosition({
           request_id: order.requestId,
           amount_x: finalAmountX,
           amount_y: finalAmountY,
+          strategy_profile: strategyProfile,
           bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
           range_coverage: rangeCoverage,
           normalized: normalizedRangeAudit,
@@ -1252,6 +1268,7 @@ export async function deployPosition({
         bin_step: actualBinStep,
         base_fee: actualBaseFee,
         strategy: activeStrategy,
+        strategy_profile: strategyProfile,
         wide_range: isWideRange,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
@@ -1370,6 +1387,7 @@ export async function deployPosition({
       pool: pool_address,
       pool_name,
       strategy: activeStrategy,
+      strategy_profile: strategyProfile,
       bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
       bin_step,
       volatility,
@@ -1397,6 +1415,7 @@ export async function deployPosition({
       metrics: {
         amount_sol: finalAmountY,
         strategy: activeStrategy,
+        strategy_profile: strategyProfile,
         active_bin: activeBin.binId,
         min_bin: minBinId,
         max_bin: maxBinId,
@@ -1417,12 +1436,14 @@ export async function deployPosition({
         base_fee: actualBaseFee,
         volatility: volatility ?? null,
         fee_tvl_ratio: fee_tvl_ratio ?? null,
+        strategy_profile: strategyProfile,
         organic_score: organic_score ?? null,
       },
       deploy: {
         relay: false,
         amount_x: finalAmountX,
         amount_y: finalAmountY,
+        strategy_profile: strategyProfile,
         bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
         range_coverage: rangeCoverage,
         normalized: normalizedRangeAudit,
@@ -1446,6 +1467,7 @@ export async function deployPosition({
       bin_step: actualBinStep,
       base_fee: actualBaseFee,
       strategy: activeStrategy,
+      strategy_profile: strategyProfile,
       wide_range: isWideRange,
       amount_x: finalAmountX,
       amount_y: finalAmountY,
@@ -1695,6 +1717,95 @@ function getClosedPnlPct(posEntry, solMode = false) {
     ? maybeNum(posEntry?.allTimeDeposits?.total?.sol)
     : maybeNum(posEntry?.allTimeDeposits?.total?.usd);
   return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
+}
+
+async function recordDegradedClosePerformance({
+  position_address,
+  poolAddress,
+  poolName = null,
+  closeBaseMint = null,
+  tracked,
+  reason,
+}) {
+  if (!tracked) return null;
+  const deployedAt = new Date(tracked.deployed_at).getTime();
+  const minutesHeld = Number.isFinite(deployedAt)
+    ? Math.floor((Date.now() - deployedAt) / 60000)
+    : 0;
+  const minutesOOR = tracked.out_of_range_since
+    ? Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000)
+    : 0;
+
+  const sm = config.management.solMode;
+  const cachedPos = _positionsCache?.positions?.find((p) => p.position === position_address);
+  let pnlUsd = 0;
+  let pnlPct = 0;
+  let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0);
+  let initialUsd = sm ? (tracked.amount_sol || 0) : (tracked.initial_value_usd || 0);
+  let finalValueUsd = initialUsd;
+
+  if (cachedPos) {
+    pnlUsd = sm
+      ? (cachedPos.pnl_usd ?? 0)
+      : (cachedPos.pnl_true_usd ?? cachedPos.pnl_usd ?? 0);
+    pnlPct = cachedPos.pnl_pct ?? 0;
+    feesUsd = sm
+      ? (cachedPos.collected_fees_usd || 0) + (cachedPos.unclaimed_fees_usd || 0)
+      : (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
+    initialUsd = sm
+      ? (tracked.amount_sol || initialUsd)
+      : (tracked.initial_value_usd || initialUsd);
+    if (initialUsd > 0) {
+      finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+      pnlPct = (pnlUsd / initialUsd) * 100;
+    } else {
+      finalValueUsd = sm
+        ? (cachedPos.total_value_usd ?? 0)
+        : (cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0);
+      initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlUsd);
+    }
+  }
+
+  const baseMint = closeBaseMint ?? tracked.base_mint ?? null;
+  const signalSnapshot = resolvePerformanceSignalSnapshot({
+    poolAddress,
+    baseMint,
+    tracked,
+  });
+
+  await recordPerformance({
+    position: position_address,
+    pool: poolAddress,
+    pool_name: tracked.pool_name || poolName || poolAddress.slice(0, 8),
+    base_mint: baseMint,
+    strategy: tracked.strategy,
+    strategy_profile: tracked.strategy_profile ?? null,
+    bin_range: tracked.bin_range,
+    bin_step: tracked.bin_step || null,
+    volatility: tracked.volatility || null,
+    fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+    organic_score: tracked.organic_score || null,
+    amount_sol: tracked.amount_sol,
+    fees_earned_usd: feesUsd,
+    final_value_usd: finalValueUsd,
+    initial_value_usd: initialUsd,
+    minutes_in_range: minutesHeld - minutesOOR,
+    minutes_held: minutesHeld,
+    close_reason: reason || "agent decision",
+    signal_snapshot: signalSnapshot,
+  });
+
+  return {
+    pnlUsd,
+    pnlPct,
+    feesUsd,
+    finalValueUsd,
+    initialUsd,
+    minutesHeld,
+    minutesOOR,
+    baseMint,
+    usedCachedPosition: !!cachedPos,
+  };
 }
 
 function deriveOpenPnlPct(binData, solMode = false) {
@@ -2524,6 +2635,7 @@ export async function closePosition({ position_address, reason, urgent }) {
             pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
             base_mint: closeBaseMint,
             strategy: tracked.strategy,
+            strategy_profile: tracked.strategy_profile ?? null,
             bin_range: tracked.bin_range,
             bin_step: tracked.bin_step || null,
             volatility: tracked.volatility || null,
@@ -2570,6 +2682,7 @@ export async function closePosition({ position_address, reason, urgent }) {
               pnl_sol: pnlUsd,
               pnl_pct: pnlPct,
               fees_sol: feesUsd,
+              strategy_profile: tracked.strategy_profile ?? null,
               minutes_held: minutesHeld,
               minutes_out_of_range: minutesOOR,
             },
@@ -2597,6 +2710,8 @@ export async function closePosition({ position_address, reason, urgent }) {
             txs: txHashes,
             pnl_usd: pnlUsd,
             pnl_pct: pnlPct,
+            fees_usd: feesUsd,
+            fees_sol: sm ? feesUsd : null,
             base_mint: closeBaseMint,
           };
         }
@@ -2805,6 +2920,19 @@ export async function closePosition({ position_address, reason, urgent }) {
       if (closeVerificationRateLimited && closeTxHashes.length > 0) {
         log("close_warn", `Close txs were sent but verification degraded by RPC rate limits; preserving tx evidence as successful degraded close`);
         recordClose(position_address, reason || "agent decision");
+        let degradedPerformance = null;
+        try {
+          degradedPerformance = await recordDegradedClosePerformance({
+            position_address,
+            poolAddress,
+            poolName: poolMeta.name || null,
+            closeBaseMint: pool.lbPair.tokenXMint.toString(),
+            tracked,
+            reason,
+          });
+        } catch (error) {
+          log("close_warn", `Degraded close performance/cooldown recording failed: ${error.message}`);
+        }
         return {
           success: true,
           verification_degraded: true,
@@ -2817,6 +2945,11 @@ export async function closePosition({ position_address, reason, urgent }) {
           claim_txs: claimTxHashes,
           close_txs: closeTxHashes,
           txs: txHashes,
+          pnl_usd: degradedPerformance?.pnlUsd ?? null,
+          pnl_pct: degradedPerformance?.pnlPct ?? null,
+          fees_usd: degradedPerformance?.feesUsd ?? null,
+          fees_sol: config.management.solMode ? (degradedPerformance?.feesUsd ?? null) : null,
+          base_mint: degradedPerformance?.baseMint ?? null,
         };
       }
       return {
@@ -2938,6 +3071,7 @@ export async function closePosition({ position_address, reason, urgent }) {
         pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
         base_mint: closeBaseMint,
         strategy: tracked.strategy,
+        strategy_profile: tracked.strategy_profile ?? null,
         bin_range: tracked.bin_range,
         bin_step: tracked.bin_step || null,
         volatility: tracked.volatility || null,
@@ -2969,6 +3103,7 @@ export async function closePosition({ position_address, reason, urgent }) {
           pnl_usd: pnlUsd,
           pnl_pct: pnlPct,
           fees_usd: feesUsd,
+          strategy_profile: tracked.strategy_profile ?? null,
           minutes_held: minutesHeld,
         },
       });
@@ -3010,6 +3145,8 @@ export async function closePosition({ position_address, reason, urgent }) {
         txs: txHashes,
         pnl_usd: pnlUsd,
         pnl_pct: pnlPct,
+        fees_usd: feesUsd,
+        fees_sol: sm ? feesUsd : null,
         base_mint: closeBaseMint,
       };
     }

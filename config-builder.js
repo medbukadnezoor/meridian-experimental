@@ -104,6 +104,7 @@ function buildFeeExitPolicyConfig(userConfig = {}) {
     enabled: policy.enabled === true,
     shadowOnly: policy.shadowOnly !== false,
     dustFloor: normalizeNullableNumber(policy.dustFloor, 0),
+    strategyProfile: normalizeOptionalString(policy.strategyProfile),
     feeHarvestEnabled: policy.feeHarvestEnabled === true,
     feeHarvestMinHoldMinutes: normalizeNullableNumber(policy.feeHarvestMinHoldMinutes),
     feeHarvestMinFeePctOfEntry: normalizeNullableNumber(policy.feeHarvestMinFeePctOfEntry),
@@ -127,6 +128,16 @@ function buildFeeExitPolicyConfig(userConfig = {}) {
     maxHoldTimeoutEnabled: policy.maxHoldTimeoutEnabled === true,
     maxHoldTimeoutMinutes: normalizeNullableNumber(policy.maxHoldTimeoutMinutes),
     maxHoldTimeoutMinNetPnlPct: normalizeNullableNumber(policy.maxHoldTimeoutMinNetPnlPct),
+    exitConfluenceEnabled: policy.exitConfluenceEnabled === true,
+    exitConfluenceMinSignals: normalizeNullableNumber(policy.exitConfluenceMinSignals, 2),
+    exitConfluenceRsiPeriod: normalizeNullableNumber(policy.exitConfluenceRsiPeriod, 2),
+    exitConfluenceRsiOverbought: normalizeNullableNumber(policy.exitConfluenceRsiOverbought, 90),
+    exitConfluenceBbPeriod: normalizeNullableNumber(policy.exitConfluenceBbPeriod, 20),
+    exitConfluenceBbStdDev: normalizeNullableNumber(policy.exitConfluenceBbStdDev, 2),
+    exitConfluenceAggregateMin: normalizeNullableNumber(policy.exitConfluenceAggregateMin, 5),
+    exitConfluenceLookbackMinutes: normalizeNullableNumber(policy.exitConfluenceLookbackMinutes, 180),
+    exitConfluenceRules: Array.isArray(policy.exitConfluenceRules) ? policy.exitConfluenceRules : ["fee_harvest", "max_hold_timeout"],
+    maxHoldTimeoutBypassesConfluence: policy.maxHoldTimeoutBypassesConfluence === true,
   };
 }
 
@@ -391,6 +402,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       oorCooldownTriggerCount: u.oorCooldownTriggerCount ?? 3,
       oorCooldownHours: u.oorCooldownHours ?? 12,
       stopLossCooldownHours: u.stopLossCooldownHours ?? 12,
+      noFeeAbortCooldownHours: u.noFeeAbortCooldownHours ?? 12,
+      velocityStopCooldownHours: u.velocityStopCooldownHours ?? 24,
       repeatDeployCooldownEnabled: u.repeatDeployCooldownEnabled ?? true,
       repeatDeployCooldownTriggerCount: u.repeatDeployCooldownTriggerCount ?? 1,
       repeatDeployCooldownHours: u.repeatDeployCooldownHours ?? 1,

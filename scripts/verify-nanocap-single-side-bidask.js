@@ -14,6 +14,7 @@ import { normalizeForcedSingleSidedSolBidAskArgs } from "../tools/single-side-bi
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+const NANOCAP_CONFIG_FIXTURE = join(__dirname, "fixtures", "nanocap-v1-user-config.fixture.json");
 
 function readJson(relativePath) {
   return JSON.parse(fs.readFileSync(join(ROOT, relativePath), "utf8"));
@@ -36,7 +37,7 @@ function main() {
   const builtNanocap = buildConfig({ preset: "nanocap-v1" }, {});
   assert.strictEqual(builtNanocap.strategy.forceSingleSidedSolBidAsk, true, "nanocap preset defaults forced SOL-only bid_ask on");
 
-  const exampleConfig = readJson("user-config.example.json");
+  const exampleConfig = JSON.parse(fs.readFileSync(NANOCAP_CONFIG_FIXTURE, "utf8"));
   assert.strictEqual(exampleConfig.forceSingleSidedSolBidAsk, true, "nanocap example config explicitly enables forced SOL-only bid_ask");
   assert.strictEqual(exampleConfig.strategy, "bid_ask", "nanocap example config strategy");
   assert.strictEqual(exampleConfig.binsBelow, 85, "nanocap example config binsBelow");

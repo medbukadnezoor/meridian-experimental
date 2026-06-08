@@ -15,7 +15,7 @@ import { buildShadowQualityGatesFromSignals } from "../tools/chart-indicators.js
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
-const EXAMPLE_CONFIG_PATH = join(ROOT, "user-config.example.json");
+const EXAMPLE_CONFIG_PATH = join(__dirname, "fixtures", "nanocap-v1-user-config.fixture.json");
 
 function src(relativePath) {
   return readFileSync(join(ROOT, relativePath), "utf8");

@@ -345,7 +345,7 @@ async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp
   }
 }
 
-async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
+export async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
   const opts = { aggregateMin, beforeTimestamp, lookbackMinutes };
   if (pool) {
     const meteora = await fetchMeteoraDlmmPoolOhlcv(pool, opts);
