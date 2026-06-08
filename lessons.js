@@ -202,6 +202,7 @@ export async function recordPerformance(perf) {
       neutral_reason: entry.neutral_reason,
       close_reason_bucket: entry.close_reason_bucket,
       strategy: perf.strategy,
+      strategy_profile: perf.strategy_profile,
       volatility: perf.volatility,
     });
   }

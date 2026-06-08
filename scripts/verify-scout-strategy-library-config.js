@@ -27,11 +27,18 @@ const KNOWN_SCOUT_STRATEGIES = [
   "scout_fee_velocity_retrace_v1",
   "scout_single_sided_sol_spot_scalp_v1",
 ];
+const KNOWN_MAIN_STRATEGIES = [
+  "evil_panda_fee_dump_v1",
+];
+const KNOWN_RUNTIME_STRATEGIES = [
+  ...KNOWN_SCOUT_STRATEGIES,
+  ...KNOWN_MAIN_STRATEGIES,
+];
 
 if (runtimeStrategyExists) {
   assert.ok(
-    KNOWN_SCOUT_STRATEGIES.includes(strategyDb.active),
-    `scout strategy-library active strategy must be one of: ${KNOWN_SCOUT_STRATEGIES.join(", ")} (got: ${strategyDb.active})`,
+    KNOWN_RUNTIME_STRATEGIES.includes(strategyDb.active),
+    `runtime strategy-library active strategy must be one of: ${KNOWN_RUNTIME_STRATEGIES.join(", ")} (got: ${strategyDb.active})`,
   );
 }
 
@@ -49,12 +56,19 @@ assert.strictEqual(tightStrategy.entry?.single_side, "sol", "tracked example act
 const active = runtimeStrategyExists ? getActiveStrategy() : tightStrategy;
 if (runtimeStrategyExists) {
   assert.ok(active, "getActiveStrategy returns a strategy");
-  assert.ok(KNOWN_SCOUT_STRATEGIES.includes(active.id), `active strategy id must be a known scout strategy (got: ${active.id})`);
-  assert.strictEqual(active.id, "scout_tight_bidask_retrace", "runtime active strategy is tight bid_ask retrace");
+  assert.ok(KNOWN_RUNTIME_STRATEGIES.includes(active.id), `active strategy id must be a known runtime strategy (got: ${active.id})`);
   assert.strictEqual(active.lp_strategy, "bid_ask", "runtime active strategy is bid_ask");
   assert.strictEqual(active.entry?.single_side, "sol", "runtime active strategy is single-sided SOL");
-  assert.strictEqual(active.range?.type, "tight", "runtime bid_ask strategy uses tight range policy");
   assert.strictEqual(active.range?.bins_above, 0, "runtime bid_ask strategy pins bins_above to zero");
+  if (active.id === "evil_panda_fee_dump_v1") {
+    assert.strictEqual(active.range?.type, "tight_patient_fee_dump", "main EvilPanda fee-dump profile uses patient tight range policy");
+    assert.strictEqual(active.range?.bins_below, 35, "main EvilPanda fee-dump profile keeps bins_below at 35");
+    assert.strictEqual(active.range?.bins_below_min, 35, "main EvilPanda fee-dump profile pins min bins_below at 35");
+    assert.strictEqual(active.range?.bins_below_max, 35, "main EvilPanda fee-dump profile pins max bins_below at 35");
+  } else {
+    assert.strictEqual(active.id, "scout_tight_bidask_retrace", "runtime scout active strategy is tight bid_ask retrace");
+    assert.strictEqual(active.range?.type, "tight", "runtime scout bid_ask strategy uses tight range policy");
+  }
 }
 
 const policy = resolveStrategyRangePolicy(tightStrategy, { strategy: { strategy: "bid_ask", binsBelow: 85 } });
@@ -188,7 +202,9 @@ console.log(JSON.stringify({
   success: true,
   runtime_strategy_library_present: runtimeStrategyExists,
   active_strategy_non_null: runtimeStrategyExists ? true : null,
-  active_strategy_is_known_scout_strategy: true,
+  active_strategy_is_known_scout_strategy: runtimeStrategyExists ? KNOWN_SCOUT_STRATEGIES.includes(active.id) : true,
+  active_strategy_is_known_runtime_strategy: true,
+  active_strategy_is_main_evil_panda_fee_dump: runtimeStrategyExists ? active.id === "evil_panda_fee_dump_v1" : false,
   runtime_active_strategy: runtimeStrategyExists ? active.id : null,
   tight_bidask_strategy_verified: runtimeStrategyExists ? active.lp_strategy === "bid_ask" : true,
   range_policy_from_json: true,

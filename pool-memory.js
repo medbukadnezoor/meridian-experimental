@@ -46,6 +46,10 @@ function isLowYieldCloseReason(reason) {
   return /low.yield/i.test(String(reason || ""));
 }
 
+function isNoFeeAbortCloseReason(reason) {
+  return /no.fee.abort/i.test(String(reason || ""));
+}
+
 function isEarlyDumpCloseReason(reason) {
   return /early.dump/i.test(String(reason || ""));
 }
@@ -59,7 +63,13 @@ function isStopLossCooldownCloseReason(reason) {
   return /stop.loss/i.test(text) || isEarlyDumpCloseReason(text) || isRollingFastDrawdownCloseReason(text);
 }
 
+function isVelocityOrHardStopCloseReason(reason) {
+  return /velocity.stop.loss/i.test(String(reason || "")) || /hard.stop.loss/i.test(String(reason || ""));
+}
+
 function getStopLossCooldownReason(reason) {
+  if (/velocity.stop.loss/i.test(String(reason || ""))) return "velocity stop";
+  if (/hard.stop.loss/i.test(String(reason || ""))) return "hard stop loss";
   if (isEarlyDumpCloseReason(reason)) return "early dump";
   if (isRollingFastDrawdownCloseReason(reason)) return "rolling fast drawdown";
   return "stop loss";
@@ -205,6 +215,7 @@ export function recordPoolDeploy(poolAddress, deployData) {
     neutral_reason: deployData.neutral_reason ?? null,
     close_reason_bucket: deployData.close_reason_bucket ?? null,
     strategy: deployData.strategy || null,
+    strategy_profile: deployData.strategy_profile || null,
     volatility_at_deploy: deployData.volatility ?? null,
   };
 
@@ -272,13 +283,25 @@ export function recordPoolDeploy(poolAddress, deployData) {
     log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (low yield close)`);
   }
 
+  if (isNoFeeAbortCloseReason(deploy.close_reason)) {
+    const cooldownHours = config.management?.noFeeAbortCooldownHours ?? 12;
+    const cooldownUntil = setPoolCooldown(entry, cooldownHours, "no-fee abort");
+    const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, "no-fee abort");
+    log("pool-memory", `Cooldown set for ${entry.name} until ${cooldownUntil} (no-fee abort close)`);
+    if (entry.base_mint && mintCooldownUntil) {
+      log("pool-memory", `Base mint cooldown set for ${entry.base_mint.slice(0, 8)} until ${mintCooldownUntil} (no-fee abort close)`);
+    }
+  }
+
   // Set cooldown for stop-loss style closes — token dumped on us, don't redeploy soon.
   // Early-dump closes are emitted as STOP_LOSS actions but may be stored with a
   // "Trailing TP: Early dump..." prefix by older callers, so classify by content.
   // Rolling fast-drawdown closes are emergency stop-loss-family exits too.
   // Duration configurable via config.management.stopLossCooldownHours (default fallback: 12h)
   if (isStopLossCooldownCloseReason(deploy.close_reason)) {
-    const cooldownHours = config.management?.stopLossCooldownHours ?? 12;
+    const cooldownHours = isVelocityOrHardStopCloseReason(deploy.close_reason)
+      ? (config.management?.velocityStopCooldownHours ?? 24)
+      : (config.management?.stopLossCooldownHours ?? 12);
     const cooldownReason = getStopLossCooldownReason(deploy.close_reason);
     const cooldownUntil = setPoolCooldown(entry, cooldownHours, cooldownReason);
     const mintCooldownUntil = setBaseMintCooldown(db, entry.base_mint, cooldownHours, cooldownReason);

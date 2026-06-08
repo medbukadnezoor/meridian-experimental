@@ -82,6 +82,9 @@ export function classifyCloseReason(reason) {
   const text = normalizeCloseReason(reason);
   if (!text) return "other";
 
+  if (/fee\s*harvest/.test(text)) return "fee_harvest";
+  if (/no\s*fee\s*abort/.test(text)) return "no_fee_abort";
+  if (/max\s*hold/.test(text) || /max\s*hold\s*timeout/.test(text)) return "max_hold_timeout";
   if (/low\s*yield/.test(text)) return "low_yield";
   if (/early\s*dump/.test(text)) return "early_dump";
   if (/hard\s*stop\s*loss/.test(text) || /stop\s*loss/.test(text)) return "stop_loss";
