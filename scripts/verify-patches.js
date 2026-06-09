@@ -55,6 +55,7 @@ const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-disco
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
+const MOMENTUM_SCORE_V1_VERIFIER_PATH = join(__dirname, "verify-momentum-score-v1.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
@@ -668,6 +669,10 @@ function runTwoLaneGateProof() {
   return JSON.parse(result.stdout);
 }
 
+function runMomentumScoreV1Proof() {
+  return runJsonVerifier(MOMENTUM_SCORE_V1_VERIFIER_PATH, "verify-momentum-score-v1");
+}
+
 function runTargetPoolNeedleVetoProof() {
   const result = spawnSync(process.execPath, [TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH], {
     cwd: ROOT,
@@ -759,6 +764,7 @@ function buildChecks() {
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
   const twoLaneGateProof = runTwoLaneGateProof();
+  const momentumScoreV1Proof = runMomentumScoreV1Proof();
   const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
   const rpcPressureGuardProof = runRpcPressureGuardProof();
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
@@ -817,6 +823,23 @@ function buildChecks() {
         twoLaneGateProof?.decisionContextFields?.feeLane === "loose" &&
         twoLaneGateProof?.decisionContextFields?.looseLaneQualified === false &&
         twoLaneGateProof?.decisionContextFields?.hasLooseLaneVeto === true,
+    },
+    {
+      file: "scripts/verify-momentum-score-v1.js",
+      label: "[Momentum score v1] shadow scoring, scalp/throttle recommendations, reporting, and no live consumers",
+      test: () =>
+        momentumScoreV1Proof?.success === true &&
+        momentumScoreV1Proof?.version === "momentum_score_v1" &&
+        Number(momentumScoreV1Proof?.fullScore) >= 75 &&
+        momentumScoreV1Proof?.hotWouldScalp === true &&
+        momentumScoreV1Proof?.missingDataThrottle !== "none" &&
+        momentumScoreV1Proof?.overheatedThrottle === "avoid_shadow" &&
+        momentumScoreV1Proof?.weakThrottle === "skip_candidate_shadow" &&
+        momentumScoreV1Proof?.decisionContextFields?.momentumProfile === "patient_fee_harvest" &&
+        momentumScoreV1Proof?.decisionContextFields?.momentumWouldScalp === true &&
+        momentumScoreV1Proof?.checks?.includes("filter acceptance parity") &&
+        momentumScoreV1Proof?.checks?.includes("ranking parity") &&
+        momentumScoreV1Proof?.checks?.includes("no deploy/close/sizing/cooldown consumers"),
     },
     {
       file: "scripts/verify-scout-fee-velocity-live-canary.js",
