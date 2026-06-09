@@ -28,6 +28,10 @@ import {
   buildCandidateDecisionContext,
   summarizeIndicatorConfirmation,
 } from "../decision-context-log.js";
+import {
+  appendMomentumScoreV1,
+  attachMomentumScoreV1,
+} from "../momentum-score-v1.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -980,10 +984,14 @@ export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {},
   const accepted = [];
   for (const pool of pools) {
     const enrichedPool = attachTwoLaneClassification(
-      enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy }),
+      attachMomentumScoreV1(enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy })),
       screeningConfig,
     );
     const vetoReason = getConfiguredPoolThresholdVetoReason(enrichedPool, screeningConfig);
+    appendMomentumScoreV1(enrichedPool, {
+      liveVetoReason: vetoReason,
+      liveAccepted: !vetoReason,
+    });
     appendTwoLaneClassification(enrichedPool, screeningConfig, {
       liveVetoReason: vetoReason,
       liveAccepted: !vetoReason,
