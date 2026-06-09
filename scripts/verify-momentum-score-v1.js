@@ -9,6 +9,7 @@ import {
   appendMomentumScoreV1,
   attachMomentumScoreV1,
   computeMomentumScoreV1,
+  DYNAMIC_ENTRY_SHADOW_VERSION,
   getMomentumScoreLogPath,
   MOMENTUM_SCORE_VERSION,
 } from "../momentum-score-v1.js";
@@ -50,12 +51,43 @@ function candidate(overrides = {}) {
 
 const full = computeMomentumScoreV1(candidate(), { profile: "patient_fee_harvest" });
 assert.strictEqual(full.version, MOMENTUM_SCORE_VERSION);
+assert.strictEqual(full.dynamic_entry_shadow.version, DYNAMIC_ENTRY_SHADOW_VERSION);
 assert.strictEqual(full.shadowOnly, true);
 assert.strictEqual(full.momentum_profile, "patient_fee_harvest");
 assert.ok(full.momentum_score_v1 >= 75, "full-data candidate should score as accelerating");
 assert.strictEqual(full.momentum_classification, "accelerating");
 assert.strictEqual(full.would_throttle, "none");
 assert.ok(full.confidence >= 0.99, "full-data candidate should have high confidence");
+
+const strongProfit = computeMomentumScoreV1(candidate({
+  assumed_deploy_usd: 100,
+  tx_cost_usd: 0.4,
+  slippage_budget_usd: 0.5,
+  reposition_budget_usd: 0.2,
+  tail_risk_budget_usd: 1,
+}), { profile: "patient_fee_harvest" });
+assert.strictEqual(strongProfit.dynamic_entry_shadow.entry_label, "live_candidate", "strong candidate is a shadow live candidate");
+assert.ok(strongProfit.dynamic_entry_shadow.estimated_net_fees_usd > 0, "strong candidate estimates positive net fees");
+assert.ok(strongProfit.dynamic_entry_shadow.breakeven_hold_minutes > 0, "strong candidate computes breakeven minutes");
+
+const cgoLike = computeMomentumScoreV1(candidate({
+  name: "CGO-SOL",
+  fee_active_tvl_ratio: 3.5181,
+  fee_pct: 5,
+  active_tvl: 30_542,
+  volume_window: 20_805,
+  volume_active_tvl_multiple: 0.6812,
+  fee_velocity_usd_per_min: 4.475,
+  price_change_pct: 0,
+  price_change_1h: 0,
+  volume_change_pct: 0,
+  organic_score: 78,
+  token_age_hours: 7,
+  assumed_deploy_usd: 100,
+}), { profile: "patient_fee_harvest" });
+assert.strictEqual(cgoLike.dynamic_entry_shadow.entry_label, "watchlist", "CGO-like high-fee low-flow candidate becomes watchlist, not full-size live");
+assert.ok(cgoLike.dynamic_entry_shadow.reason_codes.includes("high_fee_low_flow_exception"), "CGO-like candidate is flagged as high-fee low-flow");
+assert.ok(cgoLike.dynamic_entry_shadow.estimated_gross_fees_usd > 0, "CGO-like candidate still records expected fee telemetry");
 
 const hot = computeMomentumScoreV1(candidate(), { profile: "hot_fee_scalp" });
 assert.strictEqual(hot.momentum_profile, "hot_fee_scalp");
@@ -89,12 +121,20 @@ const weak = attachMomentumScoreV1(candidate({
 assert.strictEqual(weak.momentum_score.primary.would_throttle, "skip_candidate_shadow");
 assert.strictEqual(weak.momentum_score.primary.momentum_classification, "weak");
 
-const enriched = attachMomentumScoreV1(candidate());
+const enriched = attachMomentumScoreV1(candidate({
+  assumed_deploy_usd: 100,
+  tx_cost_usd: 0.4,
+  slippage_budget_usd: 0.5,
+  reposition_budget_usd: 0.2,
+  tail_risk_budget_usd: 1,
+}));
 const context = buildCandidateDecisionContext(enriched);
 assert.strictEqual(context.momentumProfile, "patient_fee_harvest");
 assert.strictEqual(context.momentumWouldScalp, true);
 assert.ok(context.momentumScoreV1 >= 75);
 assert.ok(context.momentumScore?.shadowOnly, "decision-context carries shadow-only momentum object");
+assert.strictEqual(context.dynamicEntryLabel, "live_candidate", "decision-context carries dynamic entry label");
+assert.ok(context.dynamicEntryScore > 0, "decision-context carries dynamic entry score");
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "momentum-score-v1-"));
 try {
@@ -112,6 +152,7 @@ try {
   const logPath = getMomentumScoreLogPath("2026-06-09T00:00:00.000Z", tmp);
   const parsed = JSON.parse(fs.readFileSync(logPath, "utf8").trim());
   assert.strictEqual(parsed.momentum.version, MOMENTUM_SCORE_VERSION);
+  assert.strictEqual(parsed.momentum.primary.dynamic_entry_shadow.version, DYNAMIC_ENTRY_SHADOW_VERSION);
   assert.strictEqual(parsed.momentum.profiles.hot_fee_scalp.would_scalp, true);
 
   const actions = [
@@ -134,7 +175,10 @@ try {
   const report = buildMomentumScoreReport({ date: "2026-06-09", logs: tmp, source: "main" });
   assert.strictEqual(report.source, "main");
   assert.strictEqual(report.closedPositions, 1);
+  assert.strictEqual(report.candidateReplayRows, 1);
+  assert.strictEqual(report.candidateByDynamicEntryLabel.live_candidate.count, 1);
   assert.strictEqual(report.byScoreBucket["75_plus"].count, 1);
+  assert.strictEqual(report.byDynamicEntryLabel.live_candidate.count, 1);
   assert.strictEqual(report.byWouldScalp.true.count, 1);
   assert.ok("shadowBlockedLossEstimate" in report, "report includes blocked-loss estimate");
   assert.ok("shadowBlockedWinnerCost" in report, "report includes blocked-winner cost");
@@ -225,6 +269,10 @@ console.log(JSON.stringify({
   success: true,
   version: MOMENTUM_SCORE_VERSION,
   fullScore: full.momentum_score_v1,
+  dynamicEntryVersion: DYNAMIC_ENTRY_SHADOW_VERSION,
+  strongDynamicEntryLabel: strongProfit.dynamic_entry_shadow.entry_label,
+  cgoDynamicEntryLabel: cgoLike.dynamic_entry_shadow.entry_label,
+  cgoDynamicReasons: cgoLike.dynamic_entry_shadow.reason_codes,
   hotWouldScalp: hot.would_scalp,
   missingDataThrottle: missing.would_throttle,
   overheatedThrottle: overheated.would_throttle,
@@ -233,6 +281,7 @@ console.log(JSON.stringify({
     momentumScoreV1: context.momentumScoreV1,
     momentumProfile: context.momentumProfile,
     momentumWouldScalp: context.momentumWouldScalp,
+    dynamicEntryLabel: context.dynamicEntryLabel,
   },
   checks: [
     "deterministic full-data scoring",
@@ -241,8 +290,10 @@ console.log(JSON.stringify({
     "overheated price movement is risk flagged",
     "weak fee/flow would throttle shadow",
     "decision-context carries momentum telemetry",
+    "dynamic entry shadow carries expected fee telemetry",
+    "CGO-like high-fee low-flow becomes watchlist",
     "append-only momentum JSONL row shape",
-    "report groups closes by score and recommendations",
+    "report groups candidates and closes by dynamic entry label",
     "filter acceptance parity",
     "ranking parity",
     "no deploy/close/sizing/cooldown consumers",

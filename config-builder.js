@@ -266,6 +266,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       minVolume: u.minVolume ?? 500,
       minVolumeActiveTvlMultiple: u.minVolumeActiveTvlMultiple ?? null,
       preferredVolumeActiveTvlMultiple: u.preferredVolumeActiveTvlMultiple ?? null,
+      dynamicEntryShadowAssumedDeployUsd: u.dynamicEntryShadowAssumedDeployUsd ?? s.dynamicEntryShadowAssumedDeployUsd ?? null,
       twoLaneClassificationLoggingEnabled: u.twoLaneClassificationLoggingEnabled ?? true,
       twoLanePrimaryVolumeActiveTvlMultiple: u.twoLanePrimaryVolumeActiveTvlMultiple ?? 3,
       looseVolumeActiveTvlMultiple: u.looseVolumeActiveTvlMultiple ?? 2.5,
