@@ -65,6 +65,7 @@ function parseResult(value) {
 }
 
 function num(value) {
+  if (value == null || value === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -210,6 +211,9 @@ function emptyGroup() {
     avg_pnl_pct: 0,
     avg_hold_minutes: 0,
     avg_dynamic_entry_score: 0,
+    _pnlCount: 0,
+    _holdCount: 0,
+    _dynamicScoreCount: 0,
   };
 }
 
@@ -225,9 +229,18 @@ function grouped(records, keyFn) {
     bucket.fee_earned_sol += record.fee_earned_sol ?? 0;
     bucket.estimated_gross_fees_usd += record.estimated_gross_fees_usd ?? 0;
     bucket.estimated_net_fees_usd += record.estimated_net_fees_usd ?? 0;
-    bucket.avg_pnl_pct += record.pnl_pct ?? 0;
-    bucket.avg_hold_minutes += record.hold_minutes ?? 0;
-    bucket.avg_dynamic_entry_score += record.dynamic_entry_score ?? 0;
+    if (record.pnl_pct != null) {
+      bucket.avg_pnl_pct += record.pnl_pct;
+      bucket._pnlCount += 1;
+    }
+    if (record.hold_minutes != null) {
+      bucket.avg_hold_minutes += record.hold_minutes;
+      bucket._holdCount += 1;
+    }
+    if (record.dynamic_entry_score != null) {
+      bucket.avg_dynamic_entry_score += record.dynamic_entry_score;
+      bucket._dynamicScoreCount += 1;
+    }
   }
   for (const bucket of Object.values(out)) {
     bucket.win_rate = bucket.count ? round(bucket.wins / bucket.count, 4) : null;
@@ -235,9 +248,12 @@ function grouped(records, keyFn) {
     bucket.fee_earned_sol = round(bucket.fee_earned_sol);
     bucket.estimated_gross_fees_usd = round(bucket.estimated_gross_fees_usd);
     bucket.estimated_net_fees_usd = round(bucket.estimated_net_fees_usd);
-    bucket.avg_pnl_pct = bucket.count ? round(bucket.avg_pnl_pct / bucket.count, 4) : null;
-    bucket.avg_hold_minutes = bucket.count ? round(bucket.avg_hold_minutes / bucket.count, 2) : null;
-    bucket.avg_dynamic_entry_score = bucket.count ? round(bucket.avg_dynamic_entry_score / bucket.count, 2) : null;
+    bucket.avg_pnl_pct = bucket._pnlCount ? round(bucket.avg_pnl_pct / bucket._pnlCount, 4) : null;
+    bucket.avg_hold_minutes = bucket._holdCount ? round(bucket.avg_hold_minutes / bucket._holdCount, 2) : null;
+    bucket.avg_dynamic_entry_score = bucket._dynamicScoreCount ? round(bucket.avg_dynamic_entry_score / bucket._dynamicScoreCount, 2) : null;
+    delete bucket._pnlCount;
+    delete bucket._holdCount;
+    delete bucket._dynamicScoreCount;
   }
   return out;
 }
@@ -253,20 +269,35 @@ function groupedCandidates(records, keyFn) {
       avg_dynamic_entry_score: 0,
       avg_estimated_gross_fees_usd: 0,
       avg_estimated_net_fees_usd: 0,
+      _dynamicScoreCount: 0,
+      _grossFeeCount: 0,
+      _netFeeCount: 0,
     };
     const bucket = out[key];
     bucket.count += 1;
     if (record.live_accepted === true) bucket.live_accepted += 1;
     if (record.live_accepted === false) bucket.live_rejected += 1;
-    bucket.avg_dynamic_entry_score += record.dynamic_entry_score ?? 0;
-    bucket.avg_estimated_gross_fees_usd += record.estimated_gross_fees_usd ?? 0;
-    bucket.avg_estimated_net_fees_usd += record.estimated_net_fees_usd ?? 0;
+    if (record.dynamic_entry_score != null) {
+      bucket.avg_dynamic_entry_score += record.dynamic_entry_score;
+      bucket._dynamicScoreCount += 1;
+    }
+    if (record.estimated_gross_fees_usd != null) {
+      bucket.avg_estimated_gross_fees_usd += record.estimated_gross_fees_usd;
+      bucket._grossFeeCount += 1;
+    }
+    if (record.estimated_net_fees_usd != null) {
+      bucket.avg_estimated_net_fees_usd += record.estimated_net_fees_usd;
+      bucket._netFeeCount += 1;
+    }
   }
   for (const bucket of Object.values(out)) {
     bucket.accept_rate = bucket.count ? round(bucket.live_accepted / bucket.count, 4) : null;
-    bucket.avg_dynamic_entry_score = bucket.count ? round(bucket.avg_dynamic_entry_score / bucket.count, 2) : null;
-    bucket.avg_estimated_gross_fees_usd = bucket.count ? round(bucket.avg_estimated_gross_fees_usd / bucket.count, 4) : null;
-    bucket.avg_estimated_net_fees_usd = bucket.count ? round(bucket.avg_estimated_net_fees_usd / bucket.count, 4) : null;
+    bucket.avg_dynamic_entry_score = bucket._dynamicScoreCount ? round(bucket.avg_dynamic_entry_score / bucket._dynamicScoreCount, 2) : null;
+    bucket.avg_estimated_gross_fees_usd = bucket._grossFeeCount ? round(bucket.avg_estimated_gross_fees_usd / bucket._grossFeeCount, 4) : null;
+    bucket.avg_estimated_net_fees_usd = bucket._netFeeCount ? round(bucket.avg_estimated_net_fees_usd / bucket._netFeeCount, 4) : null;
+    delete bucket._dynamicScoreCount;
+    delete bucket._grossFeeCount;
+    delete bucket._netFeeCount;
   }
   return out;
 }
