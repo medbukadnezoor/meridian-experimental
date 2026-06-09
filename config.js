@@ -79,6 +79,7 @@ export function reloadScreeningThresholds() {
     if (fresh.minVolume      != null) s.minVolume      = fresh.minVolume;
     if (fresh.minVolumeActiveTvlMultiple !== undefined) s.minVolumeActiveTvlMultiple = fresh.minVolumeActiveTvlMultiple;
     if (fresh.preferredVolumeActiveTvlMultiple !== undefined) s.preferredVolumeActiveTvlMultiple = fresh.preferredVolumeActiveTvlMultiple;
+    if (fresh.dynamicEntryShadowAssumedDeployUsd !== undefined) s.dynamicEntryShadowAssumedDeployUsd = fresh.dynamicEntryShadowAssumedDeployUsd;
     if (fresh.twoLaneClassificationLoggingEnabled !== undefined) s.twoLaneClassificationLoggingEnabled = fresh.twoLaneClassificationLoggingEnabled;
     if (fresh.twoLanePrimaryVolumeActiveTvlMultiple !== undefined) s.twoLanePrimaryVolumeActiveTvlMultiple = fresh.twoLanePrimaryVolumeActiveTvlMultiple;
     if (fresh.looseVolumeActiveTvlMultiple !== undefined) s.looseVolumeActiveTvlMultiple = fresh.looseVolumeActiveTvlMultiple;

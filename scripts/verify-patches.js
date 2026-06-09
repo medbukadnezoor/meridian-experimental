@@ -836,6 +836,10 @@ function buildChecks() {
       test: () =>
         momentumScoreV1Proof?.success === true &&
         momentumScoreV1Proof?.version === "momentum_score_v1" &&
+        momentumScoreV1Proof?.dynamicEntryVersion === "dynamic_entry_shadow_v1" &&
+        momentumScoreV1Proof?.strongDynamicEntryLabel === "live_candidate" &&
+        momentumScoreV1Proof?.cgoDynamicEntryLabel === "watchlist" &&
+        momentumScoreV1Proof?.cgoDynamicReasons?.includes("high_fee_low_flow_exception") &&
         Number(momentumScoreV1Proof?.fullScore) >= 75 &&
         momentumScoreV1Proof?.hotWouldScalp === true &&
         momentumScoreV1Proof?.missingDataThrottle !== "none" &&
@@ -843,6 +847,10 @@ function buildChecks() {
         momentumScoreV1Proof?.weakThrottle === "skip_candidate_shadow" &&
         momentumScoreV1Proof?.decisionContextFields?.momentumProfile === "patient_fee_harvest" &&
         momentumScoreV1Proof?.decisionContextFields?.momentumWouldScalp === true &&
+        momentumScoreV1Proof?.decisionContextFields?.dynamicEntryLabel === "live_candidate" &&
+        momentumScoreV1Proof?.checks?.includes("dynamic entry shadow carries expected fee telemetry") &&
+        momentumScoreV1Proof?.checks?.includes("CGO-like high-fee low-flow becomes watchlist") &&
+        momentumScoreV1Proof?.checks?.includes("report groups candidates and closes by dynamic entry label") &&
         momentumScoreV1Proof?.checks?.includes("filter acceptance parity") &&
         momentumScoreV1Proof?.checks?.includes("ranking parity") &&
         momentumScoreV1Proof?.checks?.includes("no deploy/close/sizing/cooldown consumers"),

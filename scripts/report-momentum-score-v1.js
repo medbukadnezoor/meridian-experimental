@@ -96,6 +96,45 @@ function latestMomentumByKey(rows = []) {
   return map;
 }
 
+function primaryMomentum(row = {}) {
+  return row.momentum?.primary ?? null;
+}
+
+function primaryDynamicEntry(row = {}) {
+  return primaryMomentum(row)?.dynamic_entry_shadow ?? null;
+}
+
+function candidateReplayRows(rows = []) {
+  return rows.map((row) => {
+    const primary = primaryMomentum(row);
+    const dynamic = primaryDynamicEntry(row);
+    return {
+      timestamp: row.ts ?? null,
+      pool: row.pool ?? null,
+      pool_name: row.poolName ?? null,
+      base_mint: row.baseMint ?? null,
+      base_symbol: row.baseSymbol ?? null,
+      live_accepted: row.liveAccepted ?? null,
+      live_veto_reason: row.liveVetoReason ?? null,
+      current_live_decision: row.currentLiveDecision ?? null,
+      momentum_profile: primary?.momentum_profile ?? "unknown",
+      momentum_score_v1: num(primary?.momentum_score_v1),
+      momentum_bucket: scoreBucket(num(primary?.momentum_score_v1)),
+      momentum_classification: primary?.momentum_classification ?? "unknown",
+      would_scalp: row.momentum?.would_scalp ?? null,
+      would_throttle: row.momentum?.would_throttle ?? "unknown",
+      dynamic_entry_label: dynamic?.entry_label ?? "unknown",
+      dynamic_entry_score: num(dynamic?.dynamic_score),
+      dynamic_entry_reasons: dynamic?.reason_codes ?? [],
+      estimated_gross_fees_usd: num(dynamic?.estimated_gross_fees_usd),
+      estimated_net_fees_usd: num(dynamic?.estimated_net_fees_usd),
+      breakeven_hold_minutes: num(dynamic?.breakeven_hold_minutes),
+      fee_velocity_active_tvl_hourly_pct: num(dynamic?.fee_velocity_active_tvl_hourly_pct),
+      deploy_share_of_active_tvl_pct: num(dynamic?.deploy_share_of_active_tvl_pct),
+    };
+  });
+}
+
 function deployMap(rows, momentumByKey) {
   const map = new Map();
   for (const row of rows) {
@@ -147,6 +186,14 @@ function closeRows(rows, deploys) {
         momentum_classification: primary?.momentum_classification ?? "unknown",
         would_scalp: momentum?.would_scalp ?? null,
         would_throttle: momentum?.would_throttle ?? "unknown",
+        dynamic_entry_label: primary?.dynamic_entry_shadow?.entry_label ?? "unknown",
+        dynamic_entry_score: num(primary?.dynamic_entry_shadow?.dynamic_score),
+        dynamic_entry_reasons: primary?.dynamic_entry_shadow?.reason_codes ?? [],
+        estimated_gross_fees_usd: num(primary?.dynamic_entry_shadow?.estimated_gross_fees_usd),
+        estimated_net_fees_usd: num(primary?.dynamic_entry_shadow?.estimated_net_fees_usd),
+        breakeven_hold_minutes: num(primary?.dynamic_entry_shadow?.breakeven_hold_minutes),
+        fee_velocity_active_tvl_hourly_pct: num(primary?.dynamic_entry_shadow?.fee_velocity_active_tvl_hourly_pct),
+        deploy_share_of_active_tvl_pct: num(primary?.dynamic_entry_shadow?.deploy_share_of_active_tvl_pct),
       };
     })
     .filter(Boolean);
@@ -158,8 +205,11 @@ function emptyGroup() {
     wins: 0,
     estimated_sol_pnl: 0,
     fee_earned_sol: 0,
+    estimated_gross_fees_usd: 0,
+    estimated_net_fees_usd: 0,
     avg_pnl_pct: 0,
     avg_hold_minutes: 0,
+    avg_dynamic_entry_score: 0,
   };
 }
 
@@ -173,15 +223,50 @@ function grouped(records, keyFn) {
     if ((record.pnl_pct ?? 0) > 0) bucket.wins += 1;
     bucket.estimated_sol_pnl += record.estimated_sol_pnl ?? 0;
     bucket.fee_earned_sol += record.fee_earned_sol ?? 0;
+    bucket.estimated_gross_fees_usd += record.estimated_gross_fees_usd ?? 0;
+    bucket.estimated_net_fees_usd += record.estimated_net_fees_usd ?? 0;
     bucket.avg_pnl_pct += record.pnl_pct ?? 0;
     bucket.avg_hold_minutes += record.hold_minutes ?? 0;
+    bucket.avg_dynamic_entry_score += record.dynamic_entry_score ?? 0;
   }
   for (const bucket of Object.values(out)) {
     bucket.win_rate = bucket.count ? round(bucket.wins / bucket.count, 4) : null;
     bucket.estimated_sol_pnl = round(bucket.estimated_sol_pnl);
     bucket.fee_earned_sol = round(bucket.fee_earned_sol);
+    bucket.estimated_gross_fees_usd = round(bucket.estimated_gross_fees_usd);
+    bucket.estimated_net_fees_usd = round(bucket.estimated_net_fees_usd);
     bucket.avg_pnl_pct = bucket.count ? round(bucket.avg_pnl_pct / bucket.count, 4) : null;
     bucket.avg_hold_minutes = bucket.count ? round(bucket.avg_hold_minutes / bucket.count, 2) : null;
+    bucket.avg_dynamic_entry_score = bucket.count ? round(bucket.avg_dynamic_entry_score / bucket.count, 2) : null;
+  }
+  return out;
+}
+
+function groupedCandidates(records, keyFn) {
+  const out = {};
+  for (const record of records) {
+    const key = keyFn(record) || "unknown";
+    out[key] ||= {
+      count: 0,
+      live_accepted: 0,
+      live_rejected: 0,
+      avg_dynamic_entry_score: 0,
+      avg_estimated_gross_fees_usd: 0,
+      avg_estimated_net_fees_usd: 0,
+    };
+    const bucket = out[key];
+    bucket.count += 1;
+    if (record.live_accepted === true) bucket.live_accepted += 1;
+    if (record.live_accepted === false) bucket.live_rejected += 1;
+    bucket.avg_dynamic_entry_score += record.dynamic_entry_score ?? 0;
+    bucket.avg_estimated_gross_fees_usd += record.estimated_gross_fees_usd ?? 0;
+    bucket.avg_estimated_net_fees_usd += record.estimated_net_fees_usd ?? 0;
+  }
+  for (const bucket of Object.values(out)) {
+    bucket.accept_rate = bucket.count ? round(bucket.live_accepted / bucket.count, 4) : null;
+    bucket.avg_dynamic_entry_score = bucket.count ? round(bucket.avg_dynamic_entry_score / bucket.count, 2) : null;
+    bucket.avg_estimated_gross_fees_usd = bucket.count ? round(bucket.avg_estimated_gross_fees_usd / bucket.count, 4) : null;
+    bucket.avg_estimated_net_fees_usd = bucket.count ? round(bucket.avg_estimated_net_fees_usd / bucket.count, 4) : null;
   }
   return out;
 }
@@ -189,6 +274,7 @@ function grouped(records, keyFn) {
 export function buildMomentumScoreReport({ date, logs, source = "main" }) {
   const momentumRows = readJsonl(path.join(logs, `momentum-score-v1-${date}.jsonl`));
   const actionRows = readJsonl(path.join(logs, `actions-${date}.jsonl`));
+  const candidateReplay = candidateReplayRows(momentumRows);
   const deploys = deployMap(actionRows, latestMomentumByKey(momentumRows));
   const closes = closeRows(actionRows, deploys);
   const throttledRows = momentumRows.filter((row) => row.momentum?.would_throttle && row.momentum.would_throttle !== "none");
@@ -199,12 +285,18 @@ export function buildMomentumScoreReport({ date, logs, source = "main" }) {
     date,
     source,
     momentumRows: momentumRows.length,
+    candidateReplayRows: candidateReplay.length,
+    candidateReplay,
+    candidateByDynamicEntryLabel: groupedCandidates(candidateReplay, (row) => row.dynamic_entry_label),
+    candidateByWouldThrottle: groupedCandidates(candidateReplay, (row) => row.would_throttle),
+    candidateByLiveDecision: groupedCandidates(candidateReplay, (row) => row.current_live_decision),
     closedPositions: closes.length,
     closes,
     byProfile: grouped(closes, (row) => row.momentum_profile),
     byScoreBucket: grouped(closes, (row) => row.momentum_bucket),
     byWouldScalp: grouped(closes, (row) => String(row.would_scalp)),
     byWouldThrottle: grouped(closes, (row) => row.would_throttle),
+    byDynamicEntryLabel: grouped(closes, (row) => row.dynamic_entry_label),
     shadowBlockedLossEstimate: {
       count: blockedLossEstimate.length,
       estimated_sol_pnl: round(blockedLossEstimate.reduce((sum, row) => sum + (row.estimated_sol_pnl ?? 0), 0)),
@@ -225,9 +317,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   } else {
     console.log(`Momentum Score V1 report (${report.source}) ${report.date}`);
     console.log(`Momentum rows: ${report.momentumRows}`);
+    console.log(`Candidate replay rows: ${report.candidateReplayRows}`);
     console.log(`Closed positions: ${report.closedPositions}`);
+    console.log(`Candidate by dynamic entry label: ${JSON.stringify(report.candidateByDynamicEntryLabel)}`);
     console.log(`By score bucket: ${JSON.stringify(report.byScoreBucket)}`);
     console.log(`By would_throttle: ${JSON.stringify(report.byWouldThrottle)}`);
+    console.log(`By dynamic entry label: ${JSON.stringify(report.byDynamicEntryLabel)}`);
     console.log(`Shadow blocked losses: ${report.shadowBlockedLossEstimate.count} / ${report.shadowBlockedLossEstimate.estimated_sol_pnl} SOL`);
     console.log(`Shadow blocked winners: ${report.shadowBlockedWinnerCost.count} / ${report.shadowBlockedWinnerCost.estimated_sol_pnl} SOL`);
   }

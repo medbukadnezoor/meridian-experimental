@@ -41,6 +41,7 @@
   "minFeeActiveTvlRatio": 1.1,
   "minVolumeActiveTvlMultiple": 2.5,
   "preferredVolumeActiveTvlMultiple": 4,
+  "dynamicEntryShadowAssumedDeployUsd": null,
   "twoLaneClassificationLoggingEnabled": true,
   "twoLanePrimaryVolumeActiveTvlMultiple": 3,
   "looseVolumeActiveTvlMultiple": 2.5,

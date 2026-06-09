@@ -985,7 +985,10 @@ export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {},
   const accepted = [];
   for (const pool of pools) {
     const enrichedPool = attachTwoLaneClassification(
-      attachMomentumScoreV1(enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy })),
+      attachMomentumScoreV1({
+        ...enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy }),
+        assumed_deploy_usd: finiteNumberOrNull(screeningConfig.dynamicEntryShadowAssumedDeployUsd),
+      }),
       screeningConfig,
     );
     const vetoReason = getConfiguredPoolThresholdVetoReason(enrichedPool, screeningConfig);
