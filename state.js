@@ -16,6 +16,7 @@ import {
   calculatePnlVelocityDrop,
   calculateRollingPeakDrawdown,
 } from "./stop-loss-policy.js";
+import { buildEffectiveRangeStateFromPosition } from "./range-state.js";
 
 const STATE_FILE = "./state.json";
 
@@ -639,7 +640,9 @@ export function getStateSummary() {
  * Returns { action, reason } or null if no exit needed.
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
-  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, in_range, fee_per_tvl_24h } = positionData;
+  const { pnl_pct: currentPnlPct, pnl_pct_suspicious, fee_per_tvl_24h } = positionData;
+  const rangeState = buildEffectiveRangeStateFromPosition(positionData);
+  const effectiveInRange = rangeState.effective_in_range;
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed) return null;
@@ -666,11 +669,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // Update OOR state
-  if (in_range === false && !pos.out_of_range_since) {
+  if (effectiveInRange === false && !pos.out_of_range_since) {
     pos.out_of_range_since = new Date().toISOString();
     changed = true;
     log("state", `Position ${position_address} marked out of range`);
-  } else if (in_range === true && pos.out_of_range_since) {
+  } else if (effectiveInRange === true && pos.out_of_range_since) {
     pos.out_of_range_since = null;
     changed = true;
     log("state", `Position ${position_address} back in range`);

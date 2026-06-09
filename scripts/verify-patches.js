@@ -58,6 +58,9 @@ const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
+const POSITION_RANGE_DISPLAY_VERIFIER_PATH = join(__dirname, "verify-position-range-display.js");
+const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-range-state-telemetry.js");
+const EFFECTIVE_RANGE_STATE_VERIFIER_PATH = join(__dirname, "verify-effective-range-state.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -77,6 +80,22 @@ function materialConfigMapEntryPresent(src, key) {
 
 function materialDefinitionsFieldPresent(src, key) {
   return new RegExp(`["']${key}["']`).test(src);
+}
+
+function runJsonVerifier(scriptPath, label) {
+  const result = spawnSync(process.execPath, [scriptPath], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`${label} failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
 }
 
 function roleReasoningConfigKeysAbsent() {
@@ -493,6 +512,18 @@ function runOorRepositionProof() {
   return JSON.parse(result.stdout);
 }
 
+function runPositionRangeDisplayProof() {
+  return runJsonVerifier(POSITION_RANGE_DISPLAY_VERIFIER_PATH, "verify-position-range-display");
+}
+
+function runPnlRangeStateTelemetryProof() {
+  return runJsonVerifier(PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH, "verify-pnl-range-state-telemetry");
+}
+
+function runEffectiveRangeStateProof() {
+  return runJsonVerifier(EFFECTIVE_RANGE_STATE_VERIFIER_PATH, "verify-effective-range-state");
+}
+
 function runActiveBinOracleProof() {
   const result = spawnSync(process.execPath, [ACTIVE_BIN_ORACLE_VERIFIER_PATH], {
     cwd: ROOT,
@@ -717,6 +748,9 @@ function buildChecks() {
   const supertrendUrgentRuntimeProof = runSupertrendUrgentRuntimeProof();
   const activeBinOracleProof = runActiveBinOracleProof();
   const oorRepositionProof = runOorRepositionProof();
+  const positionRangeDisplayProof = runPositionRangeDisplayProof();
+  const pnlRangeStateTelemetryProof = runPnlRangeStateTelemetryProof();
+  const effectiveRangeStateProof = runEffectiveRangeStateProof();
   const adaptiveCloseModeProof = runAdaptiveCloseModeProof();
   const scoutStrategyLibraryConfigProof = runScoutStrategyLibraryConfigProof();
   const scoutDirectSpotProof = runScoutDirectSpotProof();
@@ -967,6 +1001,40 @@ function buildChecks() {
         oorRepositionProof?.cooldown_or_guard_failure_blocked === true &&
         oorRepositionProof?.no_stale_latest_candidates === true &&
         oorRepositionProof?.no_main_nanocap_hooks === true,
+    },
+    {
+      file: "scripts/verify-effective-range-state.js",
+      label: "[Range truth] fresh live bins drive OOR timer while stale tracked bins stay telemetry-only",
+      test: () =>
+        effectiveRangeStateProof?.success === true &&
+        effectiveRangeStateProof?.cases?.apiInDerivedAboveStartsOor === true &&
+        effectiveRangeStateProof?.cases?.maturedAboveTriggersOorExit === true &&
+        effectiveRangeStateProof?.cases?.apiInDerivedBelowStartsOor === true &&
+        effectiveRangeStateProof?.cases?.belowRangeRepositionBlocked === true &&
+        effectiveRangeStateProof?.cases?.derivedInRangeClearsApiOor === true &&
+        effectiveRangeStateProof?.cases?.staleTrackedBinsDoNotOverrideApi === true,
+    },
+    {
+      file: "scripts/verify-position-range-display.js",
+      label: "[Range truth] operator display reports API lag while preserving source state",
+      test: () =>
+        positionRangeDisplayProof?.success === true &&
+        positionRangeDisplayProof?.displayUsesDerivedRangeState === true &&
+        positionRangeDisplayProof?.apiLagLabelVisible === true &&
+        positionRangeDisplayProof?.reportingOnly === true,
+    },
+    {
+      file: "scripts/verify-pnl-range-state-telemetry.js",
+      label: "[Range truth] PnL snapshots include source, derived, effective, and mismatch telemetry",
+      test: () =>
+        pnlRangeStateTelemetryProof?.success === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.keepsBackwardCompatibleInRange === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesSourceInRange === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesDerivedRangeSide === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesDerivedInRange === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesEffectiveInRange === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesBins === true &&
+        pnlRangeStateTelemetryProof?.snapshotSchema?.includesMismatch === true,
     },
     {
       file: "decision-context-log.js",
