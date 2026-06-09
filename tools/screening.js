@@ -28,6 +28,7 @@ import {
   buildCandidateDecisionContext,
   summarizeIndicatorConfirmation,
 } from "../decision-context-log.js";
+import { evaluateAthPullbackBand } from "../ath-pullback-band.js";
 import {
   appendMomentumScoreV1,
   attachMomentumScoreV1,
@@ -1862,16 +1863,16 @@ export async function getTopCandidates({ limit = 10 } = {}) {
       return true;
     }));
 
-    // ATH filter — drop pools where price is too close to ATH
+    // ATH pullback band — drop pools too close to ATH or too deeply collapsed.
     const athFilter = config.screening.athFilterPct;
-    if (athFilter != null) {
-      const threshold = 100 + athFilter; // e.g. -20 → threshold = 80 (price must be <= 80% of ATH)
+    const athMinPriceVsAthPct = config.screening.athMinPriceVsAthPct;
+    if (athFilter != null || athMinPriceVsAthPct != null) {
       const before = eligible.length;
       eligible.splice(0, eligible.length, ...eligible.filter((p) => {
-        if (p.price_vs_ath_pct == null) return true; // no data → don't filter
-        if (p.price_vs_ath_pct > threshold) {
-          log("screening", `ATH filter: dropped ${p.name} — ${p.price_vs_ath_pct}% of ATH (limit: ${threshold}%)`);
-          pushFilteredReason(filteredOut, p, `${p.price_vs_ath_pct}% of ATH > ${threshold}% limit`);
+        const athBand = evaluateAthPullbackBand(p.price_vs_ath_pct, { athFilterPct: athFilter, athMinPriceVsAthPct });
+        if (!athBand.accepted) {
+          log("screening", `ATH filter: dropped ${p.name} — ${athBand.message}`);
+          pushFilteredReason(filteredOut, p, athBand.message);
           return false;
         }
         return true;

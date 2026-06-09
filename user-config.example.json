@@ -91,6 +91,7 @@
   "minTokenAgeHours": 0.5,
   "maxTokenAgeHours": 240,
   "athFilterPct": -20,
+  "athMinPriceVsAthPct": 55,
   "fallingKnifeVetoEnabled": true,
   "fallingKnifeMaxPriceChange1hPct": -35,
   "fallingKnifeSeverePriceChangePct": -45,

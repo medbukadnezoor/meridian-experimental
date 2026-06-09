@@ -166,6 +166,7 @@ const toolMap = {
       minTokenAgeHours: ["screening", "minTokenAgeHours"],
       maxTokenAgeHours: ["screening", "maxTokenAgeHours"],
       athFilterPct:     ["screening", "athFilterPct"],
+      athMinPriceVsAthPct: ["screening", "athMinPriceVsAthPct"],
       fallingKnifeVetoEnabled: ["screening", "fallingKnifeVetoEnabled"],
       fallingKnifeMaxPriceChange1hPct: ["screening", "fallingKnifeMaxPriceChange1hPct"],
       fallingKnifeSeverePriceChangePct: ["screening", "fallingKnifeSeverePriceChangePct"],
