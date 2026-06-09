@@ -241,13 +241,13 @@ Returns positions grouped by pool, each with:
 - position address
 - pool address and token pair
 - bin range (min/max bin IDs)
-- source/API in-range boolean plus derived bin range state when available (range_side from active/lower/upper bins)
+- source/API in-range boolean plus effective derived bin range state when fresh live bins are available (range_side from active/lower/upper bins)
 - unclaimed fees (in USD)
 - total deposited value vs current value
 - time since last rebalance
 
-For tight ranges, do not treat the source/API in-range boolean as canonical if range_side disagrees.
-If in_range is true but range_side is above_range or below_range, report it as an API/derived range mismatch.
+For tight ranges, do not treat the source/API in-range boolean as canonical when fresh live range_side disagrees.
+If in_range is true but range_side is above_range or below_range, report it as API lag telemetry.
 
 Use this at the start of every management cycle.`,
       parameters: {

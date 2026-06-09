@@ -31,7 +31,6 @@ import {
   normalizeDeployRangeInputs,
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
-import { deriveRangeSide } from "../oor-reposition.js";
 import { getActiveStrategy } from "../strategy-library.js";
 import {
   RPC_PRIORITY,
@@ -42,6 +41,7 @@ import {
   sendAndConfirmTransactionWithPriority,
   withRpcPriority,
 } from "./rpc.js";
+import { buildEffectiveRangeState } from "../range-state.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -2075,13 +2075,23 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
             for (const { posAddr, lpData } of posEntries) {
               const tracked = getTrackedPosition(posAddr);
               const binData = binDataByPool[poolAddr]?.[posAddr];
-              const isOOR = !lpData.inRange;
-              if (isOOR) markOutOfRange(posAddr);
-              else markInRange(posAddr);
-
               const lowerBin  = binData?.lowerBinId      ?? lpData.tickLower          ?? tracked?.bin_range?.min    ?? null;
               const upperBin  = binData?.upperBinId      ?? lpData.tickUpper          ?? tracked?.bin_range?.max    ?? null;
               const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+              const lowerBinSource = binData?.lowerBinId != null ? "live_bin_data" : lpData.tickLower != null ? "live_position_data" : tracked?.bin_range?.min != null ? "tracked_state" : null;
+              const upperBinSource = binData?.upperBinId != null ? "live_bin_data" : lpData.tickUpper != null ? "live_position_data" : tracked?.bin_range?.max != null ? "tracked_state" : null;
+              const activeBinSource = binData?.poolActiveBinId != null ? "live_bin_data" : tracked?.bin_range?.active != null ? "tracked_state" : null;
+              const rangeState = buildEffectiveRangeState({
+                source_in_range: !!lpData.inRange,
+                lower_bin: lowerBin,
+                upper_bin: upperBin,
+                active_bin: activeBin,
+                lower_bin_source: lowerBinSource,
+                upper_bin_source: upperBinSource,
+                active_bin_source: activeBinSource,
+              });
+              if (rangeState.effective_in_range === false) markOutOfRange(posAddr);
+              else if (rangeState.effective_in_range === true) markInRange(posAddr);
               const ageFromState = tracked?.deployed_at
                 ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
                 : null;
@@ -2097,7 +2107,15 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
                 upper_bin:              upperBin,
                 active_bin:             activeBin,
                 in_range:               !!lpData.inRange,
-                range_side:             deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
+                source_in_range:        rangeState.source_in_range,
+                effective_in_range:     rangeState.effective_in_range,
+                range_side:             rangeState.derived_range_side,
+                derived_in_range:       rangeState.derived_in_range,
+                range_state_mismatch:   rangeState.range_state_mismatch,
+                range_state_source:     rangeState.range_state_source,
+                lower_bin_source:       rangeState.lower_bin_source,
+                upper_bin_source:       rangeState.upper_bin_source,
+                active_bin_source:      rangeState.active_bin_source,
                 unclaimed_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative  : lpData.unCollectedFee)  * 10000) / 10000,
                 total_value_usd:        Math.round(safeNum(config.management.solMode ? lpData.valueNative           : lpData.value)           * 10000) / 10000,
                 total_value_true_usd:   Math.round(safeNum(lpData.value)                                                                      * 10000) / 10000,
@@ -2159,9 +2177,6 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         const tracked = getTrackedPosition(positionAddress);
         const isOOR = pool.outOfRange || pool.positionsOutOfRange?.includes(positionAddress);
 
-        if (isOOR) markOutOfRange(positionAddress);
-        else markInRange(positionAddress);
-
         // Bin data: from supplemental PnL call (OOR) or tracked state (in-range)
         const binData = binDataByPool[pool.poolAddress]?.[positionAddress];
         if (!binData) {
@@ -2170,6 +2185,21 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
         const lowerBin  = binData?.lowerBinId      ?? tracked?.bin_range?.min ?? null;
         const upperBin  = binData?.upperBinId      ?? tracked?.bin_range?.max ?? null;
         const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+        const lowerBinSource = binData?.lowerBinId != null ? "live_bin_data" : tracked?.bin_range?.min != null ? "tracked_state" : null;
+        const upperBinSource = binData?.upperBinId != null ? "live_bin_data" : tracked?.bin_range?.max != null ? "tracked_state" : null;
+        const activeBinSource = binData?.poolActiveBinId != null ? "live_bin_data" : tracked?.bin_range?.active != null ? "tracked_state" : null;
+        const sourceInRange = binData ? !binData.isOutOfRange : !isOOR;
+        const rangeState = buildEffectiveRangeState({
+          source_in_range: sourceInRange,
+          lower_bin: lowerBin,
+          upper_bin: upperBin,
+          active_bin: activeBin,
+          lower_bin_source: lowerBinSource,
+          upper_bin_source: upperBinSource,
+          active_bin_source: activeBinSource,
+        });
+        if (rangeState.effective_in_range === false) markOutOfRange(positionAddress);
+        else if (rangeState.effective_in_range === true) markInRange(positionAddress);
         const lpData = lpAgentByPosition[positionAddress] || null;
 
         const ageFromState = tracked?.deployed_at
@@ -2201,8 +2231,16 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
           lower_bin:          lowerBin,
           upper_bin:          upperBin,
           active_bin:         activeBin,
-          in_range:           binData ? !binData.isOutOfRange : !isOOR,
-          range_side:         deriveRangeSide({ active_bin: activeBin, lower_bin: lowerBin, upper_bin: upperBin }),
+          in_range:           sourceInRange,
+          source_in_range:    rangeState.source_in_range,
+          effective_in_range: rangeState.effective_in_range,
+          range_side:         rangeState.derived_range_side,
+          derived_in_range:   rangeState.derived_in_range,
+          range_state_mismatch: rangeState.range_state_mismatch,
+          range_state_source: rangeState.range_state_source,
+          lower_bin_source:   rangeState.lower_bin_source,
+          upper_bin_source:   rangeState.upper_bin_source,
+          active_bin_source:  rangeState.active_bin_source,
           unclaimed_fees_usd: lpData
             ? Math.round((
                 config.management.solMode

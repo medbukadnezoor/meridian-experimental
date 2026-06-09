@@ -100,13 +100,16 @@ assert.deepEqual(blocked.guardFailures, ["Pool on cooldown"]);
 const indexSource = source("index.js");
 const oracleSource = source("active-bin-oracle.js");
 const dlmmSource = source("tools/dlmm.js");
+const rangeStateSource = source("range-state.js");
 const configSource = source("config-builder.js");
 const exampleConfig = source("user-config.example.json");
 
 assert.match(configSource, /oorRepositionEnabled:\s*u\.oorRepositionEnabled\s*\?\?\s*false/);
 assert.match(exampleConfig, /"oorRepositionEnabled":\s*false/);
 assert.match(oracleSource, /range_side:\s*rangeSide/);
-assert.match(dlmmSource, /range_side:\s*deriveRangeSide/);
+assert.match(dlmmSource, /range_side:\s*rangeState\.derived_range_side/);
+assert.match(rangeStateSource, /deriveRangeSide\(\{/);
+assert.match(rangeStateSource, /isLiveBinSource\(active_bin_source\)/);
 assert.match(indexSource, /runOorRepositionAfterConfirmedClose/);
 assert.match(indexSource, /executeTool\("close_position"/);
 assert.match(indexSource, /getTopCandidates\(\{\s*limit:\s*config\.management\.oorRepositionCandidateLimit/);

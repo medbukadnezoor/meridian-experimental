@@ -41,6 +41,10 @@ import {
   isOorRepositionEligibleRangeSide,
   isOorRepositionEnabled,
 } from "./oor-reposition.js";
+import {
+  buildEffectiveRangeStateFromPosition,
+  finiteNumberOrNull,
+} from "./range-state.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -99,67 +103,32 @@ const PNL_SNAPSHOT_LOG_DIR = "./logs";
 let _pnlSnapshotWarningLogged = false;
 let _ohlcvDrawdownShadowWarningLogged = false;
 
-function finiteNumberOrNull(value) {
-  if (value == null || value === "") return null;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : null;
-}
-
 function buildPnlSnapshotRangeState(position = {}) {
-  const sourceInRange = typeof position.in_range === "boolean" ? position.in_range : null;
-  const lowerBin = finiteNumberOrNull(position.lower_bin ?? position.min_bin ?? position.bin_range?.min);
-  const upperBin = finiteNumberOrNull(position.upper_bin ?? position.max_bin ?? position.bin_range?.max);
-  const activeBin = finiteNumberOrNull(position.active_bin ?? position.bin_range?.active);
-  const derivedRangeSide = deriveRangeSide({
-    active_bin: activeBin,
-    lower_bin: lowerBin,
-    upper_bin: upperBin,
-  });
-  const derivedInRange = derivedRangeSide === "unknown" ? null : derivedRangeSide === "in_range";
-  const rangeStateMismatch = sourceInRange != null && derivedInRange != null
-    ? sourceInRange !== derivedInRange
-    : false;
+  const state = buildEffectiveRangeStateFromPosition(position);
 
   return {
-    sourceInRange,
-    derivedRangeSide,
-    derivedInRange,
-    lowerBin,
-    upperBin,
-    activeBin,
-    rangeStateMismatch,
+    sourceInRange: state.source_in_range,
+    derivedRangeSide: state.derived_range_side,
+    derivedInRange: state.derived_in_range,
+    effectiveInRange: state.effective_in_range,
+    lowerBin: state.lower_bin,
+    upperBin: state.upper_bin,
+    activeBin: state.active_bin,
+    rangeStateMismatch: state.range_state_mismatch,
+    rangeStateSource: state.range_state_source,
   };
 }
 
-function normalizeRangeSide(value) {
-  if (value === "in_range" || value === "above_range" || value === "below_range") return value;
-  return null;
-}
-
 function buildPositionDisplayRangeState(position = {}) {
-  const sourceInRange = typeof position.in_range === "boolean" ? position.in_range : null;
-  const lowerBin = finiteNumberOrNull(position.lower_bin ?? position.min_bin ?? position.bin_range?.min);
-  const upperBin = finiteNumberOrNull(position.upper_bin ?? position.max_bin ?? position.bin_range?.max);
-  const activeBin = finiteNumberOrNull(position.active_bin ?? position.bin_range?.active);
-  const derivedRangeSide = normalizeRangeSide(
-    position.derivedRangeSide ?? position.derived_range_side ?? position.range_side,
-  ) ?? normalizeRangeSide(deriveRangeSide({
-    active_bin: activeBin,
-    lower_bin: lowerBin,
-    upper_bin: upperBin,
-  }));
-  const derivedInRange = derivedRangeSide == null ? null : derivedRangeSide === "in_range";
-  const preferredInRange = derivedInRange ?? sourceInRange;
-  const rangeStateMismatch = sourceInRange != null && derivedInRange != null
-    ? sourceInRange !== derivedInRange
-    : false;
+  const state = buildEffectiveRangeStateFromPosition(position);
 
   return {
-    sourceInRange,
-    derivedRangeSide,
-    derivedInRange,
-    preferredInRange,
-    rangeStateMismatch,
+    sourceInRange: state.source_in_range,
+    derivedRangeSide: state.derived_range_side === "unknown" ? null : state.derived_range_side,
+    derivedInRange: state.derived_in_range,
+    preferredInRange: state.effective_in_range,
+    rangeStateMismatch: state.range_state_mismatch,
+    rangeStateSource: state.range_state_source,
   };
 }
 
@@ -183,7 +152,7 @@ function formatPositionRangeLabel(position = {}, { icon = true } = {}) {
       ? `API: OOR ${minutes}m`
       : "API: unknown";
   const prefix = icon ? (state.preferredInRange === false ? "🔴 " : state.preferredInRange === true ? "🟢 " : "⚪ ") : "";
-  const mismatch = state.rangeStateMismatch ? ` ⚠ API/derived mismatch (${sourceLabel})` : "";
+  const mismatch = state.rangeStateMismatch ? ` ⚠ API lag: ${sourceLabel}` : "";
   return `${prefix}${derivedLabel}${mismatch}`;
 }
 
@@ -226,10 +195,12 @@ function appendPnlSnapshot(wallet, position, exit = null) {
       sourceInRange: rangeState.sourceInRange,
       derivedRangeSide: rangeState.derivedRangeSide,
       derivedInRange: rangeState.derivedInRange,
+      effectiveInRange: rangeState.effectiveInRange,
       lowerBin: rangeState.lowerBin,
       upperBin: rangeState.upperBin,
       activeBin: rangeState.activeBin,
       rangeStateMismatch: rangeState.rangeStateMismatch,
+      rangeStateSource: rangeState.rangeStateSource,
       stopCandidate: exit?.action === "STOP_LOSS_CANDIDATE" || isSoftStopLossCandidate(position, config.management),
     };
     const dateStr = now.toISOString().slice(0, 10);
@@ -252,10 +223,12 @@ function appendPnlSnapshot(wallet, position, exit = null) {
         source_in_range: entry.sourceInRange,
         derived_range_side: entry.derivedRangeSide,
         derived_in_range: entry.derivedInRange,
+        effective_in_range: entry.effectiveInRange,
         lower_bin: entry.lowerBin,
         upper_bin: entry.upperBin,
         active_bin: entry.activeBin,
         range_state_mismatch: entry.rangeStateMismatch,
+        range_state_source: entry.rangeStateSource,
         stop_candidate: entry.stopCandidate,
       },
       source: `pnl-snapshots-${dateStr}.jsonl`,
@@ -1129,7 +1102,8 @@ After executing, write a brief one-line result per position.
         else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
-        if (!p.in_range && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
+        const rangeState = buildEffectiveRangeStateFromPosition(p);
+        if (rangeState.effective_in_range === false && p.minutes_out_of_range >= config.management.outOfRangeWaitMinutes) {
           notifyOutOfRange({ pair: p.pair, minutesOOR: p.minutes_out_of_range }).catch(() => { });
         }
       }
@@ -3074,7 +3048,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
       const { content } = await agentLoop(`
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
-When reporting open positions, use derived bin range state (range_side from active/lower/upper bins) as the range truth when available. If in_range says true but range_side is above_range or below_range, explicitly report an API/derived range mismatch and do not describe the position as simply healthy in range.
+When reporting open positions, use effective derived bin range state (range_side from fresh active/lower/upper bins) as the range truth when available. If in_range says true but range_side is above_range or below_range, explicitly report API lag telemetry and do not describe the position as simply healthy in range.
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, null, {
         onToolStart: async ({ name }) => { await startupLiveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await startupLiveMessage?.toolFinish(name, result, success); },

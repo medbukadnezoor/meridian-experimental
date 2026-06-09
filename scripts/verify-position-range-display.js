@@ -14,8 +14,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const indexPath = path.join(ROOT, "index.js");
 const toolDefinitionsPath = path.join(ROOT, "tools", "definitions.js");
+const rangeStatePath = path.join(ROOT, "range-state.js");
 const source = fs.readFileSync(indexPath, "utf8");
 const toolDefinitions = fs.readFileSync(toolDefinitionsPath, "utf8");
+const rangeStateSource = fs.readFileSync(rangeStatePath, "utf8");
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -64,10 +66,12 @@ const telegramPoolBlock = sliceBetween(source, "const poolMatch = text.match", "
 const startupReportBlock = sliceBetween(source, "if (positions.total_positions > 0) {", "console.log(`Top pools");
 const cliStatusBlock = sliceBetween(source, "if (input === \"/status\")", "if (input === \"/briefing\")");
 
-assert(displayStateHelper.includes("position.derivedRangeSide ?? position.derived_range_side ?? position.range_side"), "display helper must prefer already-derived range fields");
-assert(displayStateHelper.includes("deriveRangeSide({"), "display helper must derive from bins when no derived range field exists");
-assert(displayStateHelper.includes("sourceInRange !== derivedInRange"), "display helper must compare API/source and derived range state");
-assert(formatHelper.includes("API lag:"), "format helper must explicitly label API/derived mismatch as API lag telemetry");
+assert(source.includes("buildEffectiveRangeStateFromPosition"), "index display helper must use shared effective range-state helper");
+assert(rangeStateSource.includes("position.range_side ?? position.derivedRangeSide ?? position.derived_range_side"), "shared helper must prefer already-derived range fields");
+assert(rangeStateSource.includes("deriveRangeSide({"), "shared helper must derive from bins when no derived range field exists");
+assert(rangeStateSource.includes("sourceInRange !== derivedInRange"), "shared helper must compare API/source and derived range state");
+assert(rangeStateSource.includes("isLiveBinSource(active_bin_source)"), "shared helper must require live active-bin provenance");
+assert(formatHelper.includes("API lag:"), "format helper must explicitly label source/derived disagreement as API lag telemetry");
 assert(formatHelper.includes("API: IN") && formatHelper.includes("API: OOR"), "format helper must preserve source/API state when mismatched");
 
 for (const [name, block] of [
@@ -107,9 +111,9 @@ assert(countOccurrences(source, "function buildPositionDisplayRangeState") === 1
 assert(countOccurrences(source, "buildPositionDisplayRangeState(") === 2, "display state helper should only be defined and used by the formatter");
 assert(countOccurrences(source, "function formatPositionRangeLabel") === 1, "display formatter should have one definition");
 assert(countOccurrences(source, "formatPositionRangeLabel(") === 6, "display formatter should only be defined plus five operator-facing display uses");
-assert(source.includes("If in_range says true but range_side is above_range or below_range"), "startup prompt must warn about API/derived range mismatch");
-assert(toolDefinitions.includes("source/API in-range boolean plus derived bin range state"), "get_my_positions tool description must expose source/API vs derived range state");
-assert(toolDefinitions.includes("API/derived range mismatch"), "get_my_positions tool description must tell LLM to report mismatches");
+assert(source.includes("If in_range says true but range_side is above_range or below_range"), "startup prompt must warn about API lag telemetry");
+assert(toolDefinitions.includes("source/API in-range boolean plus effective derived bin range state"), "get_my_positions tool description must expose source/API vs effective derived range state");
+assert(toolDefinitions.includes("API lag telemetry"), "get_my_positions tool description must tell LLM to report API lag telemetry");
 
 console.log(JSON.stringify({
   success: true,
