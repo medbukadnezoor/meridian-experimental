@@ -56,6 +56,7 @@ const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const MOMENTUM_SCORE_V1_VERIFIER_PATH = join(__dirname, "verify-momentum-score-v1.js");
+const ATH_PULLBACK_BAND_VERIFIER_PATH = join(__dirname, "verify-ath-pullback-band.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
@@ -673,6 +674,10 @@ function runMomentumScoreV1Proof() {
   return runJsonVerifier(MOMENTUM_SCORE_V1_VERIFIER_PATH, "verify-momentum-score-v1");
 }
 
+function runAthPullbackBandProof() {
+  return runJsonVerifier(ATH_PULLBACK_BAND_VERIFIER_PATH, "verify-ath-pullback-band");
+}
+
 function runTargetPoolNeedleVetoProof() {
   const result = spawnSync(process.execPath, [TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH], {
     cwd: ROOT,
@@ -765,6 +770,7 @@ function buildChecks() {
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
   const twoLaneGateProof = runTwoLaneGateProof();
   const momentumScoreV1Proof = runMomentumScoreV1Proof();
+  const athPullbackBandProof = runAthPullbackBandProof();
   const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
   const rpcPressureGuardProof = runRpcPressureGuardProof();
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
@@ -840,6 +846,18 @@ function buildChecks() {
         momentumScoreV1Proof?.checks?.includes("filter acceptance parity") &&
         momentumScoreV1Proof?.checks?.includes("ranking parity") &&
         momentumScoreV1Proof?.checks?.includes("no deploy/close/sizing/cooldown consumers"),
+    },
+    {
+      file: "scripts/verify-ath-pullback-band.js",
+      label: "[ATH pullback band] leading entry filter accepts controlled pullbacks and rejects close-to-ATH/deep-collapse candidates",
+      test: () =>
+        athPullbackBandProof?.success === true &&
+        Number(athPullbackBandProof?.band?.minPriceVsAthPct) === 55 &&
+        Number(athPullbackBandProof?.band?.maxPriceVsAthPct) === 85 &&
+        athPullbackBandProof?.band?.tooCloseReason === "too_close_to_ath" &&
+        athPullbackBandProof?.band?.deepCollapseReason === "too_far_below_ath" &&
+        athPullbackBandProof?.checks?.includes("runtime screening and GMGN config mapping") &&
+        athPullbackBandProof?.checks?.includes("screening and GMGN share ATH band helper"),
     },
     {
       file: "scripts/verify-scout-fee-velocity-live-canary.js",

@@ -35,6 +35,7 @@ import {
   computeVolumeActiveTvlMultiple,
   estimateFeeVelocityUsdPerMin,
 } from "../strategy-library.js";
+import { evaluateAthPullbackBand } from "../ath-pullback-band.js";
 import {
   fetchTopMeteoraDlmmPoolsForMint as fetchSharedMeteoraDlmmPoolsForMint,
   pickBestMeteoraDlmmPool,
@@ -369,9 +370,9 @@ function analyzeTokenInfo(info = {}) {
   const price = num(info.price);
   const athPrice = num(info.ath_price);
   const priceVsAthPct = athPrice > 0 && price > 0 ? (price / athPrice) * 100 : null;
-  if (g.athFilterPct != null && priceVsAthPct != null) {
-    const threshold = 100 + Number(g.athFilterPct);
-    if (priceVsAthPct > threshold) reasons.push(`price ${priceVsAthPct.toFixed(1)}% of ATH > ${threshold}%`);
+  const athBand = evaluateAthPullbackBand(priceVsAthPct, g);
+  if (!athBand.accepted) {
+    reasons.push(`price ${athBand.message}`);
   }
   const totalFeeSol = num(info.total_fee);
   if (num(info.holder_count) < g.minHolders) reasons.push(`holders ${num(info.holder_count)} < ${g.minHolders}`);
