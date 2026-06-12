@@ -13,7 +13,7 @@ import { dirname, join } from "path";
 import { pathToFileURL, fileURLToPath } from "url";
 
 process.env.LOG_LEVEL = "error";
-delete process.env.BIRDEYE_API_KEY;
+process.env.BIRDEYE_API_KEY = "synthetic-birdeye-key-must-not-be-used";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -254,7 +254,7 @@ async function main() {
     assert(combinedRows.every((row) => row.event === "ohlcv_drawdown_shadow"), "rows should use OHLCV shadow event");
     assert(combinedRows.every((row) => row.shadowOnly === true), "rows must be shadow-only");
     assert(combinedRows.every((row) => row.source === "ohlcv-drawdown-shadow"), "rows should identify source module");
-    assert(combinedRows.every((row) => ["meteora_dlmm", "gmgn_kline", "birdeye"].includes(row.ohlcv?.source)), "rows should carry OHLCV source");
+    assert(combinedRows.every((row) => ["meteora_dlmm", "gmgn_kline"].includes(row.ohlcv?.source)), "rows should carry non-Birdeye OHLCV source");
     assert(combinedRows.every((row) => row.rule?.entryDrawdownPct === -20), "rows should carry configured thresholds");
     assert(combinedMarked === true, "combined rows should mark only after append succeeds");
     assert(combinedRepeatRows.length === 0, "combined rules should dedupe after append/mark");
@@ -279,11 +279,11 @@ async function main() {
     tempDirRemoved = !fs.existsSync(tempDir);
 
     // ── Provider normalizer proof ─────────────────────────────────────────────
+    const providerTestApi = (await import(pathToFileURL(join(ROOT, "ohlcv-drawdown-shadow.js")).href)).__test;
     const {
-      normalizeBirdeyeRows,
       normalizeMeteoraRows,
       normalizeGmgnRows,
-    } = (await import(pathToFileURL(join(ROOT, "ohlcv-drawdown-shadow.js")).href)).__test;
+    } = providerTestApi;
     const meteoraRows = normalizeMeteoraRows({
       data: [
         { timestamp: 1000, timestamp_str: "1970-01-01T00:16:40.000Z", open: 100, high: 110, low: 95, close: 105, volume: 500 },
@@ -308,26 +308,7 @@ async function main() {
     assert(gmgnRows[0].timestamp === 1_000_000_000, "gmgn normalizer should convert millisecond timestamps");
     assert(gmgnRows[0].open === 100, "gmgn normalizer should parse numeric strings");
 
-    const birdeyePayload = {
-      data: {
-        items: [
-          { unix_time: 1000, o: 100, h: 110, l: 95, c: 105, v: 500, v_usd: 500 },
-          { unix_time: 1060, o: 105, h: 108, l: 70, c: 76, v: 1400, v_usd: 1400 },
-          { unix_time: null, o: 1, h: 2, l: 0.5, c: null, v: 10, v_usd: 10 },
-        ],
-      },
-      success: true,
-    };
-    const birdeyeRows = normalizeBirdeyeRows(birdeyePayload);
-    assert(birdeyeRows.length === 2, "birdeye normalizer should filter null close/timestamp");
-    assert(birdeyeRows[0].timestamp === 1000, "birdeye normalizer should map unix_time → timestamp");
-    assert(birdeyeRows[0].open === 100, "birdeye normalizer should map o → open");
-    assert(birdeyeRows[0].high === 110, "birdeye normalizer should map h → high");
-    assert(birdeyeRows[0].low === 95, "birdeye normalizer should map l → low");
-    assert(birdeyeRows[0].close === 105, "birdeye normalizer should map c → close");
-    assert(birdeyeRows[0].volumeUsd === 500, "birdeye normalizer should map v_usd → volumeUsd");
-    assert(typeof birdeyeRows[0].iso === "string", "birdeye normalizer should produce ISO string");
-    assert(birdeyeRows[1].timestamp === 1060, "birdeye rows should sort ascending");
+    assert(!("normalizeBirdeyeRows" in providerTestApi), "Birdeye normalizer must not be exported from live OHLCV module");
     const providerNormalizersOk = true;
 
     const summary = {
