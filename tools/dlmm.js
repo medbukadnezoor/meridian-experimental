@@ -16,6 +16,7 @@ import {
   recordClaim,
   recordClose,
   getTrackedPosition,
+  getTrackedPositions,
   minutesOutOfRange,
   reconcileGhostPositions,
   syncOpenPositions,
@@ -42,6 +43,7 @@ import {
   withRpcPriority,
 } from "./rpc.js";
 import { buildEffectiveRangeState } from "../range-state.js";
+import { computeRpcPositions, recordRpcPnlShadowComparison } from "./rpc-pnl.js";
 
 // ─── Lazy SDK loader ───────────────────────────────────────────
 // @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
@@ -2012,6 +2014,31 @@ async function buildFilteredPositionsResult(walletAddress, positions, sourceLabe
   };
 }
 
+function isRpcPnlSource(source) {
+  return String(source || "legacy").toLowerCase() === "rpc";
+}
+
+function isRpcPnlShadowSource(source) {
+  return String(source || "legacy").toLowerCase() === "shadow";
+}
+
+function rpcResultHasDegradedRows(result) {
+  return (result?.positions || []).some((position) =>
+    position?.pnl_confidence !== "trusted" || position?.pnl_pct_suspicious === true
+  );
+}
+
+function maybeRecordRpcPnlShadowComparison(walletAddress, legacyResult, { silent = false } = {}) {
+  if (!isRpcPnlShadowSource(config.pnl?.source)) return;
+  recordRpcPnlShadowComparison(walletAddress, legacyResult)
+    .then((shadow) => {
+      if (!silent) {
+        log("rpc_pnl", `Shadow comparison wrote ${shadow.rows} row(s) to ${shadow.file}`);
+      }
+    })
+    .catch((error) => log("rpc_pnl_warn", `Shadow comparison failed: ${error.message}`));
+}
+
 // ─── Get My Positions ──────────────────────────────────────────
 export async function getMyPositions({ force = false, silent = false } = {}) {
   if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
@@ -2027,6 +2054,30 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
   }
 
   _positionsInflight = (async () => { try {
+    if (isRpcPnlSource(config.pnl?.source)) {
+      try {
+        if (!silent) log("positions", `Computing open positions via RPC PnL (${config.pnl.rpcUrl})...`);
+        const rpcResult = await computeRpcPositions(walletAddress);
+        const trackedOpenCount = getTrackedPositions(true).length;
+        if (rpcResult.positions.length === 0 && trackedOpenCount > 0) {
+          throw new Error("RPC PnL returned zero positions while tracked positions are open");
+        }
+        if (rpcResultHasDegradedRows(rpcResult)) {
+          throw new Error("RPC PnL returned degraded authoritative rows");
+        }
+        const result = {
+          ...(await buildFilteredPositionsResult(walletAddress, rpcResult.positions, "RPC PnL")),
+          source: "rpc",
+          complete: rpcResult.complete === true,
+        };
+        _positionsCache = result;
+        _positionsCacheAt = Date.now();
+        return result;
+      } catch (error) {
+        log("positions_warn", `RPC PnL source unavailable; falling back to legacy positions: ${error.message}`);
+      }
+    }
+
     let relayLpAgentByPosition = null;
     let relayRequestId = null;
     if (shouldUseLpAgentRelay()) {
@@ -2142,6 +2193,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
             request_id: relayRequestId,
           };
           _positionsCacheAt = Date.now();
+          maybeRecordRpcPnlShadowComparison(walletAddress, _positionsCache, { silent });
           return _positionsCache;
         }
         log("positions_warn", `${sourceLabel}: 0 positions returned — falling through to Meteora portfolio`);
@@ -2328,6 +2380,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
     };
     _positionsCache = result;
     _positionsCacheAt = Date.now();
+    maybeRecordRpcPnlShadowComparison(walletAddress, result, { silent });
     return result;
   } catch (error) {
     log("positions_error", `Portfolio fetch failed: ${error.stack || error.message}`);
