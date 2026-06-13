@@ -2056,7 +2056,7 @@ export async function getMyPositions({ force = false, silent = false } = {}) {
   _positionsInflight = (async () => { try {
     if (isRpcPnlSource(config.pnl?.source)) {
       try {
-        if (!silent) log("positions", `Computing open positions via RPC PnL (${config.pnl.rpcUrl})...`);
+        if (!silent) log("positions", `Computing open positions via RPC PnL (${config.pnl.rpcUrl ? "configured" : "default"})...`);
         const rpcResult = await computeRpcPositions(walletAddress);
         const trackedOpenCount = getTrackedPositions(true).length;
         if (rpcResult.positions.length === 0 && trackedOpenCount > 0) {
