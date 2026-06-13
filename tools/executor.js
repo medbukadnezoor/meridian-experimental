@@ -242,6 +242,11 @@ const toolMap = {
       managementIntervalMin: ["schedule", "managementIntervalMin"],
       screeningIntervalMin: ["schedule", "screeningIntervalMin"],
       healthCheckIntervalMin: ["schedule", "healthCheckIntervalMin"],
+      pnlPollIntervalMs: ["schedule", "pnlPollIntervalMs"],
+      // pnl source
+      pnlSource: ["pnl", "source"],
+      pnlRpcUrl: ["pnl", "rpcUrl"],
+      pnlDepositCacheTtlSec: ["pnl", "depositCacheTtlSec"],
       // performance outcome classification
       materialWinPct: ["performance", "materialWinPct"],
       materialLossPct: ["performance", "materialLossPct"],
@@ -301,17 +306,19 @@ const toolMap = {
     fs.writeFileSync(USER_CONFIG_PATH, JSON.stringify(userConfig, null, 2));
 
     // Restart cron jobs if intervals changed
-    const intervalChanged = applied.managementIntervalMin != null || applied.screeningIntervalMin != null;
+    const intervalChanged = applied.managementIntervalMin != null ||
+      applied.screeningIntervalMin != null ||
+      applied.pnlPollIntervalMs != null;
     if (intervalChanged && _cronRestarter) {
       _cronRestarter();
-      log("config", `Cron restarted — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m`);
+      log("config", `Cron reloaded — management: ${config.schedule.managementIntervalMin}m, screening: ${config.schedule.screeningIntervalMin}m, pnlPoll: ${config.schedule.pnlPollIntervalMs}ms`);
     }
 
     // Save as a lesson — but skip ephemeral per-deploy interval changes
     // (managementIntervalMin / screeningIntervalMin change every deploy based on volatility;
     //  the rule is already in the system prompt, storing it 75+ times is pure noise)
     const lessonsKeys = Object.keys(applied).filter(
-      k => k !== "managementIntervalMin" && k !== "screeningIntervalMin"
+      k => k !== "managementIntervalMin" && k !== "screeningIntervalMin" && k !== "pnlPollIntervalMs"
     );
     if (lessonsKeys.length > 0) {
       const summary = lessonsKeys.map(k => `${k}=${applied[k]}`).join(", ");

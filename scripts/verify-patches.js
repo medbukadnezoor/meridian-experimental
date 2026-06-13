@@ -59,6 +59,8 @@ const MOMENTUM_SCORE_V1_VERIFIER_PATH = join(__dirname, "verify-momentum-score-v
 const ATH_PULLBACK_BAND_VERIFIER_PATH = join(__dirname, "verify-ath-pullback-band.js");
 const TARGET_POOL_NEEDLE_VETO_VERIFIER_PATH = join(__dirname, "verify-target-pool-needle-veto.js");
 const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-guard.js");
+const RPC_PNL_POLLER_VERIFIER_PATH = join(__dirname, "verify-rpc-pnl-poller.js");
+const DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH = join(__dirname, "verify-direct-close-inflight-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
 const POSITION_RANGE_DISPLAY_VERIFIER_PATH = join(__dirname, "verify-position-range-display.js");
 const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-range-state-telemetry.js");
@@ -710,6 +712,38 @@ function runRpcPressureGuardProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRpcPnlPollerProof() {
+  const result = spawnSync(process.execPath, [RPC_PNL_POLLER_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-rpc-pnl-poller failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
+function runDirectCloseInflightGuardProof() {
+  const result = spawnSync(process.execPath, [DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-direct-close-inflight-guard failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function runEvilPandaFeeDumpProof() {
   const result = spawnSync(process.execPath, [EVIL_PANDA_FEE_DUMP_VERIFIER_PATH], {
     cwd: ROOT,
@@ -773,6 +807,8 @@ function buildChecks() {
   const athPullbackBandProof = runAthPullbackBandProof();
   const targetPoolNeedleVetoProof = runTargetPoolNeedleVetoProof();
   const rpcPressureGuardProof = runRpcPressureGuardProof();
+  const rpcPnlPollerProof = runRpcPnlPollerProof();
+  const directCloseInflightGuardProof = runDirectCloseInflightGuardProof();
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
 
   return [
@@ -814,6 +850,24 @@ function buildChecks() {
         Number(rpcPressureGuardProof?.urgentRead?.urgentQueuedMs) < 250 &&
         Array.isArray(rpcPressureGuardProof?.urgentSend?.order) &&
         rpcPressureGuardProof.urgentSend.order.join(",") === "initial_send,urgent_close_send,deploy_send",
+    },
+    {
+      file: "scripts/verify-rpc-pnl-poller.js",
+      label: "[RPC PnL poller] shadow-first 3s adapter, suspicious-data guards, and legacy fallback wiring pass",
+      test: () =>
+        rpcPnlPollerProof?.success === true &&
+        rpcPnlPollerProof?.checks?.includes("RPC adapter uses shared priority RPC") &&
+        rpcPnlPollerProof?.checks?.includes("shadow mode writes append-only comparison evidence") &&
+        rpcPnlPollerProof?.checks?.includes("RPC primary falls back on degraded or false-zero results") &&
+        rpcPnlPollerProof?.checks?.includes("deterministic close rules honor suspicious PnL"),
+    },
+    {
+      file: "scripts/verify-direct-close-inflight-guard.js",
+      label: "[Direct close guard] all direct close paths route through one per-position in-flight guard",
+      test: () =>
+        directCloseInflightGuardProof?.success === true &&
+        directCloseInflightGuardProof?.checks?.includes("all index.js close_position calls route through guarded helper") &&
+        directCloseInflightGuardProof?.checks?.includes("fresh duplicate close attempts are skipped"),
     },
     {
       file: "scripts/verify-two-lane-gate.js",

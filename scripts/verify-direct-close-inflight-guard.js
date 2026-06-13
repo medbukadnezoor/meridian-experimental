@@ -28,16 +28,16 @@ assert.ok(
   "PnL poll direct close branches should continue scanning when a duplicate close is skipped",
 );
 assert.ok(
-  source.includes("source: \"PnL poll direct TP\"") &&
-    source.includes("source: \"PnL poll stop-loss\"") &&
+  source.includes("source: \"PnL poll stop-loss\"") &&
     source.includes("source: \"PnL poll deterministic stop-loss\"") &&
-    source.includes("source: \"PnL poll trailing TP\""),
-  "PnL poll TP/SL/trailing direct branches should use startDirectCloseWithGuard",
+    source.includes("closeEmergencyDirect(p, supertrendExit, \"PnL poll Supertrend loss\")") &&
+    source.includes("closeEmergencyDirect(p, {\n                  action: \"MAX_HOLD\""),
+  "PnL poll direct close branches should use guarded helpers",
 );
 assert.ok(
   source.includes("source: \"Stop loss confirmed\"") &&
-    source.includes("source: \"Trailing recheck\"") &&
-    source.includes("source: \"Management cycle OOR reposition\""),
+    source.includes("source: \"Management cycle OOR reposition\"") &&
+    source.includes("source: `${source} fee-exit`"),
   "timer and management direct close branches should use run/start guard helpers",
 );
 assert.ok(

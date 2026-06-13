@@ -13,6 +13,7 @@ export function normalizeOptionalString(value) {
 
 const SCREENING_REASONING_EFFORTS = new Set(["low", "medium", "high"]);
 const SCREENING_SOURCES = new Set(["meteora", "gmgn", "okx", "both", "all", "gmgn+okx", "meteora+okx"]);
+const PNL_SOURCES = new Set(["legacy", "rpc", "shadow"]);
 
 export function normalizeScreeningReasoningEffort(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
@@ -44,6 +45,11 @@ function normalizeNullableNumber(value, fallback = null) {
 export function normalizeScreeningSource(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
+}
+
+function normalizePnlSource(value) {
+  const normalized = normalizeOptionalString(value)?.toLowerCase();
+  return PNL_SOURCES.has(normalized) ? normalized : "legacy";
 }
 
 function buildOkxDiscoveryConfig(userConfig = {}) {
@@ -380,6 +386,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       preferredKolMinHoldPct: configValue(g, "preferredKolMinHoldPct", u, "gmgnPreferredKolMinHoldPct", 1),
       dumpKolNames: configArray(g, "dumpKolNames", u, "gmgnDumpKolNames", []),
       dumpKolMinHoldPct: configValue(g, "dumpKolMinHoldPct", u, "gmgnDumpKolMinHoldPct", 0.5),
+    },
+
+    pnl: {
+      source: normalizePnlSource(u.pnl?.source ?? u.pnlSource),
+      rpcUrl: firstNonEmptyString(u.pnl?.rpcUrl, u.pnlRpcUrl, "https://pump.helius-rpc.com") ?? "https://pump.helius-rpc.com",
+      depositCacheTtlSec: normalizePositiveInteger(u.pnl?.depositCacheTtlSec ?? u.pnlDepositCacheTtlSec, 300),
     },
 
     management: {
