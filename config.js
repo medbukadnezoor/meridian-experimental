@@ -128,6 +128,14 @@ export function reloadScreeningThresholds() {
         ? freshScreening.targetPoolNeedleVetoLiveReasonCodes
         : fresh.targetPoolNeedleVetoLiveReasonCodes;
     }
+    if (freshScreening.fabriqOhlcvEntryGateEnabled !== undefined || fresh.fabriqOhlcvEntryGateEnabled !== undefined) s.fabriqOhlcvEntryGateEnabled = freshScreening.fabriqOhlcvEntryGateEnabled ?? fresh.fabriqOhlcvEntryGateEnabled;
+    if (freshScreening.fabriqOhlcvEntryGateMode !== undefined || fresh.fabriqOhlcvEntryGateMode !== undefined) s.fabriqOhlcvEntryGateMode = freshScreening.fabriqOhlcvEntryGateMode ?? fresh.fabriqOhlcvEntryGateMode;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateProviders) || Array.isArray(fresh.fabriqOhlcvEntryGateProviders)) s.fabriqOhlcvEntryGateProviders = Array.isArray(freshScreening.fabriqOhlcvEntryGateProviders) ? freshScreening.fabriqOhlcvEntryGateProviders : fresh.fabriqOhlcvEntryGateProviders;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder) || Array.isArray(fresh.fabriqOhlcvEntryGateDecisiveProviderOrder)) s.fabriqOhlcvEntryGateDecisiveProviderOrder = Array.isArray(freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder) ? freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder : fresh.fabriqOhlcvEntryGateDecisiveProviderOrder;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateIntervals) || Array.isArray(fresh.fabriqOhlcvEntryGateIntervals)) s.fabriqOhlcvEntryGateIntervals = Array.isArray(freshScreening.fabriqOhlcvEntryGateIntervals) ? freshScreening.fabriqOhlcvEntryGateIntervals : fresh.fabriqOhlcvEntryGateIntervals;
+    if (freshScreening.fabriqOhlcvEntryGateLookbackMinutes !== undefined || fresh.fabriqOhlcvEntryGateLookbackMinutes !== undefined) s.fabriqOhlcvEntryGateLookbackMinutes = freshScreening.fabriqOhlcvEntryGateLookbackMinutes ?? fresh.fabriqOhlcvEntryGateLookbackMinutes;
+    if (freshScreening.fabriqOhlcvEntryGateMinRows !== undefined || fresh.fabriqOhlcvEntryGateMinRows !== undefined) s.fabriqOhlcvEntryGateMinRows = freshScreening.fabriqOhlcvEntryGateMinRows ?? fresh.fabriqOhlcvEntryGateMinRows;
+    if (freshScreening.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== undefined || fresh.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== undefined) s.fabriqOhlcvEntryGateBlockOnMissingOhlcv = freshScreening.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? fresh.fabriqOhlcvEntryGateBlockOnMissingOhlcv;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;

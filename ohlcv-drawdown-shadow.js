@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 const METEORA_DLMM_POOL_OHLCV = "https://dlmm.datapi.meteora.ag/pools";
 const GMGN_TOKEN_KLINE = "https://openapi.gmgn.ai/v1/market/token_kline";
+const DEXPAPRIKA_POOL_OHLCV = "https://api.dexpaprika.com/networks/solana/pools";
 const GECKOTERMINAL_SOLANA_POOL_OHLCV = "https://api.geckoterminal.com/api/v2/networks/solana/pools";
 const CACHE_TTL_MS = 60_000;
 const CACHE_BUCKET_SEC = 60;
@@ -13,6 +14,7 @@ const ohlcvCache = new Map();
 const providerBackoff = {
   meteora: { until: 0 },
   gmgn: { until: 0 },
+  dexpaprika: { until: 0 },
   geckoterminal: { until: 0 },
 };
 
@@ -109,6 +111,39 @@ function normalizeGmgnRows(payload) {
         low: finiteNumberOrNull(item?.low ?? item?.l),
         close: finiteNumberOrNull(item?.close ?? item?.c),
         volumeUsd: finiteNumberOrNull(item?.volume ?? item?.v_usd ?? item?.volume_usd ?? item?.v),
+      };
+    })
+    .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function normalizeDexPaprikaRows(payload) {
+  const raw = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.results)
+        ? payload.results
+        : [];
+  return raw
+    .map((item) => {
+      const rawTime = item?.time_close ?? item?.time_open ?? item?.timestamp ?? item?.time ?? item?.t;
+      const parsedTime = typeof rawTime === "string" && rawTime
+        ? Date.parse(rawTime)
+        : finiteNumberOrNull(rawTime);
+      const timestamp = parsedTime == null
+        ? null
+        : parsedTime > 10_000_000_000
+          ? Math.floor(parsedTime / 1000)
+          : Math.floor(parsedTime);
+      return {
+        timestamp,
+        iso: timestamp != null ? new Date(timestamp * 1000).toISOString() : null,
+        open: finiteNumberOrNull(item?.open ?? item?.o),
+        high: finiteNumberOrNull(item?.high ?? item?.h),
+        low: finiteNumberOrNull(item?.low ?? item?.l),
+        close: finiteNumberOrNull(item?.close ?? item?.c),
+        volumeUsd: finiteNumberOrNull(item?.volume_usd ?? item?.volumeUsd ?? item?.volume ?? item?.v),
       };
     })
     .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
@@ -225,6 +260,52 @@ async function fetchGmgnKlineOhlcv(tokenMint, { aggregateMin = 1, beforeTimestam
   }
 }
 
+async function fetchDexPaprikaPoolOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
+  if (!pool) return null;
+  if (Date.now() < providerBackoff.dexpaprika.until) return null;
+
+  const aggregate = clampAggregate(aggregateMin);
+  const endTime = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
+  const requestedLookbackSec = Math.max(1, Number(lookbackMinutes) || 60) * 60;
+  const startTime = endTime - requestedLookbackSec;
+  const cacheKey = `dexpaprika:${pool}:${aggregate}:${Math.floor(endTime / CACHE_BUCKET_SEC)}`;
+  const cached = ohlcvCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
+
+  const url = new URL(`${DEXPAPRIKA_POOL_OHLCV}/${pool}/ohlcv`);
+  url.searchParams.set("start", new Date(startTime * 1000).toISOString());
+  url.searchParams.set("end", new Date(endTime * 1000).toISOString());
+  url.searchParams.set("interval", `${aggregate}m`);
+  url.searchParams.set("limit", "366");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (res.status === 429) {
+      providerBackoff.dexpaprika.until = Date.now() + BACKOFF_DURATION_MS;
+      return null;
+    }
+    const text = await res.text();
+    if (!res.ok) throw new Error(`DexPaprika OHLCV ${res.status}: ${text.slice(0, 160)}`);
+    const payload = JSON.parse(text);
+    const value = {
+      source: "dexpaprika",
+      url: url.toString(),
+      aggregateMin: aggregate,
+      rows: normalizeDexPaprikaRows(payload),
+      meta: null,
+    };
+    ohlcvCache.set(cacheKey, { cachedAt: Date.now(), value });
+    return value;
+  } catch (err) {
+    if (err?.name === "AbortError") return null;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
   const aggregate = clampAggregate(aggregateMin);
   const before = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
@@ -268,17 +349,41 @@ async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp
   }
 }
 
-export async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
+function hasEnoughRows(ohlcv, minRows) {
+  return ohlcv && Array.isArray(ohlcv.rows) && ohlcv.rows.length >= minRows;
+}
+
+function betterOhlcv(current, candidate) {
+  if (!candidate?.rows?.length) return current;
+  if (!current?.rows?.length) return candidate;
+  return candidate.rows.length > current.rows.length ? candidate : current;
+}
+
+export async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60, minRows = 1 } = {}) {
   const opts = { aggregateMin, beforeTimestamp, lookbackMinutes };
+  const requiredRows = Math.max(1, Math.trunc(Number(minRows) || 1));
+  let best = null;
   if (pool) {
     const meteora = await fetchMeteoraDlmmPoolOhlcv(pool, opts);
-    if (meteora && meteora.rows.length > 0) return meteora;
+    if (hasEnoughRows(meteora, requiredRows)) return meteora;
+    best = betterOhlcv(best, meteora);
   }
   if (tokenMint && process.env.GMGN_API_KEY) {
     const gmgn = await fetchGmgnKlineOhlcv(tokenMint, opts);
-    if (gmgn && gmgn.rows.length > 0) return gmgn;
+    if (hasEnoughRows(gmgn, requiredRows)) return gmgn;
+    best = betterOhlcv(best, gmgn);
   }
-  return null;
+  if (pool) {
+    const dexpaprika = await fetchDexPaprikaPoolOhlcv(pool, opts);
+    if (hasEnoughRows(dexpaprika, requiredRows)) return dexpaprika;
+    best = betterOhlcv(best, dexpaprika);
+    if (clampAggregate(aggregateMin) !== 1) {
+      const dexpaprikaOneMinute = await fetchDexPaprikaPoolOhlcv(pool, { ...opts, aggregateMin: 1 });
+      if (hasEnoughRows(dexpaprikaOneMinute, requiredRows)) return dexpaprikaOneMinute;
+      best = betterOhlcv(best, dexpaprikaOneMinute);
+    }
+  }
+  return best;
 }
 
 async function fetchTargetPoolOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
@@ -548,8 +653,10 @@ export const __test = {
   normalizeRows,
   normalizeMeteoraRows,
   normalizeGmgnRows,
+  normalizeDexPaprikaRows,
   fetchMeteoraDlmmPoolOhlcv,
   fetchGmgnKlineOhlcv,
+  fetchDexPaprikaPoolOhlcv,
   fetchOhlcv,
   fetchTargetPoolOhlcv,
   getTargetPoolOhlcvEvidence,

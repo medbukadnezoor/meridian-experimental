@@ -309,6 +309,26 @@ export function buildConfig(userConfig = {}, env = process.env) {
         : Array.isArray(u.targetPoolNeedleVetoLiveReasonCodes)
         ? u.targetPoolNeedleVetoLiveReasonCodes
         : ["target_pool_high_needle_retrace"],
+      fabriqOhlcvEntryGateEnabled: s.fabriqOhlcvEntryGateEnabled ?? u.fabriqOhlcvEntryGateEnabled ?? false,
+      fabriqOhlcvEntryGateMode: s.fabriqOhlcvEntryGateMode ?? u.fabriqOhlcvEntryGateMode ?? "shadow",
+      fabriqOhlcvEntryGateProviders: Array.isArray(s.fabriqOhlcvEntryGateProviders)
+        ? s.fabriqOhlcvEntryGateProviders
+        : Array.isArray(u.fabriqOhlcvEntryGateProviders)
+          ? u.fabriqOhlcvEntryGateProviders
+          : ["dexpaprika", "gmgn", "okx"],
+      fabriqOhlcvEntryGateDecisiveProviderOrder: Array.isArray(s.fabriqOhlcvEntryGateDecisiveProviderOrder)
+        ? s.fabriqOhlcvEntryGateDecisiveProviderOrder
+        : Array.isArray(u.fabriqOhlcvEntryGateDecisiveProviderOrder)
+          ? u.fabriqOhlcvEntryGateDecisiveProviderOrder
+          : ["dexpaprika", "gmgn", "okx"],
+      fabriqOhlcvEntryGateIntervals: Array.isArray(s.fabriqOhlcvEntryGateIntervals)
+        ? s.fabriqOhlcvEntryGateIntervals
+        : Array.isArray(u.fabriqOhlcvEntryGateIntervals)
+          ? u.fabriqOhlcvEntryGateIntervals
+          : ["1m", "5m", "15m"],
+      fabriqOhlcvEntryGateLookbackMinutes: s.fabriqOhlcvEntryGateLookbackMinutes ?? u.fabriqOhlcvEntryGateLookbackMinutes ?? 180,
+      fabriqOhlcvEntryGateMinRows: s.fabriqOhlcvEntryGateMinRows ?? u.fabriqOhlcvEntryGateMinRows ?? 20,
+      fabriqOhlcvEntryGateBlockOnMissingOhlcv: s.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? u.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? true,
       preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
       minOrganic: u.minOrganic ?? 60,
       minQuoteOrganic: u.minQuoteOrganic ?? 60,
@@ -490,6 +510,27 @@ export function buildConfig(userConfig = {}, env = process.env) {
       // Nanocap prompt canon is 35-90 bins below; keep live guard deterministic.
       minSingleSidedSolBins: u.minSingleSidedSolBins ?? (isNanocapPreset ? 35 : 5),
       minSingleSidedSolDownsidePct: u.minSingleSidedSolDownsidePct ?? (isNanocapPreset ? 1 : null),
+      dynamicRangeWidthEnabled: u.dynamicRangeWidthEnabled ?? false,
+      dynamicRangeWidthMode: u.dynamicRangeWidthMode ?? "shadow",
+      dynamicRangeWidthMinBins: u.dynamicRangeWidthMinBins ?? 35,
+      dynamicRangeWidthMaxBins: u.dynamicRangeWidthMaxBins ?? 120,
+      dynamicRangeWidthBlockOnMissingInputs: u.dynamicRangeWidthBlockOnMissingInputs ?? true,
+      dynamicRangeWidthMaxDeploySharePct: u.dynamicRangeWidthMaxDeploySharePct ?? 5,
+      dynamicRangeWidthLowerMcapInputFloor: u.dynamicRangeWidthLowerMcapInputFloor ?? 1_200_000,
+      dynamicRangeWidthTiers: u.dynamicRangeWidthTiers ?? [
+        { minMcap: 400_000, maxMcap: 500_000, targetDownsidePct: 60 },
+        { minMcap: 500_000, maxMcap: 800_000, targetDownsidePct: 58 },
+        { minMcap: 800_000, maxMcap: 1_200_000, targetDownsidePct: 55 },
+        { minMcap: 1_200_000, maxMcap: null, targetDownsidePct: 35, maxTargetDownsidePct: 45 },
+      ],
+      dynamicPoolSizingEnabled: u.dynamicPoolSizingEnabled ?? false,
+      dynamicPoolSizingMode: u.dynamicPoolSizingMode ?? "shadow",
+      dynamicPoolSizingTargetActiveTvlSharePct: u.dynamicPoolSizingTargetActiveTvlSharePct ?? 3.5,
+      dynamicPoolSizingHardActiveTvlSharePct: u.dynamicPoolSizingHardActiveTvlSharePct ?? 5,
+      dynamicPoolSizingMinDeploySol: u.dynamicPoolSizingMinDeploySol ?? 1,
+      dynamicPoolSizingMaxDeploySol: u.dynamicPoolSizingMaxDeploySol ?? 5,
+      dynamicPoolSizingBlockBelowMin: u.dynamicPoolSizingBlockBelowMin ?? true,
+      dynamicPoolSizingBlockOnMissingInputs: u.dynamicPoolSizingBlockOnMissingInputs ?? true,
     },
 
     schedule: {

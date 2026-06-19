@@ -17,6 +17,7 @@ import {
   enrichFeeVelocityCandidate,
   estimateFeeVelocityUsdPerMin,
   getActiveStrategy,
+  normalizeCandidateEvidenceForDeploy,
   resolveStrategyRangePolicy,
 } from "../strategy-library.js";
 import {
@@ -33,6 +34,8 @@ import {
   appendMomentumScoreV1,
   attachMomentumScoreV1,
 } from "../momentum-score-v1.js";
+import { appendMainCandidateScreeningSnapshot } from "../main-candidate-shadow-log.js";
+import { buildCandidateShadowDataCollection } from "../shadow-data-collection.js";
 
 const DATAPI_JUP = "https://datapi.jup.ag/v1";
 
@@ -309,10 +312,21 @@ export function applyScoutTailLossShadowDecisions(candidates = [], screeningConf
 }
 
 function buildSourceEvidence(candidate = {}) {
+  const evidenceAsofTs = candidate.evidence_asof_ts ?? candidate.asof_ts ?? candidate.fetched_at ?? candidate.updated_at ?? candidate.observed_at ?? null;
+  const pool = candidatePoolAddress(candidate);
   return {
     source: candidate.source ?? candidate.discovery_source ?? null,
-    pool: candidatePoolAddress(candidate),
+    evidence_source: candidate.source ?? candidate.discovery_source ?? null,
+    evidence_asof_ts: evidenceAsofTs,
+    evidence_row_id: candidate.evidence_row_id ?? candidate.row_id ?? pool ?? null,
+    pool,
     base_mint: candidateBaseMint(candidate),
+    quote: candidate.quote ?? (candidate.quote_mint || candidate.quote_symbol ? {
+      mint: candidate.quote_mint ?? null,
+      symbol: candidate.quote_symbol ?? null,
+    } : null),
+    quote_mint: candidate.quote?.mint ?? candidate.quote_mint ?? candidate.token_y?.address ?? candidate.token_y_mint ?? null,
+    quote_symbol: candidate.quote?.symbol ?? candidate.quote_symbol ?? candidate.token_y?.symbol ?? null,
     name: candidate.name ?? null,
     active_tvl: candidate.active_tvl ?? candidate.tvl ?? null,
     volume_window: candidate.volume_window ?? candidate.volume ?? null,
@@ -397,7 +411,10 @@ function mergeCandidateSources(gmgnCandidate, meteoraCandidate, {
     if (gmgnCandidate.gmgn != null) merged.gmgn = gmgnCandidate.gmgn;
   }
 
-  return merged;
+  return normalizeCandidateEvidenceForDeploy(merged, {
+    decisionTs: merged.evidence_asof_ts ?? merged.asof_ts ?? merged.fetched_at ?? merged.updated_at ?? null,
+    sourceStage: "source_resolution",
+  });
 }
 
 function mergeMultiCandidateSources(sourceCandidates = {}, {
@@ -463,7 +480,10 @@ function mergeMultiCandidateSources(sourceCandidates = {}, {
     merged.okx_discovery = true;
   }
 
-  return merged;
+  return normalizeCandidateEvidenceForDeploy(merged, {
+    decisionTs: merged.evidence_asof_ts ?? merged.asof_ts ?? merged.fetched_at ?? merged.updated_at ?? null,
+    sourceStage: "source_resolution",
+  });
 }
 
 export function getVolatilityTimeframe(sourceTimeframe) {
@@ -986,8 +1006,12 @@ export function filterConfiguredPoolThresholds(pools = [], screeningConfig = {},
   for (const pool of pools) {
     const enrichedPool = attachTwoLaneClassification(
       attachMomentumScoreV1({
-        ...enrichFeeVelocityCandidate(pool, { screeningConfig, rangePolicy }),
         assumed_deploy_usd: finiteNumberOrNull(screeningConfig.dynamicEntryShadowAssumedDeployUsd),
+        ...enrichFeeVelocityCandidate(pool, {
+          screeningConfig,
+          rangePolicy,
+          assumedDeployUsd: finiteNumberOrNull(screeningConfig.dynamicEntryShadowAssumedDeployUsd),
+        }),
       }),
       screeningConfig,
     );
@@ -1963,6 +1987,18 @@ export async function getTopCandidates({ limit = 10 } = {}) {
   );
 
   const ranked = applyScoutTailLossShadowDecisions(rankedBeforeTailLoss, config.screening, { filteredOut });
+  appendMainCandidateScreeningSnapshot({
+    candidates: ranked,
+    filteredOut,
+    stageCounts: {
+      source,
+      ranked: totalScreened || pools.length,
+      ...(discovery.stage_counts || {}),
+      ...postDiscoveryStageCounts,
+    },
+    source: "screening.get_top_candidates",
+    timeframe: config.screening?.timeframe ?? null,
+  });
 
   return {
     candidates: ranked,
@@ -2112,6 +2148,10 @@ export function getCandidateSignalSnapshot(candidate = {}) {
     // GMGN-derived signals — populated when GMGN API is available
     gmgn_bluechip_present: c.gmgn_bluechip_present ?? null,
     gmgn_bundler_present:  c.gmgn_bundler_present  ?? null,
+    shadow_data_collection: buildCandidateShadowDataCollection(c, {
+      timeframe: config.screening?.timeframe ?? null,
+      stage: "pre_entry_candidate_snapshot",
+    }),
   };
 }
 
