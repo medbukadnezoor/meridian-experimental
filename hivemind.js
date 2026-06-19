@@ -77,6 +77,7 @@ function getApiKey() {
 
 function getPullMode() {
   const mode = sanitizeText(config.hiveMind?.pullMode || "auto", 20) || "auto";
+  if (mode === "disabled" || mode === "off" || mode === "false") return "disabled";
   return mode === "manual" ? "manual" : "auto";
 }
 
@@ -85,6 +86,7 @@ export function getHiveMindPullMode() {
 }
 
 export function isHiveMindEnabled() {
+  if (getPullMode() === "disabled") return false;
   return !!(getBaseUrl() && getApiKey());
 }
 
