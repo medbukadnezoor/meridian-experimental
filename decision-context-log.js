@@ -108,6 +108,7 @@ export function buildCandidateDecisionContext(candidate = {}) {
     expectedFeesUsd: safeNumber(candidate.dynamic_entry_shadow?.estimated_gross_fees_usd ?? candidate.momentum_score?.primary?.dynamic_entry_shadow?.estimated_gross_fees_usd),
     expectedNetFeesUsd: safeNumber(candidate.dynamic_entry_shadow?.estimated_net_fees_usd ?? candidate.momentum_score?.primary?.dynamic_entry_shadow?.estimated_net_fees_usd),
     breakevenHoldMinutes: safeNumber(candidate.dynamic_entry_shadow?.breakeven_hold_minutes ?? candidate.momentum_score?.primary?.dynamic_entry_shadow?.breakeven_hold_minutes),
+    dynamicRangeShadow: candidate.dynamic_range_shadow ?? candidate.fee_velocity_shadow?.dynamic_range_shadow ?? null,
     momentumScore: candidate.momentum_score ?? null,
     volumeWindow: safeNumber(candidate.volume_window ?? candidate.volume),
     volumeChangePct: safeNumber(candidate.volume_change_pct),

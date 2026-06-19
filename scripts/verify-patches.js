@@ -54,6 +54,10 @@ const SCOUT_GMGN_FIRST_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-g
 const SCOUT_DISCOVERY_SHADOW_VERIFIER_PATH = join(__dirname, "verify-scout-discovery-shadow.js");
 const SCOUT_DUAL_SOURCE_DISCOVERY_VERIFIER_PATH = join(__dirname, "verify-scout-dual-source-discovery.js");
 const SCOUT_FEE_VELOCITY_LIVE_CANARY_VERIFIER_PATH = join(__dirname, "verify-scout-fee-velocity-live-canary.js");
+const DYNAMIC_RANGE_SHADOW_VERIFIER_PATH = join(__dirname, "verify-dynamic-range-shadow.js");
+const DYNAMIC_RANGE_WIDTH_GUARD_VERIFIER_PATH = join(__dirname, "verify-dynamic-range-width-guard.js");
+const DYNAMIC_POOL_SIZING_VERIFIER_PATH = join(__dirname, "verify-dynamic-pool-sizing.js");
+const FABRIQ_OHLCV_ENTRY_GATE_VERIFIER_PATH = join(__dirname, "verify-fabriq-ohlcv-entry-gate.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const MOMENTUM_SCORE_V1_VERIFIER_PATH = join(__dirname, "verify-momentum-score-v1.js");
 const ATH_PULLBACK_BAND_VERIFIER_PATH = join(__dirname, "verify-ath-pullback-band.js");
@@ -62,9 +66,11 @@ const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-gu
 const RPC_PNL_POLLER_VERIFIER_PATH = join(__dirname, "verify-rpc-pnl-poller.js");
 const DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH = join(__dirname, "verify-direct-close-inflight-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
+const MAIN_CANDIDATE_SHADOW_COLLECTION_VERIFIER_PATH = join(__dirname, "verify-main-candidate-shadow-collection.js");
 const POSITION_RANGE_DISPLAY_VERIFIER_PATH = join(__dirname, "verify-position-range-display.js");
 const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-range-state-telemetry.js");
 const EFFECTIVE_RANGE_STATE_VERIFIER_PATH = join(__dirname, "verify-effective-range-state.js");
+const PROVIDER_RATE_LIMIT_REPORT_VERIFIER_PATH = join(__dirname, "verify-provider-rate-limit-report.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -126,6 +132,14 @@ function managerAndGeneralReasoningEffortNull(src) {
 function parseNanocapUserConfig() {
   if (!existsSync(NANOCAP_USER_CONFIG_PATH)) return {};
   return JSON.parse(readFileSync(NANOCAP_USER_CONFIG_PATH, "utf8"));
+}
+
+function expectedConfigValue(config, key, fallback) {
+  return Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback;
+}
+
+function expectedNumber(config, key, fallback) {
+  return Number(expectedConfigValue(config, key, fallback));
 }
 
 function runRuntimeConfigProof(userConfigPath) {
@@ -656,6 +670,30 @@ function runScoutFeeVelocityLiveCanaryProof() {
   return JSON.parse(result.stdout);
 }
 
+function runDynamicRangeShadowProof() {
+  return runJsonVerifier(DYNAMIC_RANGE_SHADOW_VERIFIER_PATH, "verify-dynamic-range-shadow");
+}
+
+function runDynamicRangeWidthGuardProof() {
+  return runJsonVerifier(DYNAMIC_RANGE_WIDTH_GUARD_VERIFIER_PATH, "verify-dynamic-range-width-guard");
+}
+
+function runDynamicPoolSizingProof() {
+  return runJsonVerifier(DYNAMIC_POOL_SIZING_VERIFIER_PATH, "verify-dynamic-pool-sizing");
+}
+
+function runFabriqOhlcvEntryGateProof() {
+  return runJsonVerifier(FABRIQ_OHLCV_ENTRY_GATE_VERIFIER_PATH, "verify-fabriq-ohlcv-entry-gate");
+}
+
+function runMainCandidateShadowCollectionProof() {
+  return runJsonVerifier(MAIN_CANDIDATE_SHADOW_COLLECTION_VERIFIER_PATH, "verify-main-candidate-shadow-collection");
+}
+
+function runProviderRateLimitReportProof() {
+  return runJsonVerifier(PROVIDER_RATE_LIMIT_REPORT_VERIFIER_PATH, "verify-provider-rate-limit-report");
+}
+
 function runTwoLaneGateProof() {
   const result = spawnSync(process.execPath, [TWO_LANE_GATE_VERIFIER_PATH], {
     cwd: ROOT,
@@ -802,6 +840,11 @@ function buildChecks() {
   const scoutDiscoveryShadowProof = runScoutDiscoveryShadowProof();
   const scoutDualSourceDiscoveryProof = runScoutDualSourceDiscoveryProof();
   const scoutFeeVelocityLiveCanaryProof = runScoutFeeVelocityLiveCanaryProof();
+  const dynamicRangeShadowProof = runDynamicRangeShadowProof();
+  const dynamicRangeWidthGuardProof = runDynamicRangeWidthGuardProof();
+  const dynamicPoolSizingProof = runDynamicPoolSizingProof();
+  const fabriqOhlcvEntryGateProof = runFabriqOhlcvEntryGateProof();
+  const mainCandidateShadowCollectionProof = runMainCandidateShadowCollectionProof();
   const twoLaneGateProof = runTwoLaneGateProof();
   const momentumScoreV1Proof = runMomentumScoreV1Proof();
   const athPullbackBandProof = runAthPullbackBandProof();
@@ -810,8 +853,59 @@ function buildChecks() {
   const rpcPnlPollerProof = runRpcPnlPollerProof();
   const directCloseInflightGuardProof = runDirectCloseInflightGuardProof();
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
+  const providerRateLimitReportProof = runProviderRateLimitReportProof();
 
   return [
+    {
+      file: "scripts/verify-dynamic-range-width-guard.js",
+      label: "[Dynamic range width guard] executor enforces downside coverage before deploy_position transaction paths",
+      test: () =>
+        dynamicRangeWidthGuardProof?.success === true &&
+        dynamicRangeWidthGuardProof?.checks?.includes("coverage math matches 55/58/60 percent target fixtures") &&
+        dynamicRangeWidthGuardProof?.checks?.includes("BRIM-like 35-bin input blocks on oversize deploy share or overrides to 74 bins when deploy share is allowed") &&
+        dynamicRangeWidthGuardProof?.checks?.includes("ANSEM-like volatility widens 35 bins to 74 bins at 125 bps") &&
+        dynamicRangeWidthGuardProof?.checks?.includes("low-step required bins over max blocks without clamp/fallback") &&
+        dynamicRangeWidthGuardProof?.checks?.includes("executor, autonomous, direct tool, and CLI deploy paths share executeTool guard") &&
+        dynamicRangeWidthGuardProof?.samples?.brim_override?.decision === "override" &&
+        Number(dynamicRangeWidthGuardProof?.samples?.brim_override?.final_bins_below) === 74 &&
+        dynamicRangeWidthGuardProof?.samples?.low_step_max?.reason_codes?.includes("required_bins_exceeds_max"),
+    },
+    {
+      file: "scripts/verify-dynamic-pool-sizing.js",
+      label: "[Dynamic pool sizing] executor sizes amount_y from active TVL before forced single-sided normalization",
+      test: () =>
+        dynamicPoolSizingProof?.success === true &&
+        dynamicPoolSizingProof?.checks?.includes("MCAT-like active TVL sizes to 3.04 SOL at $70/SOL") &&
+        dynamicPoolSizingProof?.checks?.includes("BWICK-like active TVL blocks below 1 SOL instead of forcing the floor") &&
+        dynamicPoolSizingProof?.checks?.includes("Executor applies sizing before forced single-sided normalization") &&
+        Number(dynamicPoolSizingProof?.cases?.mcat?.final_amount_y) === 3.04 &&
+        dynamicPoolSizingProof?.cases?.bwick?.reason_codes?.includes("below_min_dynamic_size"),
+    },
+    {
+      file: "scripts/verify-fabriq-ohlcv-entry-gate.js",
+      label: "[Fabriq OHLCV entry gate] DexPaprika -> GMGN -> OKX provider precedence blocks missing live evidence",
+      test: () =>
+        fabriqOhlcvEntryGateProof?.success === true &&
+        fabriqOhlcvEntryGateProof?.checks?.includes("DexPaprika volume_usd normalizes") &&
+        fabriqOhlcvEntryGateProof?.checks?.includes("GMGN kline uses USD volume, not amount") &&
+        fabriqOhlcvEntryGateProof?.checks?.includes("OKX ts/o/h/l/c/volUsd normalizes") &&
+        fabriqOhlcvEntryGateProof?.checks?.includes("Provider precedence is DexPaprika -> GMGN -> OKX") &&
+        fabriqOhlcvEntryGateProof?.checks?.includes("Live missing evidence blocks at executor boundary") &&
+        fabriqOhlcvEntryGateProof?.cases?.dexpaprikaDecisive === "dexpaprika" &&
+        fabriqOhlcvEntryGateProof?.cases?.gmgnFallback === "gmgn" &&
+        fabriqOhlcvEntryGateProof?.cases?.okxFallback === "okx" &&
+        fabriqOhlcvEntryGateProof?.cases?.missing === "missing_evidence",
+    },
+    {
+      file: "scripts/verify-provider-rate-limit-report.js",
+      label: "[Provider rate-limit report] read-only log scanner buckets Helius, LPAgent, Jupiter, and other RPC errors",
+      test: () =>
+        providerRateLimitReportProof?.success === true &&
+        providerRateLimitReportProof?.checks?.includes("all provider/rate-limit buckets classify representative fixture rows") &&
+        providerRateLimitReportProof?.checks?.includes("RPC_PRESSURE error_bucket ok and .429Z timestamp false positives are excluded") &&
+        providerRateLimitReportProof?.checks?.includes("old and undated legacy rows are excluded") &&
+        providerRateLimitReportProof?.checks?.includes("source scan proves the report script is read-only and has no network, PM2, env, or runtime-write calls"),
+    },
     {
       file: "scripts/verify-evil-panda-fee-dump-plan.js",
       label: "[Main EvilPanda fee dump] patient fee-harvest profile, confluence exits, pool memory, and report grouping pass",
@@ -942,6 +1036,84 @@ function buildChecks() {
         scoutFeeVelocityLiveCanaryProof?.strategyExample?.activeUnchanged === true &&
         scoutFeeVelocityLiveCanaryProof?.strategyExample?.feeVelocityStrategyPresent === true &&
         scoutFeeVelocityLiveCanaryProof?.guardedOperationalWordingAbsent === true,
+    },
+    {
+      file: "scripts/verify-dynamic-range-shadow.js",
+      label: "[Main dynamic range shadow] proposed downside/bins telemetry is logged but never applied to deploy args",
+      test: () =>
+        dynamicRangeShadowProof?.success === true &&
+        Number(dynamicRangeShadowProof?.riskyProposal?.proposed_target_downside_pct) === 45 &&
+        Number(dynamicRangeShadowProof?.riskyProposal?.proposed_bins_below) === 61 &&
+        dynamicRangeShadowProof?.riskyProposal?.policy_violations?.includes("above_bins_max") &&
+        dynamicRangeShadowProof?.riskyProposal?.policy_violations?.includes("above_target_downside_max_pct") &&
+        dynamicRangeShadowProof?.riskyProposal?.applied_to_deploy_args === false &&
+        Number(dynamicRangeShadowProof?.calmProposal?.proposed_target_downside_pct) === 5 &&
+        dynamicRangeShadowProof?.calmProposal?.policy_violations?.includes("below_bins_min") &&
+        Number(dynamicRangeShadowProof?.poolStepBins?.step50) === 139 &&
+        Number(dynamicRangeShadowProof?.poolStepBins?.step80) === 87 &&
+        Number(dynamicRangeShadowProof?.poolStepBins?.step100) === 70 &&
+        Number(dynamicRangeShadowProof?.poolStepBins?.step125) === 56 &&
+        dynamicRangeShadowProof?.zeroWrongStep?.pool_step_status === "wrong_step_too_many_bins" &&
+        dynamicRangeShadowProof?.zeroWrongStep?.recommendable_shadow === false &&
+        dynamicRangeShadowProof?.alternativeFit?.source === "dynamic_range_shadow_swing_envelope_bidask_v2a" &&
+        dynamicRangeShadowProof?.alternativeFit?.profile === "swing_envelope_bidask" &&
+        dynamicRangeShadowProof?.alternativeFit?.mode === "pool_step_fit_shadow" &&
+        dynamicRangeShadowProof?.alternativeFit?.shadow_verdict === "alternative_pool_fit" &&
+        dynamicRangeShadowProof?.alternativeFit?.deploy_pool_unchanged === true &&
+        dynamicRangeShadowProof?.alternativeFit?.selected_pool === "pool-step-100" &&
+        Number(dynamicRangeShadowProof?.alternativeFit?.selected_required_bins) === 70 &&
+        dynamicRangeShadowProof?.alternativeFit?.selected_applied_to_deploy_args === false &&
+        dynamicRangeShadowProof?.currentPoolFit?.shadow_verdict === "current_pool_fit" &&
+        Number(dynamicRangeShadowProof?.currentPoolFit?.required_bins) === 70 &&
+        dynamicRangeShadowProof?.currentPoolFit?.live_applied_to_deploy_args === false &&
+        dynamicRangeShadowProof?.currentPoolFit?.live_pool_address === "pool-step-100-current" &&
+        Number(dynamicRangeShadowProof?.currentPoolFit?.live_bins_below) === 35 &&
+        dynamicRangeShadowProof?.liveApplication?.applied_to_deploy_args === false &&
+        dynamicRangeShadowProof?.liveApplication?.reason === "adaptive_width_shadow_mode_fallback" &&
+        dynamicRangeShadowProof?.liveApplication?.pool_address === "pool-step-50" &&
+        Number(dynamicRangeShadowProof?.liveApplication?.bins_below) === 35 &&
+        Number(dynamicRangeShadowProof?.liveApplication?.bin_step) === 50 &&
+        dynamicRangeShadowProof?.liveApplication?.fallback_applied_to_deploy_args === false &&
+        dynamicRangeShadowProof?.liveApplication?.fallback_pool_address === "pool-step-50" &&
+        Number(dynamicRangeShadowProof?.liveApplication?.fallback_bins_below) === 35 &&
+        dynamicRangeShadowProof?.missingTarget?.shadow_verdict === "target_width_missing" &&
+        dynamicRangeShadowProof?.missingTarget?.missing_evidence_reason === "target_width_missing" &&
+        dynamicRangeShadowProof?.asofReject?.missing_evidence_reason === "target_width_asof_after_decision" &&
+        dynamicRangeShadowProof?.manualReject?.missing_evidence_reason === "target_width_source_not_deploy_time_safe" &&
+        dynamicRangeShadowProof?.missingAlternativeEvidence?.evidence_status === "insufficient_data" &&
+        dynamicRangeShadowProof?.missingAlternativeEvidence?.recommendable_shadow === false &&
+        dynamicRangeShadowProof?.poolEvidenceRejects?.future === true &&
+        dynamicRangeShadowProof?.poolEvidenceRejects?.stale === true &&
+        dynamicRangeShadowProof?.poolEvidenceRejects?.manual === true &&
+        dynamicRangeShadowProof?.poolEvidenceRejects?.wrongQuote === true &&
+        dynamicRangeShadowProof?.poolEvidenceRejects?.missingQuote === true &&
+        dynamicRangeShadowProof?.conflictRejects?.baseMintConflict === true &&
+        dynamicRangeShadowProof?.conflictRejects?.sourcePoolMismatch === true &&
+        dynamicRangeShadowProof?.conflictRejects?.sourceBaseMintMismatch === true &&
+        dynamicRangeShadowProof?.conflictRejects?.sourceQuoteMintMismatch === true &&
+        dynamicRangeShadowProof?.replayFixtures?.islandsInsufficient === true &&
+        dynamicRangeShadowProof?.replayFixtures?.islandsMissingBaseMint === true &&
+        dynamicRangeShadowProof?.replayFixtures?.islandsMissingActiveTvl === true &&
+        dynamicRangeShadowProof?.replayFixtures?.chatonInsufficient === true &&
+        dynamicRangeShadowProof?.replayFixtures?.chatonMissingSourceEvidence === true &&
+        dynamicRangeShadowProof?.staticSizingInvariant?.sizing_policy === "static_unchanged" &&
+        dynamicRangeShadowProof?.staticSizingInvariant?.forbiddenSizingFieldsAbsent === true &&
+        dynamicRangeShadowProof?.contextCarriesShadow === true &&
+        dynamicRangeShadowProof?.sourceSafety?.noDeployOrCloseCallsInHelper === true &&
+        dynamicRangeShadowProof?.sourceSafety?.deployArgsResolvedThroughLiveHelper === true &&
+        dynamicRangeShadowProof?.sourceSafety?.selectedPoolFitUsedOnlyWhenEligible === true &&
+        dynamicRangeShadowProof?.sourceSafety?.deploySizeAndCapsRemainSeparate === true &&
+        dynamicRangeShadowProof?.sourceSafety?.deployProvenanceTelemetryOnly === true,
+    },
+    {
+      file: "scripts/verify-main-candidate-shadow-collection.js",
+      label: "[Main candidate shadow collection] clipping-derived fields log pre-entry, deploy, and outcome rows without live behavior use",
+      test: () =>
+        mainCandidateShadowCollectionProof?.ok === true &&
+        mainCandidateShadowCollectionProof?.rows_verified?.screening === 1 &&
+        mainCandidateShadowCollectionProof?.rows_verified?.deploy === 1 &&
+        mainCandidateShadowCollectionProof?.rows_verified?.outcome === 1 &&
+        String(mainCandidateShadowCollectionProof?.behavior_boundary || "").includes("shadow-only"),
     },
     {
       file: "scripts/verify-fnmf-fee-exit-policy.js",
@@ -2185,23 +2357,20 @@ function buildChecks() {
       test: () =>
         nanocapConfig != null &&
         nanocapConfig.userConfigExists === true &&
-        Number.isFinite(Number(nanocapUserConfig.stopLossCooldownHours)) &&
-        Number.isFinite(Number(nanocapUserConfig.oorCooldownHours)) &&
-        Number.isFinite(Number(nanocapUserConfig.repeatDeployCooldownHours)) &&
         nanocapConfig.effectiveUserConfigPath === NANOCAP_USER_CONFIG_PATH &&
-        Number(nanocapConfig.management?.stopLossCooldownHours) === Number(nanocapUserConfig.stopLossCooldownHours) &&
-        Number(nanocapConfig.management?.oorCooldownHours) === Number(nanocapUserConfig.oorCooldownHours) &&
-        Number(nanocapConfig.management?.minAgeBeforeYieldCheck) === Number(nanocapUserConfig.minAgeBeforeYieldCheck) &&
-        Number(nanocapConfig.management?.repeatDeployCooldownHours) === Number(nanocapUserConfig.repeatDeployCooldownHours) &&
-        nanocapConfig.management?.repeatDeployCooldownScope === nanocapUserConfig.repeatDeployCooldownScope,
+        Number(nanocapConfig.management?.stopLossCooldownHours) === expectedNumber(nanocapUserConfig, "stopLossCooldownHours", 12) &&
+        Number(nanocapConfig.management?.oorCooldownHours) === expectedNumber(nanocapUserConfig, "oorCooldownHours", 12) &&
+        Number(nanocapConfig.management?.minAgeBeforeYieldCheck) === expectedNumber(nanocapUserConfig, "minAgeBeforeYieldCheck", 60) &&
+        Number(nanocapConfig.management?.repeatDeployCooldownHours) === expectedNumber(nanocapUserConfig, "repeatDeployCooldownHours", 1) &&
+        nanocapConfig.management?.repeatDeployCooldownScope === expectedConfigValue(nanocapUserConfig, "repeatDeployCooldownScope", "pool"),
     },
     {
       file: NANOCAP_USER_CONFIG_PATH,
       label: "[Runtime] nanocap repeat deploy defaults resolve exactly from the supplied user-config path",
       test: () =>
         nanocapConfig != null &&
-        nanocapConfig.management?.repeatDeployCooldownEnabled === nanocapUserConfig.repeatDeployCooldownEnabled &&
-        Number(nanocapConfig.management?.repeatDeployCooldownTriggerCount) === Number(nanocapUserConfig.repeatDeployCooldownTriggerCount) &&
+        nanocapConfig.management?.repeatDeployCooldownEnabled === expectedConfigValue(nanocapUserConfig, "repeatDeployCooldownEnabled", true) &&
+        Number(nanocapConfig.management?.repeatDeployCooldownTriggerCount) === expectedNumber(nanocapUserConfig, "repeatDeployCooldownTriggerCount", 1) &&
         Number(nanocapConfig.management?.repeatDeployCooldownMinFeeEarnedPct) ===
           Number(nanocapUserConfig.repeatDeployCooldownMinFeeEarnedPct ?? nanocapUserConfig.repeatDeployCooldownMinFeeYieldPct ?? 0),
     },

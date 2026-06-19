@@ -89,7 +89,7 @@ export function evaluateFeeExitConfluenceFromRows(rows = [], policy = {}) {
   const rsiOverbought = Number(policy.exitConfluenceRsiOverbought ?? 90);
   const bbPeriod = Math.max(2, Math.trunc(Number(policy.exitConfluenceBbPeriod ?? 20) || 20));
   const bbStdDev = Math.max(0.1, Number(policy.exitConfluenceBbStdDev ?? 2) || 2);
-  const minRows = Math.max(bbPeriod + 5, 35);
+  const minRows = feeExitConfluenceMinRows(policy);
   const sorted = (Array.isArray(rows) ? rows : [])
     .filter((row) => rowClose(row) != null)
     .sort((a, b) => Number(a.timestamp ?? a.t ?? 0) - Number(b.timestamp ?? b.t ?? 0));
@@ -145,6 +145,11 @@ export function evaluateFeeExitConfluenceFromRows(rows = [], policy = {}) {
       rowCount: sorted.length,
     },
   };
+}
+
+export function feeExitConfluenceMinRows(policy = {}) {
+  const bbPeriod = Math.max(2, Math.trunc(Number(policy.exitConfluenceBbPeriod ?? 20) || 20));
+  return Math.max(bbPeriod + 5, 35);
 }
 
 export function shouldGateFeeExitDecision(decision = {}, policy = {}) {

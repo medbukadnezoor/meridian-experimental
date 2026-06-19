@@ -71,6 +71,15 @@ function stubOhlcvPayload(rows) {
   };
 }
 
+function makeProviderRows(count, start = 10_000, step = 300, base = 100) {
+  return Array.from({ length: count }, (_, index) => {
+    const timestamp = start + (index * step);
+    const open = base + index;
+    const close = open + 0.5;
+    return [timestamp, open, open + 1, open - 1, close, 1000 + index];
+  });
+}
+
 function installFetchStub(rowsByPool) {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -254,7 +263,7 @@ async function main() {
     assert(combinedRows.every((row) => row.event === "ohlcv_drawdown_shadow"), "rows should use OHLCV shadow event");
     assert(combinedRows.every((row) => row.shadowOnly === true), "rows must be shadow-only");
     assert(combinedRows.every((row) => row.source === "ohlcv-drawdown-shadow"), "rows should identify source module");
-    assert(combinedRows.every((row) => ["meteora_dlmm", "gmgn_kline"].includes(row.ohlcv?.source)), "rows should carry non-Birdeye OHLCV source");
+    assert(combinedRows.every((row) => ["meteora_dlmm", "gmgn_kline", "dexpaprika"].includes(row.ohlcv?.source)), "rows should carry non-Birdeye OHLCV source");
     assert(combinedRows.every((row) => row.rule?.entryDrawdownPct === -20), "rows should carry configured thresholds");
     assert(combinedMarked === true, "combined rows should mark only after append succeeds");
     assert(combinedRepeatRows.length === 0, "combined rules should dedupe after append/mark");
@@ -283,6 +292,8 @@ async function main() {
     const {
       normalizeMeteoraRows,
       normalizeGmgnRows,
+      normalizeDexPaprikaRows,
+      fetchOhlcv,
     } = providerTestApi;
     const meteoraRows = normalizeMeteoraRows({
       data: [
@@ -308,6 +319,111 @@ async function main() {
     assert(gmgnRows[0].timestamp === 1_000_000_000, "gmgn normalizer should convert millisecond timestamps");
     assert(gmgnRows[0].open === 100, "gmgn normalizer should parse numeric strings");
 
+    const dexPaprikaRows = normalizeDexPaprikaRows([
+      { time_open: "2026-06-19T14:00:00Z", time_close: "2026-06-19T14:05:00Z", open: "100", high: "110", low: "95", close: "105", volume_usd: "500" },
+      { time_open: "2026-06-19T14:05:00Z", time_close: "2026-06-19T14:10:00Z", open: "105", high: "108", low: "70", close: "76", volume: "1400" },
+      { time_open: null, open: "1", high: "2", low: "0.5", close: null, volume_usd: "10" },
+    ]);
+    assert(dexPaprikaRows.length === 2, "dexpaprika normalizer should filter null close/timestamp");
+    assert(dexPaprikaRows[0].timestamp === 1_781_877_900, "dexpaprika normalizer should use candle close timestamp");
+    assert(dexPaprikaRows[0].volumeUsd === 500, "dexpaprika normalizer should parse volume_usd");
+
+    const originalProviderFetch = globalThis.fetch;
+    const originalGmgnKey = process.env.GMGN_API_KEY;
+    process.env.GMGN_API_KEY = "synthetic-gmgn-key";
+    const providerCalls = [];
+    const providerRows = {
+      meteoraPartial: makeProviderRows(16),
+      meteoraFull: makeProviderRows(40),
+      gmgnEmpty: [],
+      gmgnFull: makeProviderRows(40, 20_000),
+      dexPartial: makeProviderRows(29, 30_000),
+      dexFullOneMinute: makeProviderRows(40, 40_000, 60),
+    };
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      providerCalls.push(href);
+      if (href.includes("pool-meteora-full")) {
+        return { ok: true, status: 200, async text() { return JSON.stringify(stubOhlcvPayload(providerRows.meteoraFull)); } };
+      }
+      if (href.includes("dlmm.datapi.meteora.ag")) {
+        return { ok: true, status: 200, async text() { return JSON.stringify(stubOhlcvPayload(providerRows.meteoraPartial)); } };
+      }
+      if (href.includes("mint-gmgn-full")) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              data: {
+                list: providerRows.gmgnFull.map(([timestamp, open, high, low, close, volume]) => ({ time: timestamp * 1000, open, high, low, close, volume })),
+              },
+            });
+          },
+        };
+      }
+      if (href.includes("openapi.gmgn.ai")) {
+        return { ok: true, status: 200, async text() { return JSON.stringify({ data: { list: providerRows.gmgnEmpty } }); } };
+      }
+      if (href.includes("api.dexpaprika.com")) {
+        const parsed = new URL(href);
+        const isOneMinute = parsed.searchParams.get("interval") === "1m";
+        const rows = isOneMinute ? providerRows.dexFullOneMinute : providerRows.dexPartial;
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify(rows.map(([timestamp, open, high, low, close, volume]) => ({
+              time_open: new Date((timestamp - (isOneMinute ? 60 : 300)) * 1000).toISOString(),
+              time_close: new Date(timestamp * 1000).toISOString(),
+              open,
+              high,
+              low,
+              close,
+              volume_usd: volume,
+            })));
+          },
+        };
+      }
+      throw new Error(`unexpected provider URL ${href}`);
+    };
+
+    const gmgnFallback = await fetchOhlcv("pool-meteora-partial-gmgn", "mint-gmgn-full", {
+      aggregateMin: 5,
+      beforeTimestamp: 200_000,
+      lookbackMinutes: 180,
+      minRows: 35,
+    });
+    assert(gmgnFallback.source === "gmgn_kline", "insufficient Meteora rows should fall through to GMGN rows");
+    assert(gmgnFallback.rows.length === 40, "GMGN fallback should provide enough rows");
+
+    const dexPaprikaFallback = await fetchOhlcv("pool-meteora-partial-dexpaprika", "mint-gmgn-empty", {
+      aggregateMin: 5,
+      beforeTimestamp: 201_000,
+      lookbackMinutes: 180,
+      minRows: 35,
+    });
+    assert(dexPaprikaFallback.source === "dexpaprika", "insufficient Meteora and GMGN rows should fall through to DexPaprika rows");
+    assert(dexPaprikaFallback.aggregateMin === 1, "DexPaprika should retry at 1m when 5m rows are insufficient");
+    assert(dexPaprikaFallback.rows.length === 40, "DexPaprika fallback should provide enough rows");
+
+    const meteoraEnough = await fetchOhlcv("pool-meteora-full", "mint-gmgn-full", {
+      aggregateMin: 5,
+      beforeTimestamp: 202_000,
+      lookbackMinutes: 180,
+      minRows: 35,
+    });
+    assert(meteoraEnough.source === "meteora_dlmm", "sufficient Meteora rows should remain first choice");
+
+    globalThis.fetch = originalProviderFetch;
+    if (originalGmgnKey == null) delete process.env.GMGN_API_KEY;
+    else process.env.GMGN_API_KEY = originalGmgnKey;
+
+    assert(providerCalls.some((url) => url.includes("openapi.gmgn.ai")), "provider fallback proof should call GMGN");
+    assert(providerCalls.some((url) => url.includes("api.dexpaprika.com/networks/solana/pools/")), "provider fallback proof should call DexPaprika");
+    assert(providerCalls.some((url) => url.includes("api.dexpaprika.com") && url.includes("interval=1m")), "provider fallback proof should retry DexPaprika at 1m");
+    assert(providerCalls.filter((url) => url.includes("pool-meteora-full")).length === 1, "sufficient Meteora proof should not call fallbacks");
+
     assert(!("normalizeBirdeyeRows" in providerTestApi), "Birdeye normalizer must not be exported from live OHLCV module");
     const providerNormalizersOk = true;
 
@@ -328,7 +444,9 @@ async function main() {
       tempStateFileCreated,
       tempDirRemoved,
       fetchCalls: calls.length,
+      fallbackProviderCalls: providerCalls.length,
       providerNormalizersOk,
+      providerFallbacksOk: true,
     };
     console.log(JSON.stringify(summary, null, 2));
   } finally {

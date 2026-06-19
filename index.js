@@ -14,7 +14,7 @@ import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
-import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy, computeDownsideBinsForPct } from "./strategy-library.js";
+import { buildDynamicRangeShadowTelemetry, describeRangePolicyForPrompt, getActiveStrategy, normalizeCandidateEvidenceForDeploy, resolveStrategyRangePolicy, computeDownsideBinsForPct, resolveDynamicRangeLiveDeployArgs } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -29,7 +29,7 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
-import { evaluateFeeExitConfluenceFromRows, shouldGateFeeExitDecision } from "./fee-exit-confluence.js";
+import { evaluateFeeExitConfluenceFromRows, feeExitConfluenceMinRows, shouldGateFeeExitDecision } from "./fee-exit-confluence.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 import { fetchOhlcv, getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
@@ -552,6 +552,7 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
 
   try {
     const aggregateMin = policy.exitConfluenceAggregateMin ?? 5;
+    const minRows = feeExitConfluenceMinRows(policy);
     const lookbackMinutes = Math.max(
       policy.exitConfluenceLookbackMinutes ?? 180,
       Math.ceil(Number(position?.age_minutes ?? 0) || 0),
@@ -561,6 +562,7 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
       aggregateMin,
       beforeTimestamp: Math.floor(Date.now() / 1000),
       lookbackMinutes,
+      minRows,
     });
     if (!ohlcv?.rows?.length) {
       return { enabled: true, accepted: false, reason: "exit confluence unavailable: no OHLCV rows" };
@@ -1967,8 +1969,14 @@ let _latestCandidates = [];
 let _latestCandidatesAt = null;
 
 function setLatestCandidates(candidates = []) {
-  _latestCandidates = Array.isArray(candidates) ? candidates : [];
-  _latestCandidatesAt = new Date().toISOString();
+  const cacheTs = new Date().toISOString();
+  _latestCandidates = Array.isArray(candidates)
+    ? candidates.map((candidate) => normalizeCandidateEvidenceForDeploy(candidate, {
+        decisionTs: cacheTs,
+        sourceStage: "latest_candidates_cache",
+      }))
+    : [];
+  _latestCandidatesAt = cacheTs;
 }
 
 function getLatestCandidatesMeta() {
@@ -2385,10 +2393,15 @@ async function runDeterministicScreen(limit = 5) {
 }
 
 async function deployLatestCandidate(index) {
-  const candidate = _latestCandidates[index];
+  let candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
+  const deployDecisionTs = new Date().toISOString();
+  candidate = normalizeCandidateEvidenceForDeploy(candidate, {
+    decisionTs: deployDecisionTs,
+    sourceStage: "deploy_latest_candidate",
+  });
   const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard(candidate, config.screening);
   if (targetPoolNeedleGuard.decision === "blocked") {
     throw new Error("Target-pool needle veto live block rejected cached candidate. Run /screen for a fresh candidate list.");
@@ -2397,16 +2410,20 @@ async function deployLatestCandidate(index) {
   if (tailLossChecked.length === 0) {
     throw new Error("Tail-loss protection live block rejected cached candidate. Run /screen for a fresh candidate list.");
   }
-  if (config.darwin?.enabled && candidate.pool) {
-    const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
-    stageSignals(candidate.pool, {
-      ...(candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate)),
-      base_mint: baseMint,
-    });
-  }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
   const binsAbove = activeRangePolicy.binsAbove ?? 0;
+  const dynamicRangeShadow = buildDynamicRangeShadowTelemetry(candidate, {
+    deployAmountSol: deployAmount,
+    assumedDeployUsd: config.screening?.dynamicEntryShadowAssumedDeployUsd,
+    rangePolicy: activeRangePolicy,
+    adaptiveWidthMode: config.strategy?.dynamicRangeAdaptiveWidthMode ?? config.screening?.dynamicRangeAdaptiveWidthMode,
+    currentRange: {
+      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsAbove,
+      targetDownsidePct: activeRangePolicy.targetDownsidePct,
+    },
+  });
 
   // Compute bins_below: if strategy uses target_downside_pct, derive from pool bin_step
   let binsBelow;
@@ -2422,25 +2439,83 @@ async function deployLatestCandidate(index) {
   } else {
     binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
   }
+  const dynamicRangeLive = resolveDynamicRangeLiveDeployArgs({
+    candidate,
+    dynamicRangeShadow,
+    fallbackPool: candidate.pool,
+    fallbackBinsBelow: binsBelow,
+    fallbackBinStep: candidate.bin_step,
+    adaptiveWidthMode: config.strategy?.dynamicRangeAdaptiveWidthMode ?? config.screening?.dynamicRangeAdaptiveWidthMode,
+  });
+  const deployPoolAddress = dynamicRangeLive.pool_address ?? candidate.pool;
+  const deployBinsBelow = dynamicRangeLive.bins_below ?? binsBelow;
+  const deployBinStep = dynamicRangeLive.bin_step ?? candidate.bin_step;
+  const deployDynamicRangeShadow = {
+    ...dynamicRangeShadow,
+    cached_shadow_rebuilt_for_deploy: candidate.dynamic_range_shadow ? true : false,
+    cached_shadow_verdict: candidate.dynamic_range_shadow?.range_feasibility_shadow?.shadow_verdict ?? null,
+    live_application: dynamicRangeLive,
+  };
+  const deployProvenance = {
+    source: candidate.source_evidence?.source ?? null,
+    row_id: candidate.source_evidence?.row_id ?? null,
+    asof_ts: candidate.source_evidence?.asof_ts ?? null,
+    pool: candidate.pool ?? null,
+    base_mint: candidate.base_mint ?? candidate.baseMint ?? null,
+    quote_mint: candidate.quote_mint ?? candidate.quoteMint ?? null,
+    evidence_problems: candidate.source_evidence?.evidence_problems ?? candidate.evidence_problems ?? [],
+    same_mint_alternative_count: Array.isArray(candidate.source_evidence?.same_mint_alternatives)
+      ? candidate.source_evidence.same_mint_alternatives.length
+      : 0,
+    same_mint_alternative_statuses: Array.isArray(dynamicRangeShadow?.range_feasibility_shadow?.pool_normalization_candidates)
+      ? dynamicRangeShadow.range_feasibility_shadow.pool_normalization_candidates
+          .filter((entry) => entry?.is_current_pool === false)
+          .map((entry) => ({
+            pool: entry.pool ?? null,
+            evidence_status: entry.evidence_status ?? null,
+            pool_step_status: entry.pool_step_status ?? null,
+            recommendable_shadow: entry.recommendable_shadow === true,
+          }))
+      : [],
+  };
+  if (dynamicRangeLive.applied_to_deploy_args) {
+    log("deploy", `[dynamic_range_live] applying ${dynamicRangeLive.reason}: pool=${deployPoolAddress} bins_below=${deployBinsBelow} bin_step=${deployBinStep}`);
+  } else {
+    log("deploy", `[dynamic_range_live] fallback to strategy range: reason=${dynamicRangeLive.reason} pool=${deployPoolAddress} bins_below=${deployBinsBelow}`);
+  }
+  if (config.darwin?.enabled && deployPoolAddress) {
+    const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
+    stageSignals(deployPoolAddress, {
+      ...(candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate)),
+      base_mint: baseMint,
+    });
+  }
   const result = await executeTool("deploy_position", {
-    pool_address: candidate.pool,
+    pool_address: deployPoolAddress,
     amount_y: deployAmount,
     strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
-    bins_below: binsBelow,
+    bins_below: deployBinsBelow,
     bins_above: binsAbove,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
-    bin_step: candidate.bin_step,
+    bin_step: deployBinStep,
     base_fee: candidate.base_fee,
     volatility: candidate.volatility,
+    mcap: candidate.mcap,
+    active_tvl: candidate.active_tvl ?? candidate.tvl ?? null,
+    price_change_pct: candidate.price_change_pct ?? candidate.change_1h,
+    deploy_share_of_active_tvl_pct: candidate.deploy_share_of_active_tvl_pct ?? candidate.dynamic_entry_shadow?.deploy_share_of_active_tvl_pct,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
     organic_score: candidate.organic_score,
     initial_value_usd: candidate.active_tvl ?? candidate.tvl ?? null,
+    shadow_data_collection: (candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate))?.shadow_data_collection ?? null,
+    dynamic_range_shadow: deployDynamicRangeShadow,
+    deploy_provenance: deployProvenance,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
-  return { result, candidate, deployAmount, binsBelow };
+  return { result, candidate, deployAmount, binsBelow: deployBinsBelow, dynamicRangeLive };
 }
 
 function appendHistory(userMsg, assistantMsg) {

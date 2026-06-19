@@ -21,6 +21,23 @@ import { classifyCloseReason } from "../performance-metrics.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+const EVIL_PANDA_STRATEGY_PROFILE_FIXTURE = Object.freeze({
+  active: "evil_panda_fee_dump_v1",
+  strategies: {
+    evil_panda_fee_dump_v1: {
+      id: "evil_panda_fee_dump_v1",
+      lp_strategy: "bid_ask",
+      entry: {
+        single_side: "sol",
+      },
+      range: {
+        bins_below: 35,
+        bins_above: 0,
+      },
+    },
+  },
+});
+const FABRIQ_DEGEN_STRATEGY_ID = "main_fabriq_degen_fee_rotation_v1";
 
 function read(relativePath) {
   return fs.readFileSync(join(ROOT, relativePath), "utf8");
@@ -238,26 +255,49 @@ async function main() {
   assert.ok(strongConfluence.signalCount >= 2, "confluence pass should have at least 2 signals");
 
   const example = loadJson("user-config.example.json");
-  assert.strictEqual(example.deployAmountSol, 0.5, "deploy size remains 0.5 SOL");
+  assert.strictEqual(example.deployAmountSol, 5, "Fabriq example deploy size is 5 SOL");
   assert.ok(!String(example.preset || "").toLowerCase().includes("nanocap"), "main example must not inherit nanocap preset defaults");
-  assert.strictEqual(example.maxPositions, 1, "max positions should be 1 for validation window");
-  assert.strictEqual(example.feeExitPolicy.strategyProfile, "evil_panda_fee_dump_v1", "example uses profile");
-  assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 25, "patient fee harvest hold");
-  assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 60, "slow no-fee abort");
+  assert.strictEqual(example.preset, "main-fabriq-degen-fee-rotation-v1", "main example uses Fabriq degen fee-rotation preset");
+  assert.strictEqual(example.maxPositions, 4, "Fabriq example max positions is 4");
+  assert.strictEqual(example.maxDeployAmount, 5, "Fabriq example max deploy amount is 5 SOL");
+  assert.strictEqual(example.binsBelow, 35, "Fabriq example keeps fixed 35 bins below");
+  assert.strictEqual(example.dynamicRangeWidthEnabled, false, "Fabriq example leaves dynamic range width disabled");
+  assert.strictEqual(example.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "example uses Fabriq fee-rotation profile");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 8, "Fabriq fee harvest can exit after 8m");
+  assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 20, "Fabriq no-fee abort is rapid");
   assert.strictEqual(example.feeExitPolicy.exitConfluenceEnabled, true, "confluence enabled");
 
   const built = buildConfig(example, {});
-  assert.strictEqual(built.risk.maxPositions, 1, "runtime config resolves maxPositions=1");
-  assert.strictEqual(built.management.feeExitPolicy.strategyProfile, "evil_panda_fee_dump_v1", "runtime keeps strategy profile");
+  assert.strictEqual(built.risk.maxPositions, 4, "runtime config resolves maxPositions=4");
+  assert.strictEqual(built.risk.maxDeployAmount, 5, "runtime config resolves maxDeployAmount=5");
+  assert.strictEqual(built.strategy.binsBelow, 35, "runtime config resolves binsBelow=35");
+  assert.strictEqual(built.strategy.dynamicRangeWidthEnabled, false, "runtime config resolves dynamic width disabled");
+  assert.strictEqual(built.management.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "runtime keeps Fabriq strategy profile");
   assert.strictEqual(built.management.feeExitPolicy.exitConfluenceMinSignals, 2, "runtime keeps confluence threshold");
   assert.strictEqual(built.management.noFeeAbortCooldownHours, 12, "runtime keeps no-fee cooldown");
   assert.strictEqual(built.management.velocityStopCooldownHours, 24, "runtime keeps velocity cooldown");
   assert.strictEqual(built.management.pnlSnapshotBotName, "meridian", "main profile resolves meridian PnL snapshot bot name");
 
   const strategyLibrary = loadJson("strategy-library.json");
-  assert.strictEqual(strategyLibrary.active, "evil_panda_fee_dump_v1", "strategy library active profile should be evil panda");
-  assert.ok(strategyLibrary.strategies.evil_panda_fee_dump_v1, "strategy profile should exist");
-  assert.strictEqual(strategyLibrary.strategies.evil_panda_fee_dump_v1.range.bins_below, 35, "main keeps tight bid_ask bins");
+  const fabriqProfile = strategyLibrary.strategies?.[FABRIQ_DEGEN_STRATEGY_ID];
+  assert.strictEqual(strategyLibrary.active, FABRIQ_DEGEN_STRATEGY_ID, "strategy library active profile should be Fabriq degen fee rotation");
+  assert.ok(fabriqProfile, "strategy library contains Fabriq degen fee-rotation profile");
+  assert.strictEqual(fabriqProfile.lp_strategy, "bid_ask", "Fabriq profile should use bid_ask");
+  assert.strictEqual(fabriqProfile.entry?.single_side, "sol", "Fabriq profile should be SOL-only");
+  assert.strictEqual(fabriqProfile.range?.type, "tight_fee_rotation", "Fabriq profile uses tight fee-rotation range policy");
+  assert.strictEqual(fabriqProfile.range?.bins_below, 35, "Fabriq profile keeps fixed 35 bins below");
+  assert.strictEqual(fabriqProfile.range?.bins_below_min, 35, "Fabriq profile pins min bins below");
+  assert.strictEqual(fabriqProfile.range?.bins_below_max, 35, "Fabriq profile pins max bins below");
+  assert.strictEqual(fabriqProfile.range?.bins_above, 0, "Fabriq profile pins bins_above to zero");
+  assert.strictEqual(fabriqProfile.range?.dynamic_range_width_enabled, false, "Fabriq profile leaves dynamic width disabled");
+
+  const evilPandaProfile = EVIL_PANDA_STRATEGY_PROFILE_FIXTURE.strategies.evil_panda_fee_dump_v1;
+  assert.strictEqual(EVIL_PANDA_STRATEGY_PROFILE_FIXTURE.active, "evil_panda_fee_dump_v1", "strategy fixture active profile should be EvilPanda fee-dump");
+  assert.strictEqual(evilPandaProfile.id, "evil_panda_fee_dump_v1", "strategy profile fixture id should be EvilPanda fee-dump");
+  assert.strictEqual(evilPandaProfile.lp_strategy, "bid_ask", "strategy profile fixture should use bid_ask");
+  assert.strictEqual(evilPandaProfile.entry?.single_side, "sol", "strategy profile fixture should be SOL-only");
+  assert.strictEqual(evilPandaProfile.range?.bins_below, 35, "main keeps tight bid_ask bins in EvilPanda profile fixture");
+  assert.strictEqual(evilPandaProfile.range?.bins_above, 0, "EvilPanda profile fixture pins bins_above to zero");
 
   assert.strictEqual(classifyCloseReason("Fee harvest: fees reached"), "fee_harvest", "fee harvest bucket");
   assert.strictEqual(classifyCloseReason("No-fee abort: stale"), "no_fee_abort", "no-fee bucket");
@@ -287,12 +327,17 @@ async function main() {
       "emergency exits bypass confluence",
       "fee harvest requires 2-signal confluence",
       "pool memory blocks no-fee and velocity-stop pools/mints",
-      "example config resolves 0.5 SOL / 1 max position",
+      "example config resolves Fabriq 5 SOL / 4 max positions",
+      "Fabriq strategy-library profile is active and fixed 35-bin SOL-only",
+      "EvilPanda strategy-library profile fixture validates independent of active strategy",
       "daily report groups by exit reason and strategy profile",
       "daily report reads fee totals from close results",
       "close verification degraded evidence remains preserved",
       "degraded close verification records performance/cooldown evidence",
     ],
+    runtime_active_strategy: strategyLibrary.active ?? null,
+    runtime_contains_fabriq_profile: Boolean(strategyLibrary.strategies?.[FABRIQ_DEGEN_STRATEGY_ID]),
+    runtime_contains_evil_panda_profile: Boolean(strategyLibrary.strategies?.evil_panda_fee_dump_v1),
   }, null, 2));
 }
 

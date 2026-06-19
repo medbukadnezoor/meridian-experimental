@@ -26,13 +26,17 @@ import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
 import { normalizeMint } from "./wallet.js";
 import { appendDecision } from "../decision-log.js";
 import { appendDecisionContext } from "../decision-context-log.js";
+import {
+  appendMainCandidateDeploySnapshot,
+  appendMainCandidateOutcomeSnapshot,
+} from "../main-candidate-shadow-log.js";
 import { getAndClearStagedSignals } from "../signal-tracker.js";
 import { signAndSimulateRelayTransactions } from "./relay-security.js";
 import {
   normalizeDeployRangeInputs,
   validateSingleSidedSolBidAskRange,
 } from "./deploy-range-guard.js";
-import { getActiveStrategy } from "../strategy-library.js";
+import { buildDynamicRangeShadowTelemetry, getActiveStrategy, resolveStrategyRangePolicy } from "../strategy-library.js";
 import {
   RPC_PRIORITY,
   assertDeployRpcCooldownClear,
@@ -734,7 +738,17 @@ export async function deployPosition({
   volatility,
   fee_tvl_ratio,
   organic_score,
+  mcap,
+  active_tvl,
+  price_change_pct,
+  deploy_share_of_active_tvl_pct,
   initial_value_usd,
+  shadow_data_collection,
+  dynamic_range_shadow,
+  range_width_decision,
+  dynamic_pool_sizing_decision,
+  fabriq_ohlcv_entry_gate,
+  deploy_provenance,
 }) {
   pool_address = normalizeMint(pool_address);
   try {
@@ -851,9 +865,18 @@ export async function deployPosition({
     bin_step: actualBinStep,
     base_fee: base_fee ?? null,
     volatility: volatility ?? null,
+    mcap: mcap ?? null,
+    active_tvl: active_tvl ?? null,
+    price_change_pct: price_change_pct ?? null,
+    deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
     fee_tvl_ratio: fee_tvl_ratio ?? null,
     organic_score: organic_score ?? null,
     initial_value_usd: initial_value_usd ?? null,
+    dynamic_range_shadow: dynamic_range_shadow ?? null,
+    range_width_decision: range_width_decision ?? null,
+    dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+    fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+    deploy_provenance: deploy_provenance ?? null,
   })}`);
 
   const normalizedRange = normalizeDeployRangeInputs({
@@ -916,6 +939,19 @@ export async function deployPosition({
   if (isSingleSidedSol) {
     activeBinsAbove = 0;
   }
+  const dynamicRangeShadowAudit = dynamic_range_shadow ?? buildDynamicRangeShadowTelemetry({
+    bin_step: actualBinStep,
+    active_tvl,
+    volatility,
+    mcap,
+    price_change_pct,
+    deploy_share_of_active_tvl_pct,
+    fee_tvl_ratio,
+    organic_score,
+  }, {
+    deployAmountSol: finalAmountY,
+    rangePolicy: resolveStrategyRangePolicy(getActiveStrategy(), config),
+  });
   const totalBins = activeBinsBelow + activeBinsAbove;
   const isWideRange = totalBins > 69;
   const minBinId = activeBin.binId - activeBinsBelow;
@@ -966,9 +1002,18 @@ export async function deployPosition({
       bin_step: actualBinStep,
       base_fee: base_fee ?? null,
       volatility: volatility ?? null,
+      mcap: mcap ?? null,
+      active_tvl: active_tvl ?? null,
+      price_change_pct: price_change_pct ?? null,
+      deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
       fee_tvl_ratio: fee_tvl_ratio ?? null,
       organic_score: organic_score ?? null,
       initial_value_usd: initial_value_usd ?? null,
+      dynamic_range_shadow: dynamicRangeShadowAudit,
+      range_width_decision: range_width_decision ?? null,
+      dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+      fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+      deploy_provenance: deploy_provenance ?? null,
     },
     deploy: {
       raw: {
@@ -982,6 +1027,10 @@ export async function deployPosition({
         upside_pct: upside_pct ?? null,
       },
       normalized: normalizedRangeAudit,
+      dynamic_range_shadow: dynamicRangeShadowAudit,
+      range_width_decision: range_width_decision ?? null,
+      dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+      fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
     },
     source: "dlmm.deploy.range_normalized",
   });
@@ -1030,6 +1079,8 @@ export async function deployPosition({
         wide_range: isWideRange,
         bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
         range_coverage: rangeCoverage,
+        dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+        fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
       },
       message: "DRY RUN — no transaction sent",
     };
@@ -1179,8 +1230,10 @@ export async function deployPosition({
       ) || refreshed?.positions?.find((position) => position.pool === pool_address);
 
       const positionAddress = matching?.position || null;
+      let deployShadowDataCollection = shadow_data_collection ?? null;
       if (positionAddress) {
         const signalSnapshot = getAndClearStagedSignals(pool_address, baseMint);
+        deployShadowDataCollection = shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null;
         trackPosition({
           position: positionAddress,
           pool: pool_address,
@@ -1197,6 +1250,7 @@ export async function deployPosition({
           active_bin: activeBin.binId,
           initial_value_usd,
           signal_snapshot: signalSnapshot,
+          shadow_data_collection: deployShadowDataCollection,
         });
       }
 
@@ -1248,6 +1302,20 @@ export async function deployPosition({
           bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
           range_coverage: rangeCoverage,
           normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_success",
+      });
+      appendMainCandidateDeploySnapshot({
+        candidate: { shadow_data_collection: deployShadowDataCollection },
+        result: { position: positionAddress, pool: pool_address, pool_name },
+        deploy: {
+          relay: true,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          strategy: activeStrategy,
+          strategy_profile: strategyProfile,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          range_coverage: rangeCoverage,
         },
         source: "dlmm.deploy.relay_success",
       });
@@ -1384,6 +1452,7 @@ export async function deployPosition({
 
     _positionsCacheAt = 0;
     const signalSnapshot = getAndClearStagedSignals(pool_address, baseMint);
+    const deployShadowDataCollection = shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null;
     trackPosition({
       position: newPosition.publicKey.toString(),
       pool: pool_address,
@@ -1400,6 +1469,7 @@ export async function deployPosition({
       active_bin: activeBin.binId,
       initial_value_usd,
       signal_snapshot: signalSnapshot,
+      shadow_data_collection: deployShadowDataCollection,
     });
 
     appendDecision({
@@ -1449,6 +1519,20 @@ export async function deployPosition({
         bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
         range_coverage: rangeCoverage,
         normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_success",
+    });
+    appendMainCandidateDeploySnapshot({
+      candidate: { shadow_data_collection: deployShadowDataCollection },
+      result: { position: newPosition.publicKey.toString(), pool: pool_address, pool_name },
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        strategy: activeStrategy,
+        strategy_profile: strategyProfile,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
       },
       source: "dlmm.deploy.local_success",
     });
@@ -1795,6 +1879,20 @@ async function recordDegradedClosePerformance({
     minutes_held: minutesHeld,
     close_reason: reason || "agent decision",
     signal_snapshot: signalSnapshot,
+    shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+  });
+  appendMainCandidateOutcomeSnapshot({
+    tracked,
+    outcome: {
+      position: position_address,
+      pool: poolAddress,
+      pool_name: tracked.pool_name || poolName || poolAddress.slice(0, 8),
+      close_reason: reason || "agent decision",
+      pnl_pct: pnlPct,
+      pnl_usd: pnlUsd,
+      minutes_held: minutesHeld,
+    },
+    source: "dlmm.close.degraded_success",
   });
 
   return {
@@ -2740,6 +2838,20 @@ export async function closePosition({ position_address, reason, urgent }) {
             minutes_held: minutesHeld,
             close_reason: reason || "agent decision",
             signal_snapshot: signalSnapshot,
+            shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+          });
+          appendMainCandidateOutcomeSnapshot({
+            tracked,
+            outcome: {
+              position: position_address,
+              pool: poolAddress,
+              pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+              close_reason: reason || "agent decision",
+              pnl_pct: pnlPct,
+              pnl_usd: pnlUsd,
+              minutes_held: minutesHeld,
+            },
+            source: "dlmm.close.relay_success",
           });
 
           appendDecision({
@@ -3176,6 +3288,20 @@ export async function closePosition({ position_address, reason, urgent }) {
         minutes_held: minutesHeld,
         close_reason: reason || "agent decision",
         signal_snapshot: signalSnapshot,
+        shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+      });
+      appendMainCandidateOutcomeSnapshot({
+        tracked,
+        outcome: {
+          position: position_address,
+          pool: poolAddress,
+          pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+          close_reason: reason || "agent decision",
+          pnl_pct: pnlPct,
+          pnl_usd: pnlUsd,
+          minutes_held: minutesHeld,
+        },
+        source: "dlmm.close.local_success",
       });
 
       appendDecision({
