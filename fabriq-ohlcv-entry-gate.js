@@ -191,6 +191,9 @@ export function resolveFabriqOhlcvEntryGatePolicy(runtimeConfig = {}) {
     lookbackMinutes: positiveInteger(screening.fabriqOhlcvEntryGateLookbackMinutes, 180),
     minRows: positiveInteger(screening.fabriqOhlcvEntryGateMinRows, 20),
     minScore: positiveInteger(screening.fabriqOhlcvEntryGateMinScore, 3),
+    knifeVetoEnabled: screening.fabriqOhlcvEntryGateKnifeVetoEnabled !== false,
+    retraceVetoPct: finiteNumber(screening.fabriqOhlcvEntryGateRetraceVetoPct) ?? -25,
+    reboundMinPct: finiteNumber(screening.fabriqOhlcvEntryGateReboundMinPct) ?? 3,
     blockOnMissingOhlcv: screening.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== false,
   };
 }
@@ -263,7 +266,8 @@ function rowPctChange(current, reference) {
   return ((current / reference) - 1) * 100;
 }
 
-export function evaluateFabriqOhlcvRows(ohlcv, candidate = {}, minScore = 3) {
+export function evaluateFabriqOhlcvRows(ohlcv, candidate = {}, opts = {}) {
+  const { minScore = 3, knifeVetoEnabled = true, retraceVetoPct = -25, reboundMinPct = 3 } = opts;
   const rows = Array.isArray(ohlcv?.rows) ? ohlcv.rows : [];
   const closeValues = closes(rows);
   const volumeValues = volumes(rows);
@@ -321,7 +325,7 @@ export function evaluateFabriqOhlcvRows(ohlcv, candidate = {}, minScore = 3) {
   }
 
   const pumpRetrace = trendPct != null && trendPct > 25 && retraceFromHighPct != null && retraceFromHighPct <= -18;
-  const reboundPass = reboundFromLowPct != null && reboundFromLowPct >= 3 && latestGreen && closeRising;
+  const reboundPass = reboundFromLowPct != null && reboundFromLowPct >= reboundMinPct && latestGreen && closeRising;
   if (pumpRetrace && !reboundPass) {
     reasonCodes.push("pump_retrace_reject");
     return {
@@ -333,6 +337,20 @@ export function evaluateFabriqOhlcvRows(ohlcv, candidate = {}, minScore = 3) {
     };
   }
   if (pumpRetrace && reboundPass) reasonCodes.push("pump_retrace_rebound_pass");
+
+  const sharpRetraceKnife = knifeVetoEnabled
+    && retraceFromHighPct != null && retraceFromHighPct <= retraceVetoPct
+    && !reboundPass;
+  if (sharpRetraceKnife) {
+    reasonCodes.push("first_bounce_knife_reject");
+    return {
+      result: "reject",
+      score,
+      selected_signal: null,
+      reason_codes: reasonCodes,
+      indicators: { rsi, macd, bollinger: bb, trendPct, retraceFromHighPct, reboundFromLowPct, volumeActiveTvl },
+    };
+  }
 
   return {
     result: score >= minScore ? "accept" : "reject",
@@ -403,7 +421,12 @@ export async function evaluateFabriqOhlcvEntryGate(candidate = {}, runtimeConfig
           sufficient: rowCount >= policy.minRows,
         });
         if (!sufficient(ohlcv, policy.minRows)) continue;
-        const evaluated = evaluateFabriqOhlcvRows(ohlcv, candidate, policy.minScore);
+        const evaluated = evaluateFabriqOhlcvRows(ohlcv, candidate, {
+          minScore: policy.minScore,
+          knifeVetoEnabled: policy.knifeVetoEnabled,
+          retraceVetoPct: policy.retraceVetoPct,
+          reboundMinPct: policy.reboundMinPct,
+        });
         return {
           ...gate,
           result: evaluated.result,

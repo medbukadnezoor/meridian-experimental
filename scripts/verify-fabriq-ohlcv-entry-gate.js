@@ -49,6 +49,27 @@ function collapsingPumpRows() {
   return rows;
 }
 
+function knifeRows(count = 40) {
+  // climb to a high, then a steady decline that ends red at the low (no rebound)
+  const out = [];
+  let price = 1;
+  for (let i = 0; i < count; i += 1) {
+    const open = price;
+    price = i < count * 0.4 ? price * 1.02 : price * 0.975;
+    out.push(row(1_800_000_000 + i * 60, open, price, 200));
+  }
+  return out;
+}
+
+function knifeThenBounceRows() {
+  // same knife, then two green rising candles >3% off the low (confirmed rebound)
+  const rows = knifeRows(38);
+  const low = rows.at(-1).close;
+  rows.push(row(1_800_000_000 + 38 * 60, low, low * 1.03, 800));
+  rows.push(row(1_800_000_000 + 39 * 60, low * 1.03, low * 1.06, 1200));
+  return rows;
+}
+
 function gateConfig(overrides = {}) {
   return {
     screening: {
@@ -106,6 +127,19 @@ assert.ok(accepted.reason_codes.includes("volume_expansion"), "volume expansion 
 const rejected = evaluateFabriqOhlcvRows({ rows: collapsingPumpRows(), source: "dexpaprika" }, { active_tvl: 10_000 });
 assert.strictEqual(rejected.result, "reject", "collapsing post-spike candle is rejected");
 assert.ok(rejected.reason_codes.includes("pump_retrace_reject"), "pump-retrace reason is present");
+
+// First-bounce knife veto (live profile: score gate off, knife veto on)
+const liveOpts = { minScore: 0, knifeVetoEnabled: true, retraceVetoPct: -25, reboundMinPct: 3 };
+const knife = evaluateFabriqOhlcvRows({ rows: knifeRows(), source: "dexpaprika" }, { active_tvl: 10_000 }, liveOpts);
+assert.strictEqual(knife.result, "reject", "sharp-retrace knife with no rebound is vetoed even with the score gate off");
+assert.ok(knife.reason_codes.includes("first_bounce_knife_reject"), "knife veto reason code present");
+
+const bounced = evaluateFabriqOhlcvRows({ rows: knifeThenBounceRows(), source: "dexpaprika" }, { active_tvl: 10_000 }, liveOpts);
+assert.ok(!bounced.reason_codes.includes("first_bounce_knife_reject"), "a confirmed rebound escapes the knife veto");
+assert.strictEqual(bounced.result, "accept", "post-dump confirmed bounce is admitted (delay, not ban)");
+
+const knifeVetoOff = evaluateFabriqOhlcvRows({ rows: knifeRows(), source: "dexpaprika" }, { active_tvl: 10_000 }, { minScore: 0, knifeVetoEnabled: false });
+assert.strictEqual(knifeVetoOff.result, "accept", "knife veto is toggleable via config");
 
 const candidate = { pool_address: "poolA", base_mint: "mintA", active_tvl: 10_000 };
 const sufficientDex = await evaluateFabriqOhlcvEntryGate(candidate, gateConfig(), {
