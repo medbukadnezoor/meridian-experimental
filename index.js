@@ -1949,7 +1949,13 @@ Summarize the current portfolio health, total fees earned, and performance of al
             break;
           }
         }
-        if (await tryLiveFeeExitPolicy(p, "PnL poll")) {
+        let feeExitTriggered = false;
+        try {
+          feeExitTriggered = await tryLiveFeeExitPolicy(p, "PnL poll");
+        } catch (e) {
+          log("cron_error", `[PnL poll] Fee exit policy error: ${p.pair} — ${e.message}`);
+        }
+        if (feeExitTriggered) {
           break;
         }
         if (closeRule) {
