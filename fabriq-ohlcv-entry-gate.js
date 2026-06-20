@@ -21,6 +21,11 @@ function positiveInteger(value, fallback) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
 }
 
+function nonNegativeInteger(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+}
+
 function normalizeMode(value) {
   const normalized = String(value || "shadow").trim().toLowerCase();
   return normalized === "live" ? "live" : "shadow";
@@ -190,7 +195,7 @@ export function resolveFabriqOhlcvEntryGatePolicy(runtimeConfig = {}) {
       : ["1m", "5m", "15m"],
     lookbackMinutes: positiveInteger(screening.fabriqOhlcvEntryGateLookbackMinutes, 180),
     minRows: positiveInteger(screening.fabriqOhlcvEntryGateMinRows, 20),
-    minScore: positiveInteger(screening.fabriqOhlcvEntryGateMinScore, 3),
+    minScore: nonNegativeInteger(screening.fabriqOhlcvEntryGateMinScore, 3),
     knifeVetoEnabled: screening.fabriqOhlcvEntryGateKnifeVetoEnabled !== false,
     retraceVetoPct: finiteNumber(screening.fabriqOhlcvEntryGateRetraceVetoPct) ?? -25,
     reboundMinPct: finiteNumber(screening.fabriqOhlcvEntryGateReboundMinPct) ?? 3,
