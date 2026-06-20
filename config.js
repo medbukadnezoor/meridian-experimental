@@ -64,6 +64,7 @@ export function reloadScreeningThresholds() {
   try {
     const fresh = loadUserConfig(USER_CONFIG_PATH);
     const s = config.screening;
+    const strategy = config.strategy;
     s.source = normalizeScreeningSource(fresh.screening?.source ?? fresh.screeningSource ?? s.source);
     if (fresh.minFeeActiveTvlRatio != null) s.minFeeActiveTvlRatio = fresh.minFeeActiveTvlRatio;
     if (fresh.useDiscordSignals !== undefined) s.useDiscordSignals = fresh.useDiscordSignals;
@@ -128,6 +129,24 @@ export function reloadScreeningThresholds() {
         ? freshScreening.targetPoolNeedleVetoLiveReasonCodes
         : fresh.targetPoolNeedleVetoLiveReasonCodes;
     }
+    if (freshScreening.fabriqOhlcvEntryGateEnabled !== undefined || fresh.fabriqOhlcvEntryGateEnabled !== undefined) s.fabriqOhlcvEntryGateEnabled = freshScreening.fabriqOhlcvEntryGateEnabled ?? fresh.fabriqOhlcvEntryGateEnabled;
+    if (freshScreening.fabriqOhlcvEntryGateMode !== undefined || fresh.fabriqOhlcvEntryGateMode !== undefined) s.fabriqOhlcvEntryGateMode = freshScreening.fabriqOhlcvEntryGateMode ?? fresh.fabriqOhlcvEntryGateMode;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateProviders) || Array.isArray(fresh.fabriqOhlcvEntryGateProviders)) s.fabriqOhlcvEntryGateProviders = Array.isArray(freshScreening.fabriqOhlcvEntryGateProviders) ? freshScreening.fabriqOhlcvEntryGateProviders : fresh.fabriqOhlcvEntryGateProviders;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder) || Array.isArray(fresh.fabriqOhlcvEntryGateDecisiveProviderOrder)) s.fabriqOhlcvEntryGateDecisiveProviderOrder = Array.isArray(freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder) ? freshScreening.fabriqOhlcvEntryGateDecisiveProviderOrder : fresh.fabriqOhlcvEntryGateDecisiveProviderOrder;
+    if (Array.isArray(freshScreening.fabriqOhlcvEntryGateIntervals) || Array.isArray(fresh.fabriqOhlcvEntryGateIntervals)) s.fabriqOhlcvEntryGateIntervals = Array.isArray(freshScreening.fabriqOhlcvEntryGateIntervals) ? freshScreening.fabriqOhlcvEntryGateIntervals : fresh.fabriqOhlcvEntryGateIntervals;
+    if (freshScreening.fabriqOhlcvEntryGateLookbackMinutes !== undefined || fresh.fabriqOhlcvEntryGateLookbackMinutes !== undefined) s.fabriqOhlcvEntryGateLookbackMinutes = freshScreening.fabriqOhlcvEntryGateLookbackMinutes ?? fresh.fabriqOhlcvEntryGateLookbackMinutes;
+    if (freshScreening.fabriqOhlcvEntryGateMinRows !== undefined || fresh.fabriqOhlcvEntryGateMinRows !== undefined) s.fabriqOhlcvEntryGateMinRows = freshScreening.fabriqOhlcvEntryGateMinRows ?? fresh.fabriqOhlcvEntryGateMinRows;
+    if (freshScreening.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== undefined || fresh.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== undefined) s.fabriqOhlcvEntryGateBlockOnMissingOhlcv = freshScreening.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? fresh.fabriqOhlcvEntryGateBlockOnMissingOhlcv;
+    if (freshScreening.criticalThinEntryOverlayEnabled !== undefined || fresh.criticalThinEntryOverlayEnabled !== undefined) s.criticalThinEntryOverlayEnabled = freshScreening.criticalThinEntryOverlayEnabled ?? fresh.criticalThinEntryOverlayEnabled;
+    if (freshScreening.criticalThinEntryOverlayMode !== undefined || fresh.criticalThinEntryOverlayMode !== undefined) s.criticalThinEntryOverlayMode = freshScreening.criticalThinEntryOverlayMode ?? fresh.criticalThinEntryOverlayMode;
+    if (freshScreening.criticalThinMcapUsd !== undefined || fresh.criticalThinMcapUsd !== undefined) s.criticalThinMcapUsd = freshScreening.criticalThinMcapUsd ?? fresh.criticalThinMcapUsd;
+    if (freshScreening.criticalThinActiveTvlUsd !== undefined || fresh.criticalThinActiveTvlUsd !== undefined) s.criticalThinActiveTvlUsd = freshScreening.criticalThinActiveTvlUsd ?? fresh.criticalThinActiveTvlUsd;
+    if (freshScreening.criticalThinWatchMcapUsd !== undefined || fresh.criticalThinWatchMcapUsd !== undefined) s.criticalThinWatchMcapUsd = freshScreening.criticalThinWatchMcapUsd ?? fresh.criticalThinWatchMcapUsd;
+    if (freshScreening.criticalThinWatchActiveTvlUsd !== undefined || fresh.criticalThinWatchActiveTvlUsd !== undefined) s.criticalThinWatchActiveTvlUsd = freshScreening.criticalThinWatchActiveTvlUsd ?? fresh.criticalThinWatchActiveTvlUsd;
+    if (freshScreening.criticalThinRequireChartAccept !== undefined || fresh.criticalThinRequireChartAccept !== undefined) s.criticalThinRequireChartAccept = freshScreening.criticalThinRequireChartAccept ?? fresh.criticalThinRequireChartAccept;
+    if (freshScreening.criticalThinMinFeeActiveTvlRatio !== undefined || fresh.criticalThinMinFeeActiveTvlRatio !== undefined) s.criticalThinMinFeeActiveTvlRatio = freshScreening.criticalThinMinFeeActiveTvlRatio ?? fresh.criticalThinMinFeeActiveTvlRatio;
+    if (freshScreening.criticalThinMinVolumeActiveTvlMultiple !== undefined || fresh.criticalThinMinVolumeActiveTvlMultiple !== undefined) s.criticalThinMinVolumeActiveTvlMultiple = freshScreening.criticalThinMinVolumeActiveTvlMultiple ?? fresh.criticalThinMinVolumeActiveTvlMultiple;
+    if (freshScreening.criticalThinBlockOnMissingInputs !== undefined || fresh.criticalThinBlockOnMissingInputs !== undefined) s.criticalThinBlockOnMissingInputs = freshScreening.criticalThinBlockOnMissingInputs ?? fresh.criticalThinBlockOnMissingInputs;
     if (fresh.minBinStep     != null) s.minBinStep     = fresh.minBinStep;
     if (fresh.maxBinStep     != null) s.maxBinStep     = fresh.maxBinStep;
     if (fresh.timeframe         != null) s.timeframe         = fresh.timeframe;
@@ -140,6 +159,24 @@ export function reloadScreeningThresholds() {
     if (fresh.avoidPvpSymbols   !== undefined) s.avoidPvpSymbols = fresh.avoidPvpSymbols;
     if (fresh.blockPvpSymbols   !== undefined) s.blockPvpSymbols = fresh.blockPvpSymbols;
     if (fresh.maxBotHoldersPct  != null) s.maxBotHoldersPct = fresh.maxBotHoldersPct;
+    if (fresh.minSingleSidedSolBins !== undefined) strategy.minSingleSidedSolBins = fresh.minSingleSidedSolBins;
+    if (fresh.dynamicRangeWidthEnabled !== undefined) strategy.dynamicRangeWidthEnabled = fresh.dynamicRangeWidthEnabled;
+    if (fresh.dynamicRangeWidthMode !== undefined) strategy.dynamicRangeWidthMode = fresh.dynamicRangeWidthMode;
+    if (fresh.dynamicRangeWidthMinBins !== undefined) strategy.dynamicRangeWidthMinBins = fresh.dynamicRangeWidthMinBins;
+    if (fresh.dynamicRangeWidthMaxBins !== undefined) strategy.dynamicRangeWidthMaxBins = fresh.dynamicRangeWidthMaxBins;
+    if (fresh.dynamicRangeWidthBlockOnMissingInputs !== undefined) strategy.dynamicRangeWidthBlockOnMissingInputs = fresh.dynamicRangeWidthBlockOnMissingInputs;
+    if (fresh.dynamicRangeWidthMaxDeploySharePct !== undefined) strategy.dynamicRangeWidthMaxDeploySharePct = fresh.dynamicRangeWidthMaxDeploySharePct;
+    if (fresh.dynamicRangeWidthLowerMcapInputFloor !== undefined) strategy.dynamicRangeWidthLowerMcapInputFloor = fresh.dynamicRangeWidthLowerMcapInputFloor;
+    if (fresh.dynamicRangeWidthMinTargetDownsidePct !== undefined) strategy.dynamicRangeWidthMinTargetDownsidePct = fresh.dynamicRangeWidthMinTargetDownsidePct;
+    if (fresh.dynamicRangeWidthFeeDensityTighteningEnabled !== undefined) strategy.dynamicRangeWidthFeeDensityTighteningEnabled = fresh.dynamicRangeWidthFeeDensityTighteningEnabled;
+    if (fresh.dynamicRangeWidthStrongFeeActiveTvlRatio !== undefined) strategy.dynamicRangeWidthStrongFeeActiveTvlRatio = fresh.dynamicRangeWidthStrongFeeActiveTvlRatio;
+    if (fresh.dynamicRangeWidthStrongVolumeActiveTvlMultiple !== undefined) strategy.dynamicRangeWidthStrongVolumeActiveTvlMultiple = fresh.dynamicRangeWidthStrongVolumeActiveTvlMultiple;
+    if (fresh.dynamicRangeWidthStrongFeeVelocityUsdPerMin !== undefined) strategy.dynamicRangeWidthStrongFeeVelocityUsdPerMin = fresh.dynamicRangeWidthStrongFeeVelocityUsdPerMin;
+    if (fresh.dynamicRangeWidthStrongTightenPct !== undefined) strategy.dynamicRangeWidthStrongTightenPct = fresh.dynamicRangeWidthStrongTightenPct;
+    if (fresh.dynamicRangeWidthGoodFeeActiveTvlRatio !== undefined) strategy.dynamicRangeWidthGoodFeeActiveTvlRatio = fresh.dynamicRangeWidthGoodFeeActiveTvlRatio;
+    if (fresh.dynamicRangeWidthGoodVolumeActiveTvlMultiple !== undefined) strategy.dynamicRangeWidthGoodVolumeActiveTvlMultiple = fresh.dynamicRangeWidthGoodVolumeActiveTvlMultiple;
+    if (fresh.dynamicRangeWidthGoodTightenPct !== undefined) strategy.dynamicRangeWidthGoodTightenPct = fresh.dynamicRangeWidthGoodTightenPct;
+    if (Array.isArray(fresh.dynamicRangeWidthTiers)) strategy.dynamicRangeWidthTiers = fresh.dynamicRangeWidthTiers;
     if (fresh.allowedLaunchpads !== undefined) s.allowedLaunchpads = fresh.allowedLaunchpads;
     if (fresh.blockedLaunchpads !== undefined) s.blockedLaunchpads = fresh.blockedLaunchpads;
     if (fresh.okxDiscovery !== undefined) s.okxDiscovery = fresh.okxDiscovery;

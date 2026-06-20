@@ -29,6 +29,7 @@ const KNOWN_SCOUT_STRATEGIES = [
 ];
 const KNOWN_MAIN_STRATEGIES = [
   "evil_panda_fee_dump_v1",
+  "main_fabriq_degen_fee_rotation_v1",
 ];
 const KNOWN_RUNTIME_STRATEGIES = [
   ...KNOWN_SCOUT_STRATEGIES,
@@ -65,6 +66,12 @@ if (runtimeStrategyExists) {
     assert.strictEqual(active.range?.bins_below, 35, "main EvilPanda fee-dump profile keeps bins_below at 35");
     assert.strictEqual(active.range?.bins_below_min, 35, "main EvilPanda fee-dump profile pins min bins_below at 35");
     assert.strictEqual(active.range?.bins_below_max, 35, "main EvilPanda fee-dump profile pins max bins_below at 35");
+  } else if (active.id === "main_fabriq_degen_fee_rotation_v1") {
+    assert.strictEqual(active.range?.type, "dynamic_fee_density_recovery_hold", "main Fabriq degen fee-rotation profile uses dynamic fee-density range policy");
+    assert.strictEqual(active.range?.bins_below, 35, "main Fabriq degen fee-rotation profile keeps bins_below fallback at 35");
+    assert.strictEqual(active.range?.bins_below_min, 12, "main Fabriq degen fee-rotation profile allows dynamic min bins below 35");
+    assert.strictEqual(active.range?.bins_below_max, 120, "main Fabriq degen fee-rotation profile allows dynamic max bins");
+    assert.strictEqual(active.range?.dynamic_range_width_enabled, true, "main Fabriq degen fee-rotation enables dynamic width");
   } else {
     assert.strictEqual(active.id, "scout_tight_bidask_retrace", "runtime scout active strategy is tight bid_ask retrace");
     assert.strictEqual(active.range?.type, "tight", "runtime scout bid_ask strategy uses tight range policy");
@@ -205,6 +212,7 @@ console.log(JSON.stringify({
   active_strategy_is_known_scout_strategy: runtimeStrategyExists ? KNOWN_SCOUT_STRATEGIES.includes(active.id) : true,
   active_strategy_is_known_runtime_strategy: true,
   active_strategy_is_main_evil_panda_fee_dump: runtimeStrategyExists ? active.id === "evil_panda_fee_dump_v1" : false,
+  active_strategy_is_main_fabriq_degen_fee_rotation: runtimeStrategyExists ? active.id === "main_fabriq_degen_fee_rotation_v1" : false,
   runtime_active_strategy: runtimeStrategyExists ? active.id : null,
   tight_bidask_strategy_verified: runtimeStrategyExists ? active.lp_strategy === "bid_ask" : true,
   range_policy_from_json: true,

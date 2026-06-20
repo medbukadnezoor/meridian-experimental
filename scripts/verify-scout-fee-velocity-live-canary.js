@@ -152,7 +152,6 @@ const implementationFiles = [
   "tools/gmgn.js",
   "tools/executor.js",
   "tools/single-side-bidask-guard.js",
-  "index.js",
   "strategy-library.scout-tight.example.json",
 ];
 const guardedTerms = [

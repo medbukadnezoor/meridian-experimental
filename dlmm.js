@@ -742,15 +742,12 @@ export async function deployPosition({
   active_tvl,
   price_change_pct,
   deploy_share_of_active_tvl_pct,
-  fee_velocity_usd_per_min,
   initial_value_usd,
-  volume_active_tvl_multiple,
   shadow_data_collection,
   dynamic_range_shadow,
   range_width_decision,
   dynamic_pool_sizing_decision,
   fabriq_ohlcv_entry_gate,
-  critical_thin_entry_overlay,
   deploy_provenance,
 }) {
   pool_address = normalizeMint(pool_address);
@@ -873,15 +870,12 @@ export async function deployPosition({
     price_change_pct: price_change_pct ?? null,
     deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
     fee_tvl_ratio: fee_tvl_ratio ?? null,
-    volume_active_tvl_multiple: volume_active_tvl_multiple ?? null,
-    fee_velocity_usd_per_min: fee_velocity_usd_per_min ?? null,
     organic_score: organic_score ?? null,
     initial_value_usd: initial_value_usd ?? null,
     dynamic_range_shadow: dynamic_range_shadow ?? null,
     range_width_decision: range_width_decision ?? null,
     dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
     fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
-    critical_thin_entry_overlay: critical_thin_entry_overlay ?? null,
     deploy_provenance: deploy_provenance ?? null,
   })}`);
 
@@ -953,7 +947,6 @@ export async function deployPosition({
     price_change_pct,
     deploy_share_of_active_tvl_pct,
     fee_tvl_ratio,
-    fee_velocity_usd_per_min,
     organic_score,
   }, {
     deployAmountSol: finalAmountY,
@@ -1014,15 +1007,12 @@ export async function deployPosition({
       price_change_pct: price_change_pct ?? null,
       deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
       fee_tvl_ratio: fee_tvl_ratio ?? null,
-      volume_active_tvl_multiple: volume_active_tvl_multiple ?? null,
-      fee_velocity_usd_per_min: fee_velocity_usd_per_min ?? null,
       organic_score: organic_score ?? null,
       initial_value_usd: initial_value_usd ?? null,
       dynamic_range_shadow: dynamicRangeShadowAudit,
       range_width_decision: range_width_decision ?? null,
       dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
       fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
-      critical_thin_entry_overlay: critical_thin_entry_overlay ?? null,
       deploy_provenance: deploy_provenance ?? null,
     },
     deploy: {
@@ -1041,7 +1031,6 @@ export async function deployPosition({
       range_width_decision: range_width_decision ?? null,
       dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
       fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
-      critical_thin_entry_overlay: critical_thin_entry_overlay ?? null,
     },
     source: "dlmm.deploy.range_normalized",
   });
@@ -1092,7 +1081,6 @@ export async function deployPosition({
         range_coverage: rangeCoverage,
         dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
         fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
-        critical_thin_entry_overlay: critical_thin_entry_overlay ?? null,
       },
       message: "DRY RUN — no transaction sent",
     };

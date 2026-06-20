@@ -14,6 +14,8 @@ import { fileURLToPath } from "url";
 import { evaluateFeeExitPolicy } from "../fee-exit-policy.js";
 import {
   evaluateFeeExitConfluenceFromRows,
+  feeExitConfluenceBypassReason,
+  filterClosedConfluenceCandles,
   shouldGateFeeExitDecision,
 } from "../fee-exit-confluence.js";
 import { buildConfig } from "../config-builder.js";
@@ -21,6 +23,23 @@ import { classifyCloseReason } from "../performance-metrics.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
+const EVIL_PANDA_STRATEGY_PROFILE_FIXTURE = Object.freeze({
+  active: "evil_panda_fee_dump_v1",
+  strategies: {
+    evil_panda_fee_dump_v1: {
+      id: "evil_panda_fee_dump_v1",
+      lp_strategy: "bid_ask",
+      entry: {
+        single_side: "sol",
+      },
+      range: {
+        bins_below: 35,
+        bins_above: 0,
+      },
+    },
+  },
+});
+const FABRIQ_DEGEN_STRATEGY_ID = "main_fabriq_degen_fee_rotation_v1";
 
 function read(relativePath) {
   return fs.readFileSync(join(ROOT, relativePath), "utf8");
@@ -41,7 +60,10 @@ function baseManagement(policyOverrides = {}) {
       feeHarvestEnabled: true,
       feeHarvestMinHoldMinutes: 25,
       feeHarvestMinFeePctOfEntry: 0.75,
-      feeHarvestMinNetPnlPct: 0.35,
+      feeHarvestMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceMinFeePctOfEntry: 2.0,
+      feeHarvestBypassConfluenceMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceStrongNetPnlPct: 0.75,
       noFeeAbortEnabled: true,
       noFeeAbortMaxHoldMinutes: 60,
       noFeeAbortMaxFeePctOfEntry: 0.05,
@@ -65,8 +87,10 @@ function baseManagement(policyOverrides = {}) {
       exitConfluenceRsiOverbought: 90,
       exitConfluenceBbPeriod: 20,
       exitConfluenceBbStdDev: 2,
-      exitConfluenceAggregateMin: 5,
-      exitConfluenceLookbackMinutes: 180,
+      exitConfluenceAggregateMin: 3,
+      exitConfluenceLookbackMinutes: 90,
+      exitConfluenceClosedCandlesOnly: true,
+      exitConfluenceCandleCloseLagSeconds: 10,
       exitConfluenceRules: ["fee_harvest", "max_hold_timeout"],
       ...policyOverrides,
     },
@@ -222,6 +246,11 @@ async function main() {
   const harvest = decision({ age_minutes: 30, pnl_pct: 0.5, total_value_usd: 0.503, unclaimed_fees_usd: 0.004 });
   assert.strictEqual(harvest?.rule, "fee_harvest", "fee harvest threshold should still trigger");
   assert.strictEqual(shouldGateFeeExitDecision(harvest, baseManagement().feeExitPolicy), true, "fee harvest should require confluence");
+  assert.strictEqual(feeExitConfluenceBypassReason(harvest, baseManagement().feeExitPolicy), null, "ordinary fee harvest should still wait for confluence");
+  const highFeeHarvest = decision({ age_minutes: 30, pnl_pct: 0.3, total_value_usd: 0.503, unclaimed_fees_usd: 0.011 });
+  assert.strictEqual(feeExitConfluenceBypassReason(highFeeHarvest, baseManagement().feeExitPolicy), "fee_harvest_fee_and_net_pnl_bypass", "high-fee positive harvest should bypass confluence");
+  const strongNetHarvest = decision({ age_minutes: 30, pnl_pct: 0.8, total_value_usd: 0.504, unclaimed_fees_usd: 0.004 });
+  assert.strictEqual(feeExitConfluenceBypassReason(strongNetHarvest, baseManagement().feeExitPolicy), "fee_harvest_strong_net_pnl_bypass", "strong net-PnL harvest should bypass confluence");
 
   const emergency = decision({ age_minutes: 10, pnl_pct: -7, total_value_usd: 0.465, unclaimed_fees_usd: 0.0001 }, {
     feeHarvestEnabled: false,
@@ -236,28 +265,85 @@ async function main() {
   const strongConfluence = evaluateFeeExitConfluenceFromRows(makeRows({ breakout: true }), baseManagement().feeExitPolicy);
   assert.strictEqual(strongConfluence.accepted, true, "breakout rows should pass discretionary exit");
   assert.ok(strongConfluence.signalCount >= 2, "confluence pass should have at least 2 signals");
+  const closedFilter = filterClosedConfluenceCandles([
+    { timestamp: 1_800, open: 1, high: 1.1, low: 0.9, close: 1.05 },
+    { timestamp: 1_981, open: 1.05, high: 1.2, low: 1.0, close: 1.1 },
+  ], { closedCandlesOnly: true, candleCloseLagSeconds: 10, nowMs: 1_990_000 });
+  assert.strictEqual(closedFilter.rows.length, 1, "closed-candle filter should drop candles after now-lag");
+  assert.strictEqual(closedFilter.latestClosedCandleTs, 1_800, "closed-candle filter should expose latest closed candle timestamp");
+  assert.strictEqual(closedFilter.droppedOpenCandleCount, 1, "closed-candle filter should count dropped open candles");
 
   const example = loadJson("user-config.example.json");
-  assert.strictEqual(example.deployAmountSol, 0.5, "deploy size remains 0.5 SOL");
+  assert.strictEqual(example.deployAmountSol, 5, "Fabriq example deploy size is 5 SOL");
   assert.ok(!String(example.preset || "").toLowerCase().includes("nanocap"), "main example must not inherit nanocap preset defaults");
-  assert.strictEqual(example.maxPositions, 1, "max positions should be 1 for validation window");
-  assert.strictEqual(example.feeExitPolicy.strategyProfile, "evil_panda_fee_dump_v1", "example uses profile");
-  assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 25, "patient fee harvest hold");
-  assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 60, "slow no-fee abort");
+  assert.strictEqual(example.preset, "main-fabriq-degen-fee-rotation-v1", "main example uses Fabriq degen fee-rotation preset");
+  assert.strictEqual(example.maxPositions, 4, "Fabriq example max positions is 4");
+  assert.strictEqual(example.maxDeployAmount, 5, "Fabriq example max deploy amount is 5 SOL");
+  assert.strictEqual(example.binsBelow, 35, "Fabriq example keeps 35-bin fallback below");
+  assert.strictEqual(example.minSingleSidedSolBins, 12, "Fabriq example allows dynamic width below 35 bins");
+  assert.strictEqual(example.dynamicRangeWidthEnabled, true, "Fabriq example enables dynamic range width");
+  assert.strictEqual(example.dynamicRangeWidthMode, "live", "Fabriq example applies dynamic range width live");
+  assert.strictEqual(example.dynamicRangeWidthFeeDensityTighteningEnabled, true, "Fabriq example enables fee-density tightening");
+  assert.strictEqual(example.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "example uses Fabriq fee-rotation profile");
+  assert.strictEqual(example.recoveryHoldProfileEnabled, true, "Fabriq example enables recovery-hold profile");
+  assert.strictEqual(example.stopLossPct, null, "Fabriq recovery-hold disables ordinary stop loss");
+  assert.strictEqual(example.hardStopLossPct, -25, "Fabriq recovery-hold keeps -25% catastrophic stop");
+  assert.strictEqual(example.rollingDrawdownExitEnabled, false, "Fabriq recovery-hold disables rolling drawdown close");
+  assert.strictEqual(example.earlyDumpPct, null, "Fabriq recovery-hold disables early dump close");
+  assert.strictEqual(example.supertrendLossExitEnabled, false, "Fabriq recovery-hold disables Supertrend loss close");
+  assert.strictEqual(example.feeExitPolicy.recoveryHoldPositiveOnly, true, "Fabriq recovery-hold gates fee exits to positive PnL");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 8, "Fabriq fee harvest can exit after 8m");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinFeePctOfEntry, 0.75, "Fabriq base fee harvest fee floor remains 0.75%");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinNetPnlPct, 0.25, "Fabriq base fee harvest net PnL floor remains 0.25%");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceMinFeePctOfEntry, 2.0, "Fabriq high-fee harvest bypass requires 2.0% fees");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceMinNetPnlPct, 0.25, "Fabriq high-fee harvest bypass keeps 0.25% net PnL floor");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceStrongNetPnlPct, 0.75, "Fabriq strong net PnL bypass requires 0.75%");
+  assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 20, "Fabriq no-fee abort is rapid");
   assert.strictEqual(example.feeExitPolicy.exitConfluenceEnabled, true, "confluence enabled");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceAggregateMin, 3, "Fabriq confluence targets locally rolled 3m candles");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceLookbackMinutes, 90, "Fabriq confluence uses 90m lookback");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceClosedCandlesOnly, true, "Fabriq confluence uses complete candles only");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceCandleCloseLagSeconds, 10, "Fabriq confluence waits 10s after candle close");
 
   const built = buildConfig(example, {});
-  assert.strictEqual(built.risk.maxPositions, 1, "runtime config resolves maxPositions=1");
-  assert.strictEqual(built.management.feeExitPolicy.strategyProfile, "evil_panda_fee_dump_v1", "runtime keeps strategy profile");
+  assert.strictEqual(built.risk.maxPositions, 4, "runtime config resolves maxPositions=4");
+  assert.strictEqual(built.risk.maxDeployAmount, 5, "runtime config resolves maxDeployAmount=5");
+  assert.strictEqual(built.strategy.binsBelow, 35, "runtime config resolves binsBelow=35");
+  assert.strictEqual(built.strategy.minSingleSidedSolBins, 12, "runtime config resolves lower dynamic min bins");
+  assert.strictEqual(built.strategy.dynamicRangeWidthEnabled, true, "runtime config resolves dynamic width enabled");
+  assert.strictEqual(built.strategy.dynamicRangeWidthMode, "live", "runtime config resolves dynamic width live");
+  assert.strictEqual(built.management.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "runtime keeps Fabriq strategy profile");
+  assert.strictEqual(built.management.recoveryHoldProfileEnabled, true, "runtime keeps recovery-hold profile enabled");
+  assert.strictEqual(built.management.feeExitPolicy.recoveryHoldPositiveOnly, true, "runtime keeps fee exits positive-only");
   assert.strictEqual(built.management.feeExitPolicy.exitConfluenceMinSignals, 2, "runtime keeps confluence threshold");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceAggregateMin, 3, "runtime keeps 3m confluence target");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceLookbackMinutes, 90, "runtime keeps 90m confluence lookback");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceClosedCandlesOnly, true, "runtime keeps closed-candle confluence");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceCandleCloseLagSeconds, 10, "runtime keeps confluence lag");
   assert.strictEqual(built.management.noFeeAbortCooldownHours, 12, "runtime keeps no-fee cooldown");
   assert.strictEqual(built.management.velocityStopCooldownHours, 24, "runtime keeps velocity cooldown");
   assert.strictEqual(built.management.pnlSnapshotBotName, "meridian", "main profile resolves meridian PnL snapshot bot name");
 
   const strategyLibrary = loadJson("strategy-library.json");
-  assert.strictEqual(strategyLibrary.active, "evil_panda_fee_dump_v1", "strategy library active profile should be evil panda");
-  assert.ok(strategyLibrary.strategies.evil_panda_fee_dump_v1, "strategy profile should exist");
-  assert.strictEqual(strategyLibrary.strategies.evil_panda_fee_dump_v1.range.bins_below, 35, "main keeps tight bid_ask bins");
+  const fabriqProfile = strategyLibrary.strategies?.[FABRIQ_DEGEN_STRATEGY_ID];
+  assert.strictEqual(strategyLibrary.active, FABRIQ_DEGEN_STRATEGY_ID, "strategy library active profile should be Fabriq degen fee rotation");
+  assert.ok(fabriqProfile, "strategy library contains Fabriq degen fee-rotation profile");
+  assert.strictEqual(fabriqProfile.lp_strategy, "bid_ask", "Fabriq profile should use bid_ask");
+  assert.strictEqual(fabriqProfile.entry?.single_side, "sol", "Fabriq profile should be SOL-only");
+  assert.strictEqual(fabriqProfile.range?.type, "dynamic_fee_density_recovery_hold", "Fabriq profile uses dynamic fee-density range policy");
+  assert.strictEqual(fabriqProfile.range?.bins_below, 35, "Fabriq profile keeps 35-bin fallback below");
+  assert.strictEqual(fabriqProfile.range?.bins_below_min, 12, "Fabriq profile allows dynamic min bins below 35");
+  assert.strictEqual(fabriqProfile.range?.bins_below_max, 120, "Fabriq profile allows dynamic max bins");
+  assert.strictEqual(fabriqProfile.range?.bins_above, 0, "Fabriq profile pins bins_above to zero");
+  assert.strictEqual(fabriqProfile.range?.dynamic_range_width_enabled, true, "Fabriq profile enables dynamic width");
+
+  const evilPandaProfile = EVIL_PANDA_STRATEGY_PROFILE_FIXTURE.strategies.evil_panda_fee_dump_v1;
+  assert.strictEqual(EVIL_PANDA_STRATEGY_PROFILE_FIXTURE.active, "evil_panda_fee_dump_v1", "strategy fixture active profile should be EvilPanda fee-dump");
+  assert.strictEqual(evilPandaProfile.id, "evil_panda_fee_dump_v1", "strategy profile fixture id should be EvilPanda fee-dump");
+  assert.strictEqual(evilPandaProfile.lp_strategy, "bid_ask", "strategy profile fixture should use bid_ask");
+  assert.strictEqual(evilPandaProfile.entry?.single_side, "sol", "strategy profile fixture should be SOL-only");
+  assert.strictEqual(evilPandaProfile.range?.bins_below, 35, "main keeps tight bid_ask bins in EvilPanda profile fixture");
+  assert.strictEqual(evilPandaProfile.range?.bins_above, 0, "EvilPanda profile fixture pins bins_above to zero");
 
   assert.strictEqual(classifyCloseReason("Fee harvest: fees reached"), "fee_harvest", "fee harvest bucket");
   assert.strictEqual(classifyCloseReason("No-fee abort: stale"), "no_fee_abort", "no-fee bucket");
@@ -272,6 +358,8 @@ async function main() {
   const confluence = read("fee-exit-confluence.js");
   assert.ok(index.includes("management.feeExitPolicy.confluence"), "runtime logs confluence decision context");
   assert.ok(index.includes("shouldGateFeeExitDecision(decision, policy)"), "runtime checks confluence gate");
+  assert.ok(index.includes("confluence_bypass_reason"), "runtime logs confluence bypass reason");
+  assert.ok(index.includes("closedCandlesOnly"), "runtime logs closed-candle confluence metadata");
   assert.ok(dlmm.includes("getActiveStrategy()?.id"), "deploy profile is derived from active strategy library");
   assert.ok(dlmm.includes("close_verification_status: \"rpc_rate_limited\""), "close verification degraded tx evidence preserved");
   assert.ok(dlmm.includes("recordDegradedClosePerformance"), "degraded close verification records performance for pool-memory cooldowns");
@@ -286,13 +374,20 @@ async function main() {
       "no-fee abort waits 60m",
       "emergency exits bypass confluence",
       "fee harvest requires 2-signal confluence",
+      "hybrid fee harvest bypasses confluence only for high-fee or strong-net cases",
+      "closed-candle confluence drops open candles",
       "pool memory blocks no-fee and velocity-stop pools/mints",
-      "example config resolves 0.5 SOL / 1 max position",
+      "example config resolves Fabriq 5 SOL / 4 max positions",
+      "Fabriq strategy-library profile is active with live dynamic fee-density range width",
+      "EvilPanda strategy-library profile fixture validates independent of active strategy",
       "daily report groups by exit reason and strategy profile",
       "daily report reads fee totals from close results",
       "close verification degraded evidence remains preserved",
       "degraded close verification records performance/cooldown evidence",
     ],
+    runtime_active_strategy: strategyLibrary.active ?? null,
+    runtime_contains_fabriq_profile: Boolean(strategyLibrary.strategies?.[FABRIQ_DEGEN_STRATEGY_ID]),
+    runtime_contains_evil_panda_profile: Boolean(strategyLibrary.strategies?.evil_panda_fee_dump_v1),
   }, null, 2));
 }
 

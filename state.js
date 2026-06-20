@@ -17,6 +17,10 @@ import {
   calculateRollingPeakDrawdown,
 } from "./stop-loss-policy.js";
 import { buildEffectiveRangeStateFromPosition } from "./range-state.js";
+import {
+  allowsOutOfRangeExit,
+  allowsRecoveryHoldNonFeeExit,
+} from "./oor-exit-policy.js";
 
 const STATE_FILE = "./state.json";
 
@@ -185,8 +189,10 @@ export function trackPosition({
   organic_score,
   initial_value_usd,
   signal_snapshot = null,
+  shadow_data_collection = null,
 }) {
   const state = load();
+  const shadowDataCollection = shadow_data_collection ?? signal_snapshot?.shadow_data_collection ?? null;
   state.positions[position] = {
     position,
     pool,
@@ -204,6 +210,7 @@ export function trackPosition({
     organic_score,
     initial_value_usd,
     signal_snapshot: signal_snapshot || null,
+    shadow_data_collection: shadowDataCollection,
     deployed_at: new Date().toISOString(),
     out_of_range_since: null,
     last_claim_at: null,
@@ -480,8 +487,9 @@ export function resolvePendingPeak(position_address, currentPnlPct, toleranceRat
   return { confirmed: false, rejected: true, pendingPeak };
 }
 
-export function queueTrailingDropConfirmation(position_address, peakPnlPct, currentPnlPct, trailingDropPct) {
+export function queueTrailingDropConfirmation(position_address, peakPnlPct, currentPnlPct, trailingDropPct, mgmtConfig = {}) {
   if (peakPnlPct == null || currentPnlPct == null || trailingDropPct == null) return false;
+  if (mgmtConfig.recoveryHoldProfileEnabled && currentPnlPct < 0) return false;
   const dropFromPeak = peakPnlPct - currentPnlPct;
   if (dropFromPeak < trailingDropPct) return false;
 
@@ -505,7 +513,7 @@ export function queueTrailingDropConfirmation(position_address, peakPnlPct, curr
   return true;
 }
 
-export function resolvePendingTrailingDrop(position_address, currentPnlPct, trailingDropPct, tolerancePct = 1.0) {
+export function resolvePendingTrailingDrop(position_address, currentPnlPct, trailingDropPct, tolerancePct = 1.0, mgmtConfig = {}) {
   const state = load();
   const pos = state.positions[position_address];
   if (!pos || pos.closed || pos.pending_trailing_current_pnl_pct == null || pos.pending_trailing_peak_pnl_pct == null) {
@@ -523,8 +531,9 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
 
   const stillNearCrash = currentPnlPct != null && currentPnlPct <= pendingCurrent + tolerancePct;
   const stillDroppedEnough = currentPnlPct != null && (pendingPeak - currentPnlPct) >= trailingDropPct;
+  const recoveryHoldAllowsClose = !mgmtConfig.recoveryHoldProfileEnabled || (currentPnlPct != null && currentPnlPct >= 0);
 
-  if (stillNearCrash && stillDroppedEnough) {
+  if (stillNearCrash && stillDroppedEnough && recoveryHoldAllowsClose) {
     const reason = `Trailing TP: peak ${pendingPeak.toFixed(2)}% → current ${currentPnlPct.toFixed(2)}% (dropped ${(pendingPeak - currentPnlPct).toFixed(2)}% >= ${trailingDropPct}%)`;
     pos.confirmed_trailing_exit_reason = reason;
     pos.confirmed_trailing_exit_until = new Date(Date.now() + 30_000).toISOString();
@@ -541,6 +550,7 @@ export function resolvePendingTrailingDrop(position_address, currentPnlPct, trai
 function buildProfitGivebackEmergencyDecision(position_address, pos, currentPnlPct, mgmtConfig = {}) {
   if (!mgmtConfig.profitGivebackEmergencyEnabled) return null;
   if (currentPnlPct == null) return null;
+  if (mgmtConfig.recoveryHoldProfileEnabled && currentPnlPct < 0) return null;
 
   const triggerPct = Number(mgmtConfig.profitGivebackTriggerPct);
   const floorPct = Number(mgmtConfig.profitGivebackFloorPct);
@@ -641,6 +651,8 @@ export function getStateSummary() {
  */
 export function updatePnlAndCheckExits(position_address, positionData, mgmtConfig) {
   const { pnl_pct: currentPnlPct, pnl_pct_suspicious, fee_per_tvl_24h } = positionData;
+  const currentPnlNonNegative = currentPnlPct != null && currentPnlPct >= 0;
+  const canLowYieldClose = allowsRecoveryHoldNonFeeExit(currentPnlPct, mgmtConfig, mgmtConfig.requirePositivePnlForLowYieldExit);
   const rangeState = buildEffectiveRangeStateFromPosition(positionData);
   const effectiveInRange = rangeState.effective_in_range;
   const state = load();
@@ -759,7 +771,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
+  if (
+    !pnl_pct_suspicious &&
+    pos.trailing_active &&
+    (!mgmtConfig.recoveryHoldProfileEnabled || currentPnlNonNegative)
+  ) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       return {
@@ -777,7 +793,11 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   if (pos.out_of_range_since) {
     const minutesOOR = Math.floor((Date.now() - new Date(pos.out_of_range_since).getTime()) / 60000);
     const oorExit = getOutOfRangeExitPolicy(minutesOOR, mgmtConfig);
-    if (oorExit) {
+    const canOutOfRangeClose = allowsOutOfRangeExit(currentPnlPct, mgmtConfig, {
+      rangeSide: rangeState.derived_range_side,
+      oorStage: oorExit?.stage,
+    });
+    if (oorExit && canOutOfRangeClose) {
       return {
         action: "OUT_OF_RANGE",
         reason: oorExit.reason,
@@ -796,7 +816,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
     fee_per_tvl_24h != null &&
     mgmtConfig.minFeePerTvl24h != null &&
     fee_per_tvl_24h < mgmtConfig.minFeePerTvl24h &&
-    (age_minutes == null || age_minutes >= minAgeForYieldCheck)
+    (age_minutes == null || age_minutes >= minAgeForYieldCheck) &&
+    canLowYieldClose
   ) {
     return {
       action: "LOW_YIELD",

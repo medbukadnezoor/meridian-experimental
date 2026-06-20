@@ -46,12 +46,21 @@ function buildDecision(rule, policy, normalized, reason, extra = {}) {
   };
 }
 
+function requiresNonNegativePnl(policy) {
+  return boolValue(policy.positiveOnly, false) || boolValue(policy.recoveryHoldPositiveOnly, false);
+}
+
+function hasNonNegativePnl(normalized) {
+  return normalized.netPnlPct != null && normalized.netPnlPct >= 0;
+}
+
 function hasRequired(...values) {
   return values.every((value) => value != null);
 }
 
 function evaluateFeeHarvest(policy, normalized) {
   if (!boolValue(policy.feeHarvestEnabled, false)) return null;
+  if (requiresNonNegativePnl(policy) && !hasNonNegativePnl(normalized)) return null;
   const minAge = minutes(policy, "feeHarvestMinHoldMinutes");
   const minFeePct = threshold(policy, "feeHarvestMinFeePctOfEntry");
   const minFeeAmount = threshold(policy, "feeHarvestMinFeeAmount");
@@ -73,6 +82,7 @@ function evaluateFeeHarvest(policy, normalized) {
 
 function evaluateNoFeeAbort(policy, normalized) {
   if (!boolValue(policy.noFeeAbortEnabled, false)) return null;
+  if (requiresNonNegativePnl(policy) && !hasNonNegativePnl(normalized)) return null;
   const maxHold = minutes(policy, "noFeeAbortMaxHoldMinutes");
   const maxFeePct = threshold(policy, "noFeeAbortMaxFeePctOfEntry");
   const maxFeeAmount = threshold(policy, "noFeeAbortMaxFeeAmount");
@@ -95,6 +105,7 @@ function evaluateNoFeeAbort(policy, normalized) {
 
 function evaluateFeeConditionalAbort(policy, normalized) {
   if (!boolValue(policy.feeConditionalAbortEnabled, false)) return null;
+  if (requiresNonNegativePnl(policy) && !hasNonNegativePnl(normalized)) return null;
   const minHold = minutes(policy, "feeConditionalAbortMinHoldMinutes");
   const maxFeePct = threshold(policy, "feeConditionalAbortMaxFeePctOfEntry");
   const maxFeeAmount = threshold(policy, "feeConditionalAbortMaxFeeAmount");
@@ -118,6 +129,7 @@ function evaluateFeeConditionalAbort(policy, normalized) {
 
 function evaluateEmergencyFailsafe(policy, normalized) {
   if (!boolValue(policy.emergencyFailsafeEnabled, false)) return null;
+  if (requiresNonNegativePnl(policy) && !hasNonNegativePnl(normalized)) return null;
   const minHold = minutes(policy, "emergencyFailsafeMinHoldMinutes");
   const maxFeePct = threshold(policy, "emergencyFailsafeMaxFeePctOfEntry");
   const minLossPct = threshold(policy, "emergencyFailsafeMinLossPct");
@@ -137,6 +149,7 @@ function evaluateEmergencyFailsafe(policy, normalized) {
 
 function evaluateMaxHoldTimeout(policy, normalized) {
   if (!boolValue(policy.maxHoldTimeoutEnabled, false)) return null;
+  if (requiresNonNegativePnl(policy) && !hasNonNegativePnl(normalized)) return null;
   const maxHold = minutes(policy, "maxHoldTimeoutMinutes");
   const minNetPnlPct = threshold(policy, "maxHoldTimeoutMinNetPnlPct");
 

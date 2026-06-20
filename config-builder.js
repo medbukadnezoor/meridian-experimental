@@ -42,6 +42,10 @@ function normalizeNullableNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function configValueAllowNull(config, key, fallback = null) {
+  return Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback;
+}
+
 export function normalizeScreeningSource(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
@@ -116,6 +120,9 @@ function buildFeeExitPolicyConfig(userConfig = {}) {
     feeHarvestMinFeePctOfEntry: normalizeNullableNumber(policy.feeHarvestMinFeePctOfEntry),
     feeHarvestMinFeeAmount: normalizeNullableNumber(policy.feeHarvestMinFeeAmount),
     feeHarvestMinNetPnlPct: normalizeNullableNumber(policy.feeHarvestMinNetPnlPct),
+    feeHarvestBypassConfluenceMinFeePctOfEntry: normalizeNullableNumber(policy.feeHarvestBypassConfluenceMinFeePctOfEntry, 2.0),
+    feeHarvestBypassConfluenceMinNetPnlPct: normalizeNullableNumber(policy.feeHarvestBypassConfluenceMinNetPnlPct, 0.25),
+    feeHarvestBypassConfluenceStrongNetPnlPct: normalizeNullableNumber(policy.feeHarvestBypassConfluenceStrongNetPnlPct, 0.75),
     noFeeAbortEnabled: policy.noFeeAbortEnabled === true,
     noFeeAbortMaxHoldMinutes: normalizeNullableNumber(policy.noFeeAbortMaxHoldMinutes),
     noFeeAbortMaxFeePctOfEntry: normalizeNullableNumber(policy.noFeeAbortMaxFeePctOfEntry),
@@ -140,10 +147,14 @@ function buildFeeExitPolicyConfig(userConfig = {}) {
     exitConfluenceRsiOverbought: normalizeNullableNumber(policy.exitConfluenceRsiOverbought, 90),
     exitConfluenceBbPeriod: normalizeNullableNumber(policy.exitConfluenceBbPeriod, 20),
     exitConfluenceBbStdDev: normalizeNullableNumber(policy.exitConfluenceBbStdDev, 2),
-    exitConfluenceAggregateMin: normalizeNullableNumber(policy.exitConfluenceAggregateMin, 5),
-    exitConfluenceLookbackMinutes: normalizeNullableNumber(policy.exitConfluenceLookbackMinutes, 180),
+    exitConfluenceAggregateMin: normalizeNullableNumber(policy.exitConfluenceAggregateMin, 3),
+    exitConfluenceLookbackMinutes: normalizeNullableNumber(policy.exitConfluenceLookbackMinutes, 90),
+    exitConfluenceClosedCandlesOnly: policy.exitConfluenceClosedCandlesOnly !== false,
+    exitConfluenceCandleCloseLagSeconds: normalizeNullableNumber(policy.exitConfluenceCandleCloseLagSeconds, 10),
     exitConfluenceRules: Array.isArray(policy.exitConfluenceRules) ? policy.exitConfluenceRules : ["fee_harvest", "max_hold_timeout"],
     maxHoldTimeoutBypassesConfluence: policy.maxHoldTimeoutBypassesConfluence === true,
+    positiveOnly: policy.positiveOnly === true,
+    recoveryHoldPositiveOnly: policy.recoveryHoldPositiveOnly === true,
   };
 }
 
@@ -309,6 +320,37 @@ export function buildConfig(userConfig = {}, env = process.env) {
         : Array.isArray(u.targetPoolNeedleVetoLiveReasonCodes)
         ? u.targetPoolNeedleVetoLiveReasonCodes
         : ["target_pool_high_needle_retrace"],
+      fabriqOhlcvEntryGateEnabled: s.fabriqOhlcvEntryGateEnabled ?? u.fabriqOhlcvEntryGateEnabled ?? false,
+      fabriqOhlcvEntryGateMode: s.fabriqOhlcvEntryGateMode ?? u.fabriqOhlcvEntryGateMode ?? "shadow",
+      fabriqOhlcvEntryGateProviders: Array.isArray(s.fabriqOhlcvEntryGateProviders)
+        ? s.fabriqOhlcvEntryGateProviders
+        : Array.isArray(u.fabriqOhlcvEntryGateProviders)
+          ? u.fabriqOhlcvEntryGateProviders
+          : ["dexpaprika", "gmgn", "okx"],
+      fabriqOhlcvEntryGateDecisiveProviderOrder: Array.isArray(s.fabriqOhlcvEntryGateDecisiveProviderOrder)
+        ? s.fabriqOhlcvEntryGateDecisiveProviderOrder
+        : Array.isArray(u.fabriqOhlcvEntryGateDecisiveProviderOrder)
+          ? u.fabriqOhlcvEntryGateDecisiveProviderOrder
+          : ["dexpaprika", "gmgn", "okx"],
+      fabriqOhlcvEntryGateIntervals: Array.isArray(s.fabriqOhlcvEntryGateIntervals)
+        ? s.fabriqOhlcvEntryGateIntervals
+        : Array.isArray(u.fabriqOhlcvEntryGateIntervals)
+          ? u.fabriqOhlcvEntryGateIntervals
+          : ["1m", "5m", "15m"],
+      fabriqOhlcvEntryGateLookbackMinutes: s.fabriqOhlcvEntryGateLookbackMinutes ?? u.fabriqOhlcvEntryGateLookbackMinutes ?? 180,
+      fabriqOhlcvEntryGateMinRows: s.fabriqOhlcvEntryGateMinRows ?? u.fabriqOhlcvEntryGateMinRows ?? 20,
+      fabriqOhlcvEntryGateMinScore: s.fabriqOhlcvEntryGateMinScore ?? u.fabriqOhlcvEntryGateMinScore ?? 3,
+      fabriqOhlcvEntryGateBlockOnMissingOhlcv: s.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? u.fabriqOhlcvEntryGateBlockOnMissingOhlcv ?? true,
+      criticalThinEntryOverlayEnabled: s.criticalThinEntryOverlayEnabled ?? u.criticalThinEntryOverlayEnabled ?? false,
+      criticalThinEntryOverlayMode: s.criticalThinEntryOverlayMode ?? u.criticalThinEntryOverlayMode ?? "shadow",
+      criticalThinMcapUsd: s.criticalThinMcapUsd ?? u.criticalThinMcapUsd ?? 275_000,
+      criticalThinActiveTvlUsd: s.criticalThinActiveTvlUsd ?? u.criticalThinActiveTvlUsd ?? 5_000,
+      criticalThinWatchMcapUsd: s.criticalThinWatchMcapUsd ?? u.criticalThinWatchMcapUsd ?? 450_000,
+      criticalThinWatchActiveTvlUsd: s.criticalThinWatchActiveTvlUsd ?? u.criticalThinWatchActiveTvlUsd ?? 10_000,
+      criticalThinRequireChartAccept: s.criticalThinRequireChartAccept ?? u.criticalThinRequireChartAccept ?? true,
+      criticalThinMinFeeActiveTvlRatio: s.criticalThinMinFeeActiveTvlRatio ?? u.criticalThinMinFeeActiveTvlRatio ?? 3,
+      criticalThinMinVolumeActiveTvlMultiple: s.criticalThinMinVolumeActiveTvlMultiple ?? u.criticalThinMinVolumeActiveTvlMultiple ?? 5,
+      criticalThinBlockOnMissingInputs: s.criticalThinBlockOnMissingInputs ?? u.criticalThinBlockOnMissingInputs ?? true,
       preEntryMomentumGates: buildPreEntryMomentumGatesConfig(u),
       minOrganic: u.minOrganic ?? 60,
       minQuoteOrganic: u.minQuoteOrganic ?? 60,
@@ -430,7 +472,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       repeatLowYieldCooldownHours: u.repeatLowYieldCooldownHours ?? 12,
       repeatLowYieldCooldownScope: u.repeatLowYieldCooldownScope ?? "token",
       minVolumeToRebalance: u.minVolumeToRebalance ?? 1000,
-      stopLossPct: u.stopLossPct ?? u.emergencyPriceDropPct ?? -50,
+      recoveryHoldProfileEnabled: u.recoveryHoldProfileEnabled ?? false,
+      recoveryHoldNonFeeExitMinNetPnlPct: u.recoveryHoldNonFeeExitMinNetPnlPct ?? 0,
+      requirePositivePnlForOutOfRangeExit: u.requirePositivePnlForOutOfRangeExit ?? false,
+      requirePositivePnlForLowYieldExit: u.requirePositivePnlForLowYieldExit ?? false,
+      requirePositivePnlForMaxHoldExit: u.requirePositivePnlForMaxHoldExit ?? false,
+      stopLossPct: configValueAllowNull(u, "stopLossPct", u.emergencyPriceDropPct ?? -50),
       stopLossConfirmDelayMs: u.stopLossConfirmDelayMs ?? 0,
       hardStopLossPct: u.hardStopLossPct ?? null,
       stopLossFastClosePct: u.stopLossFastClosePct ?? (isNanocapPreset ? -10 : null),
@@ -469,6 +516,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       activeBinBelowRangeEmergencyLiveEnabled: u.activeBinBelowRangeEmergencyLiveEnabled ?? false,
       activeBinBelowRangeEmergencyPnlPct: u.activeBinBelowRangeEmergencyPnlPct ?? -5,
       activeBinBelowRangeEmergencyEntryDrawdownPct: u.activeBinBelowRangeEmergencyEntryDrawdownPct ?? -20,
+      activeBinVelocityEmergencyLiveEnabled: u.activeBinVelocityEmergencyLiveEnabled ?? false,
+      activeBinVelocityEmergencyMaxPnlPct: u.activeBinVelocityEmergencyMaxPnlPct ?? 2,
       pnlSanityMaxDiffPct: u.pnlSanityMaxDiffPct ?? 5,
       pnlSnapshotLoggingEnabled: u.pnlSnapshotLoggingEnabled ?? false,
       pnlSnapshotDebug: u.pnlSnapshotDebug ?? false,
@@ -490,6 +539,38 @@ export function buildConfig(userConfig = {}, env = process.env) {
       // Nanocap prompt canon is 35-90 bins below; keep live guard deterministic.
       minSingleSidedSolBins: u.minSingleSidedSolBins ?? (isNanocapPreset ? 35 : 5),
       minSingleSidedSolDownsidePct: u.minSingleSidedSolDownsidePct ?? (isNanocapPreset ? 1 : null),
+      dynamicRangeWidthEnabled: u.dynamicRangeWidthEnabled ?? false,
+      dynamicRangeWidthMode: u.dynamicRangeWidthMode ?? "shadow",
+      dynamicRangeWidthMinBins: u.dynamicRangeWidthMinBins ?? 12,
+      dynamicRangeWidthMaxBins: u.dynamicRangeWidthMaxBins ?? 120,
+      dynamicRangeWidthBlockOnMissingInputs: u.dynamicRangeWidthBlockOnMissingInputs ?? true,
+      dynamicRangeWidthMaxDeploySharePct: u.dynamicRangeWidthMaxDeploySharePct ?? 5,
+      dynamicRangeWidthLowerMcapInputFloor: u.dynamicRangeWidthLowerMcapInputFloor ?? 500_000,
+      dynamicRangeWidthMinTargetDownsidePct: u.dynamicRangeWidthMinTargetDownsidePct ?? 16,
+      dynamicRangeWidthFeeDensityTighteningEnabled: u.dynamicRangeWidthFeeDensityTighteningEnabled ?? false,
+      dynamicRangeWidthStrongFeeActiveTvlRatio: u.dynamicRangeWidthStrongFeeActiveTvlRatio ?? 3,
+      dynamicRangeWidthStrongVolumeActiveTvlMultiple: u.dynamicRangeWidthStrongVolumeActiveTvlMultiple ?? 1.5,
+      dynamicRangeWidthStrongFeeVelocityUsdPerMin: u.dynamicRangeWidthStrongFeeVelocityUsdPerMin ?? 3,
+      dynamicRangeWidthStrongTightenPct: u.dynamicRangeWidthStrongTightenPct ?? 2,
+      dynamicRangeWidthGoodFeeActiveTvlRatio: u.dynamicRangeWidthGoodFeeActiveTvlRatio ?? 1.5,
+      dynamicRangeWidthGoodVolumeActiveTvlMultiple: u.dynamicRangeWidthGoodVolumeActiveTvlMultiple ?? 1.2,
+      dynamicRangeWidthGoodTightenPct: u.dynamicRangeWidthGoodTightenPct ?? 1,
+      dynamicRangeWidthTiers: u.dynamicRangeWidthTiers ?? [
+        { minMcap: 125_000, maxMcap: 250_000, targetDownsidePct: 30, maxTargetDownsidePct: 36 },
+        { minMcap: 250_000, maxMcap: 500_000, targetDownsidePct: 28, maxTargetDownsidePct: 34 },
+        { minMcap: 500_000, maxMcap: 800_000, targetDownsidePct: 25, maxTargetDownsidePct: 31 },
+        { minMcap: 800_000, maxMcap: 1_200_000, targetDownsidePct: 22, maxTargetDownsidePct: 28 },
+        { minMcap: 1_200_000, maxMcap: 2_500_000, targetDownsidePct: 20, maxTargetDownsidePct: 25 },
+        { minMcap: 2_500_000, maxMcap: null, targetDownsidePct: 18, maxTargetDownsidePct: 22 },
+      ],
+      dynamicPoolSizingEnabled: u.dynamicPoolSizingEnabled ?? false,
+      dynamicPoolSizingMode: u.dynamicPoolSizingMode ?? "shadow",
+      dynamicPoolSizingTargetActiveTvlSharePct: u.dynamicPoolSizingTargetActiveTvlSharePct ?? 3.5,
+      dynamicPoolSizingHardActiveTvlSharePct: u.dynamicPoolSizingHardActiveTvlSharePct ?? 5,
+      dynamicPoolSizingMinDeploySol: u.dynamicPoolSizingMinDeploySol ?? 1,
+      dynamicPoolSizingMaxDeploySol: u.dynamicPoolSizingMaxDeploySol ?? 5,
+      dynamicPoolSizingBlockBelowMin: u.dynamicPoolSizingBlockBelowMin ?? true,
+      dynamicPoolSizingBlockOnMissingInputs: u.dynamicPoolSizingBlockOnMissingInputs ?? true,
     },
 
     schedule: {
@@ -507,6 +588,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       telemetryMinQueueMs: normalizePositiveInteger(u.rpcPressure?.telemetryMinQueueMs ?? u.rpcTelemetryMinQueueMs, 250),
       screeningActiveBinConcurrency: normalizePositiveInteger(u.rpcPressure?.screeningActiveBinConcurrency ?? u.screeningActiveBinConcurrency, 1),
       screeningCycleBudgetMs: normalizePositiveInteger(u.rpcPressure?.screeningCycleBudgetMs ?? u.screeningCycleBudgetMs, 4 * 60_000),
+    },
+
+    telegram: {
+      dustMaxUsd: normalizeNullableNumber(u.telegram?.dustMaxUsd ?? u.telegramDustMaxUsd, 5),
+      dustMaxPriceImpactBps: normalizeNullableNumber(u.telegram?.dustMaxPriceImpactBps ?? u.telegramDustMaxPriceImpactBps, 250),
+      actionTtlMs: normalizePositiveInteger(u.telegram?.actionTtlMs ?? u.telegramActionTtlMs, 60_000),
     },
 
     llm: {

@@ -494,7 +494,7 @@ export function classifyShadowVelocity(velocityFeatures = {}, thresholds = SHADO
     }
     return {
       shadow_velocity_signal: "rug_like_extreme",
-      shadow_velocity_reason: `shadow_only_velocity_candidate ${reasons.join(" ")}`,
+      shadow_velocity_reason: `velocity_extreme_candidate ${reasons.join(" ")}`,
     };
   }
 

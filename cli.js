@@ -271,6 +271,17 @@ switch (subcommand) {
       strategy: flags.strategy,
       bins_below: flags["bins-below"] ? parseInt(flags["bins-below"]) : undefined,
       bins_above: flags["bins-above"] ? parseInt(flags["bins-above"]) : undefined,
+      bin_step: flags["bin-step"] ? parseFloat(flags["bin-step"]) : undefined,
+      mcap: flags.mcap ? parseFloat(flags.mcap) : undefined,
+      active_tvl: flags["active-tvl"] ? parseFloat(flags["active-tvl"]) : undefined,
+      sol_usd: flags["sol-usd"] ? parseFloat(flags["sol-usd"]) : undefined,
+      base_mint: flags["base-mint"],
+      volatility: flags.volatility ? parseFloat(flags.volatility) : undefined,
+      price_change_pct: flags["price-change-pct"] ? parseFloat(flags["price-change-pct"]) : undefined,
+      deploy_share_of_active_tvl_pct: flags["deploy-share-pct"] ? parseFloat(flags["deploy-share-pct"]) : undefined,
+      fee_tvl_ratio: flags["fee-tvl-ratio"] ? parseFloat(flags["fee-tvl-ratio"]) : undefined,
+      volume_active_tvl_multiple: flags["volume-active-tvl-multiple"] ? parseFloat(flags["volume-active-tvl-multiple"]) : undefined,
+      fee_velocity_usd_per_min: flags["fee-velocity-usd-per-min"] ? parseFloat(flags["fee-velocity-usd-per-min"]) : undefined,
     }));
     break;
   }
