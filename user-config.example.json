@@ -341,6 +341,9 @@
   "autoresearchEnabled": false,
 
   "telegramChatId": "YOUR_TELEGRAM_CHAT_ID",
+  "telegramDustMaxUsd": 5,
+  "telegramDustMaxPriceImpactBps": 250,
+  "telegramActionTtlMs": 60000,
   "hiveMindUrl": "https://api.agentmeridian.xyz",
   "hiveMindApiKey": "YOUR_HIVEMIND_API_KEY",
   "hiveMindPullMode": "disabled",

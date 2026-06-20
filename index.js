@@ -1,17 +1,18 @@
 import "./envcrypt.js";
 import fs from "fs";
 import path from "path";
+import { execFile } from "child_process";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log, logAction } from "./logger.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getMyPositions, getActiveBin } from "./tools/dlmm.js";
+import { getWalletBalances, quoteSwapToken } from "./tools/wallet.js";
 import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, applyScoutTailLossShadowDecisions, evaluateTargetPoolNeedleDeployGuard } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
-import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
+import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, sendRichMessage, editRichMessage, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, hasAllowedTelegramUsers, isAllowedTelegramUser, createLiveMessage } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { buildDynamicRangeShadowTelemetry, describeRangePolicyForPrompt, getActiveStrategy, normalizeCandidateEvidenceForDeploy, resolveStrategyRangePolicy, computeDownsideBinsForPct, resolveDynamicRangeLiveDeployArgs } from "./strategy-library.js";
@@ -2125,6 +2126,679 @@ function settingButton(label, data) {
   return { text: label, callback_data: data };
 }
 
+const TELEGRAM_POSITIONS_PAGE_SIZE = 3;
+const TELEGRAM_ACTION_TTL_MS = Math.max(10_000, Number(config.telegram?.actionTtlMs ?? 60_000));
+const TELEGRAM_DUST_MAX_USD = Number(config.telegram?.dustMaxUsd ?? 5);
+const TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS = Number(config.telegram?.dustMaxPriceImpactBps ?? 250);
+const _telegramActions = new Map();
+let _telegramActionSeq = 0;
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function shortAddress(value, head = 5, tail = 4) {
+  const text = String(value || "");
+  if (text.length <= head + tail + 3) return text || "?";
+  return `${text.slice(0, head)}...${text.slice(-tail)}`;
+}
+
+function formatNum(value, digits = 2) {
+  const num = finiteNumberOrNull(value);
+  if (num == null) return "?";
+  return num.toLocaleString("en-US", {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  });
+}
+
+function formatCompactUsd(value) {
+  const num = finiteNumberOrNull(value);
+  if (num == null) return "$?";
+  const abs = Math.abs(num);
+  if (abs >= 1_000_000) return `$${formatNum(num / 1_000_000, 2)}M`;
+  if (abs >= 1_000) return `$${formatNum(num / 1_000, 1)}k`;
+  return `$${formatNum(num, 2)}`;
+}
+
+function formatCurrencyValue(value) {
+  const cur = config.management.solMode ? "◎" : "$";
+  const num = finiteNumberOrNull(value);
+  if (num == null) return `${cur}?`;
+  const sign = num > 0 ? "+" : num < 0 ? "-" : "";
+  return `${sign}${cur}${formatNum(Math.abs(num), config.management.solMode ? 4 : 2)}`;
+}
+
+function formatSignedPct(value) {
+  const num = finiteNumberOrNull(value);
+  if (num == null) return "?%";
+  return `${num > 0 ? "+" : ""}${formatNum(num, 2)}%`;
+}
+
+function formatAgeMinutes(minutes) {
+  const value = finiteNumberOrNull(minutes);
+  if (value == null) return "?";
+  const total = Math.max(0, Math.floor(value));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h > 0 ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
+}
+
+function telegramNowLabel() {
+  return new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Jakarta",
+    hour12: false,
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }) + " WIB";
+}
+
+function positionRangeStatus(position = {}) {
+  const state = buildPositionDisplayRangeState(position);
+  if (position.pnl_pct_suspicious || position.pnl_confidence === "degraded") return "DEGRADED PNL";
+  if (state.rangeStateMismatch) return "API LAG";
+  if (state.derivedRangeSide === "above_range") return "OOR ABOVE";
+  if (state.derivedRangeSide === "below_range") return "OOR BELOW";
+  if (state.preferredInRange === true || state.derivedRangeSide === "in_range") return "IN";
+  if (state.preferredInRange === false) return "OOR";
+  return "UNKNOWN";
+}
+
+function buildRangeBar(position = {}) {
+  const lower = finiteNumberOrNull(position.lower_bin);
+  const upper = finiteNumberOrNull(position.upper_bin);
+  const active = finiteNumberOrNull(position.active_bin);
+  if (lower == null || upper == null || active == null || upper <= lower) return "▱▱▱▱▱";
+  if (active < lower) return "▰▱▱▱▱";
+  if (active > upper) return "▱▱▱▱▰";
+  const pct = Math.max(0, Math.min(1, (active - lower) / (upper - lower)));
+  const index = Math.min(4, Math.max(0, Math.round(pct * 4)));
+  return Array.from({ length: 5 }, (_, i) => i === index ? "▰" : "▱").join("");
+}
+
+function trackedForPosition(position = {}) {
+  return position?.position ? getTrackedPosition(position.position) : null;
+}
+
+function positionWidth(position = {}, tracked = null) {
+  const lower = finiteNumberOrNull(position.lower_bin ?? tracked?.bin_range?.min);
+  const upper = finiteNumberOrNull(position.upper_bin ?? tracked?.bin_range?.max);
+  if (lower == null || upper == null) return null;
+  return Math.abs(upper - lower);
+}
+
+function positionDownCoverage(position = {}, tracked = null) {
+  const binStep = finiteNumberOrNull(position.bin_step ?? tracked?.bin_step);
+  const width = positionWidth(position, tracked);
+  if (binStep == null || width == null) return null;
+  return Number(((width * binStep) / 10_000 * 100).toFixed(2));
+}
+
+function buildPositionCompactLine(position, index) {
+  const tracked = trackedForPosition(position);
+  const pair = escapeHtml(position.pair || tracked?.pool_name || shortAddress(position.pool));
+  const status = escapeHtml(positionRangeStatus(position));
+  const pnlPct = escapeHtml(formatSignedPct(position.pnl_pct));
+  const value = escapeHtml(formatCurrencyValue(position.total_value_usd));
+  const fees = escapeHtml(formatCurrencyValue(position.unclaimed_fees_usd));
+  const width = positionWidth(position, tracked) ?? "?";
+  const down = positionDownCoverage(position, tracked);
+  const age = escapeHtml(formatAgeMinutes(position.age_minutes));
+  const range = `${position.active_bin ?? "?"} / ${position.lower_bin ?? "?"}..${position.upper_bin ?? "?"}`;
+  const displayRange = escapeHtml(formatPositionRangeLabel(position, { icon: false }));
+  return [
+    `${index + 1}. <b>${pair}</b>  <b>${pnlPct}</b>  ${value}`,
+    `Range: <code>${status}</code> ${displayRange} | bin <code>${escapeHtml(range)}</code> | width ${escapeHtml(width)} | down ${escapeHtml(down != null ? `${down}%` : "?")}`,
+    `Fees: ${fees} unclaimed | age ${age} | ${buildRangeBar(position)}`,
+  ].join("\n");
+}
+
+function buildPositionDetailHtml(position, index) {
+  const tracked = trackedForPosition(position);
+  const pair = escapeHtml(position.pair || tracked?.pool_name || shortAddress(position.pool));
+  const status = escapeHtml(positionRangeStatus(position));
+  const width = positionWidth(position, tracked);
+  const down = positionDownCoverage(position, tracked);
+  const binStep = position.bin_step ?? tracked?.bin_step ?? "?";
+  const deploySol = tracked?.amount_sol ?? "?";
+  const entryMcap = tracked?.mcap ?? tracked?.signal_snapshot?.mcap ?? null;
+  const baseFee = tracked?.base_fee ?? "?";
+  const claimed = tracked?.total_fees_claimed_usd ?? "?";
+  const displayRange = escapeHtml(formatPositionRangeLabel(position, { icon: false }));
+  return [
+    `<b>${pair}</b>`,
+    `<code>pos ${escapeHtml(shortAddress(position.position, 6, 6))}</code>`,
+    "",
+    `<b>PnL</b>`,
+    `Net: <b>${escapeHtml(formatSignedPct(position.pnl_pct))}</b> | ${escapeHtml(formatCurrencyValue(position.pnl_usd))}`,
+    `Value: ${escapeHtml(formatCurrencyValue(position.total_value_usd))}`,
+    `Fees: ${escapeHtml(formatCurrencyValue(position.unclaimed_fees_usd))} unclaimed | ${escapeHtml(formatCurrencyValue(claimed))} claimed`,
+    `Generated: token ? | SOL ?`,
+    "",
+    `<b>Range</b>`,
+    `Status: <code>${status}</code> ${buildRangeBar(position)} | ${displayRange}`,
+    `Bins: <code>${escapeHtml(position.lower_bin ?? "?")} -> ${escapeHtml(position.upper_bin ?? "?")}</code> | active <code>${escapeHtml(position.active_bin ?? "?")}</code>`,
+    `Width: ${escapeHtml(width ?? "?")} bins | step ${escapeHtml(binStep)} | base fee ${escapeHtml(baseFee)}%`,
+    `Coverage: ${escapeHtml(down != null ? `${down}%` : "?")} down | 0.0% up`,
+    "",
+    `<b>Market</b>`,
+    `Mcap: entry ${escapeHtml(entryMcap != null ? formatCompactUsd(entryMcap) : "$?")} | current $? | range low/high $?`,
+    `TVL: $? | fee/aTVL ${escapeHtml(position.fee_per_tvl_24h ?? tracked?.initial_fee_tvl_24h ?? "?")}% | age ${escapeHtml(formatAgeMinutes(position.age_minutes))}`,
+    `Deploy: ${escapeHtml(deploySol)} SOL | strategy ${escapeHtml(tracked?.strategy ?? "?")}`,
+    "",
+    `<b>Actions</b>`,
+    `Use buttons below. Close requires a fresh preview and confirmation.`,
+  ].join("\n");
+}
+
+function buildDashboardHtml(wallet, positionsResult) {
+  const positions = positionsResult?.positions || [];
+  const totalValue = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.total_value_usd) ?? 0), 0);
+  const totalFees = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.unclaimed_fees_usd) ?? 0), 0);
+  const stateLabel = cronStarted ? "RUNNING" : "PAUSED";
+  const equity = finiteNumberOrNull(wallet?.total_usd) != null ? formatCompactUsd(wallet.total_usd) : "$?";
+  return [
+    `<b>Meridian Control</b>`,
+    `Updated ${escapeHtml(telegramNowLabel())}`,
+    "",
+    `<b>Wallet</b>`,
+    `SOL: <b>${escapeHtml(formatNum(wallet?.sol, 4))}</b> (${escapeHtml(formatCompactUsd(wallet?.sol_usd))})`,
+    `Equity: ${escapeHtml(equity)} | Open: ${positions.length}/${config.risk.maxPositions}`,
+    "",
+    `<b>Positions</b>`,
+    `Value: ${escapeHtml(formatCurrencyValue(totalValue))} | Fees: ${escapeHtml(formatCurrencyValue(totalFees))}`,
+    `Runtime: <code>${stateLabel}</code> | Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
+    "",
+    positions.length
+      ? positions.slice(0, TELEGRAM_POSITIONS_PAGE_SIZE).map((position, index) => buildPositionCompactLine(position, index)).join("\n\n")
+      : "No open positions.",
+  ].join("\n");
+}
+
+function positionKeyboard(page = 0, positions = []) {
+  const start = page * TELEGRAM_POSITIONS_PAGE_SIZE;
+  const visible = positions.slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
+  const rows = visible.map((_, offset) => {
+    const index = start + offset;
+    return [
+      settingButton(`${index + 1} Detail`, `tg:detail:${index}:${page}`),
+      settingButton(`${index + 1} Close`, `tg:close_preview:${index}:${page}`),
+    ];
+  });
+  const nav = [];
+  if (page > 0) nav.push(settingButton("Prev", `tg:pos:${page - 1}`));
+  if (start + TELEGRAM_POSITIONS_PAGE_SIZE < positions.length) nav.push(settingButton("Next", `tg:pos:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([
+    settingButton("Refresh", `tg:pos:${page}`),
+    settingButton("Dashboard", "tg:dash"),
+  ]);
+  rows.push([
+    settingButton("Close All", "tg:close_all_preview"),
+    settingButton("Dust", "tg:dust"),
+  ]);
+  return rows;
+}
+
+function dashboardKeyboard() {
+  return [
+    [settingButton("Positions", "tg:pos:0"), settingButton("Dust Tokens", "tg:dust")],
+    [settingButton("Pause Cycles", "tg:pause"), settingButton("Resume Cycles", "tg:resume")],
+    [settingButton("Stop Bot", "tg:stop_preview"), settingButton("Settings", "cfg:page:main")],
+  ];
+}
+
+function detailKeyboard(index, page = 0) {
+  return [
+    [settingButton("Refresh", `tg:detail:${index}:${page}`), settingButton("Close", `tg:close_preview:${index}:${page}`)],
+    [settingButton("Back", `tg:pos:${page}`), settingButton("Dashboard", "tg:dash")],
+  ];
+}
+
+async function showRichOrSend({ html, keyboard = null, messageId = null }) {
+  if (messageId) {
+    return editRichMessage({ html, messageId, keyboard });
+  }
+  return sendRichMessage({ html, keyboard });
+}
+
+async function showTelegramDashboard(messageId = null) {
+  const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  return showRichOrSend({
+    html: buildDashboardHtml(wallet, positions),
+    keyboard: dashboardKeyboard(),
+    messageId,
+  });
+}
+
+async function showTelegramPositions({ messageId = null, page = 0 } = {}) {
+  const { positions = [] } = await getMyPositions({ force: true });
+  const safePage = Math.max(0, Math.min(page, Math.floor(Math.max(positions.length - 1, 0) / TELEGRAM_POSITIONS_PAGE_SIZE)));
+  const start = safePage * TELEGRAM_POSITIONS_PAGE_SIZE;
+  const visible = positions.slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
+  const html = [
+    `<b>Positions</b> ${positions.length}/${config.risk.maxPositions}`,
+    `Updated ${escapeHtml(telegramNowLabel())}`,
+    "",
+    visible.length
+      ? visible.map((position, offset) => buildPositionCompactLine(position, start + offset)).join("\n\n")
+      : "No open positions.",
+  ].join("\n");
+  return showRichOrSend({
+    html,
+    keyboard: positionKeyboard(safePage, positions),
+    messageId,
+  });
+}
+
+async function showTelegramPositionDetail({ messageId = null, index = 0, page = 0 } = {}) {
+  const { positions = [] } = await getMyPositions({ force: true });
+  const position = positions[index];
+  if (!position) {
+    return showRichOrSend({
+      html: "Position not found. Refresh the positions list.",
+      keyboard: [[settingButton("Positions", `tg:pos:${page}`)]],
+      messageId,
+    });
+  }
+  return showRichOrSend({
+    html: buildPositionDetailHtml(position, index),
+    keyboard: detailKeyboard(index, page),
+    messageId,
+  });
+}
+
+function assertTelegramDestructiveAllowed(msg) {
+  if (!hasAllowedTelegramUsers()) {
+    return "Destructive Telegram controls require TELEGRAM_ALLOWED_USER_IDS.";
+  }
+  if (!isAllowedTelegramUser(msg?.from?.id)) {
+    return "This Telegram user is not allowed to execute destructive controls.";
+  }
+  return null;
+}
+
+function createTelegramAction(type, msg, payload = {}) {
+  const id = `a${(++_telegramActionSeq).toString(36)}`;
+  const now = Date.now();
+  _telegramActions.set(id, {
+    id,
+    type,
+    payload,
+    chatId: String(msg?.chat?.id ?? ""),
+    userId: String(msg?.from?.id ?? ""),
+    createdAt: now,
+    expiresAt: now + TELEGRAM_ACTION_TTL_MS,
+  });
+  return id;
+}
+
+function consumeTelegramAction(id, msg, expectedType) {
+  const action = _telegramActions.get(id);
+  _telegramActions.delete(id);
+  if (!action || action.type !== expectedType) return { error: "Action expired or invalid." };
+  if (Date.now() > action.expiresAt) return { error: "Action expired. Refresh and try again." };
+  if (action.chatId !== String(msg?.chat?.id ?? "") || action.userId !== String(msg?.from?.id ?? "")) {
+    return { error: "Action does not belong to this Telegram user/chat." };
+  }
+  return { action };
+}
+
+function closeResultLine(pair, result) {
+  if (!result?.success) return `${escapeHtml(pair)}: failed (${escapeHtml(result?.error || "unknown")})`;
+  const status = result.post_close_swap_status ? ` | swap ${result.post_close_swap_status}` : "";
+  const attention = result.requires_operator_attention ? " | residual attention" : "";
+  const tx = result.close_txs?.[0] || result.txs?.[0] || result.tx || null;
+  return `${escapeHtml(pair)}: closed ${escapeHtml(formatSignedPct(result.pnl_pct))}${status}${attention}${tx ? ` | ${escapeHtml(shortAddress(tx, 6, 6))}` : ""}`;
+}
+
+async function showClosePreview(msg, { index = 0, page = 0, messageId = null } = {}) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Back", `tg:pos:${page}`)]], messageId });
+  }
+  const { positions = [] } = await getMyPositions({ force: true });
+  const position = positions[index];
+  if (!position) {
+    return showRichOrSend({ html: "Position not found. Refresh first.", keyboard: [[settingButton("Positions", `tg:pos:${page}`)]], messageId });
+  }
+  const actionId = createTelegramAction("close_one", msg, {
+    position: position.position,
+    pair: position.pair,
+    page,
+    snapshot: {
+      pnl_pct: position.pnl_pct,
+      total_value_usd: position.total_value_usd,
+      unclaimed_fees_usd: position.unclaimed_fees_usd,
+    },
+  });
+  const html = [
+    `<b>Confirm Close</b>`,
+    "",
+    buildPositionCompactLine(position, index),
+    "",
+    `This will call <code>close_position</code> through the executor and keep post-close autoswap evidence.`,
+    `Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
+  ].join("\n");
+  return showRichOrSend({
+    html,
+    keyboard: [
+      [settingButton("Confirm Close", `tg:act:${actionId}`)],
+      [settingButton("Cancel", `tg:detail:${index}:${page}`)],
+    ],
+    messageId,
+  });
+}
+
+async function executeCloseOneAction(action) {
+  const result = await executeTool("close_position", {
+    position_address: action.payload.position,
+    reason: "Telegram operator close",
+  });
+  return [
+    `<b>Close Result</b>`,
+    closeResultLine(action.payload.pair || action.payload.position, result),
+    result.post_close_swap_error ? `Swap note: ${escapeHtml(result.post_close_swap_error)}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+async function showCloseAllPreview(msg, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Positions", "tg:pos:0")]], messageId });
+  }
+  const { positions = [] } = await getMyPositions({ force: true });
+  if (!positions.length) {
+    return showRichOrSend({ html: "No open positions.", keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId });
+  }
+  const actionId = createTelegramAction("close_all", msg, {
+    positions: positions.map((position) => ({
+      position: position.position,
+      pair: position.pair,
+      pnl_pct: position.pnl_pct,
+      total_value_usd: position.total_value_usd,
+    })),
+  });
+  const totalValue = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.total_value_usd) ?? 0), 0);
+  const html = [
+    `<b>Confirm Close All</b>`,
+    `Positions: ${positions.length} | Value: ${escapeHtml(formatCurrencyValue(totalValue))}`,
+    "",
+    positions.map((position, index) => buildPositionCompactLine(position, index)).join("\n\n"),
+    "",
+    `Sequential executor closes. Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
+  ].join("\n");
+  return showRichOrSend({
+    html,
+    keyboard: [
+      [settingButton("Confirm Close All", `tg:act:${actionId}`)],
+      [settingButton("Cancel", "tg:pos:0")],
+    ],
+    messageId,
+  });
+}
+
+async function executeCloseAllAction(action) {
+  const results = [];
+  for (const item of action.payload.positions || []) {
+    try {
+      const result = await executeTool("close_position", {
+        position_address: item.position,
+        reason: "Telegram operator close-all",
+      });
+      results.push(closeResultLine(item.pair || item.position, result));
+    } catch (error) {
+      results.push(`${escapeHtml(item.pair || item.position)}: failed (${escapeHtml(error.message)})`);
+    }
+  }
+  return [`<b>Close All Result</b>`, "", ...results].join("\n");
+}
+
+function dustCandidatesFromWallet(wallet, positions) {
+  const activeBaseMints = new Set((positions || []).map((position) => position.base_mint).filter(Boolean));
+  const stableMints = new Set([config.tokens.SOL, config.tokens.USDC, config.tokens.USDT]);
+  return (wallet?.tokens || [])
+    .filter((token) => token?.mint && !stableMints.has(token.mint))
+    .filter((token) => !activeBaseMints.has(token.mint))
+    .filter((token) => (finiteNumberOrNull(token.usd) ?? 0) > 0 && (finiteNumberOrNull(token.usd) ?? 0) <= TELEGRAM_DUST_MAX_USD)
+    .sort((a, b) => (finiteNumberOrNull(b.usd) ?? 0) - (finiteNumberOrNull(a.usd) ?? 0));
+}
+
+async function showDustMenu(messageId = null) {
+  const [wallet, { positions = [] }] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  const candidates = dustCandidatesFromWallet(wallet, positions);
+  const rows = candidates.slice(0, 8).map((token, index) => [
+    settingButton(`Sell ${token.symbol || shortAddress(token.mint)} $${formatNum(token.usd, 2)}`, `tg:dust_preview:${index}`),
+  ]);
+  rows.push([settingButton("Refresh", "tg:dust"), settingButton("Dashboard", "tg:dash")]);
+  rows.push([settingButton("Burn Tokens", "tg:burn_info")]);
+  const html = [
+    `<b>Dust Tokens</b>`,
+    `Threshold: <= ${escapeHtml(formatCompactUsd(TELEGRAM_DUST_MAX_USD))} | excludes SOL/USDC/USDT and active-position base mints`,
+    "",
+    candidates.length
+      ? candidates.slice(0, 8).map((token, index) => `${index + 1}. <b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b> ${escapeHtml(formatCompactUsd(token.usd))} | bal ${escapeHtml(formatNum(token.balance, 6))}`).join("\n")
+      : "No sellable dust candidates.",
+    "",
+    "Burn execution is deferred and requires a separate approved ticket.",
+  ].join("\n");
+  return showRichOrSend({ html, keyboard: rows, messageId });
+}
+
+async function showDustPreview(msg, index, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Back", "tg:dust")]], messageId });
+  }
+  const [wallet, { positions = [] }] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  const candidates = dustCandidatesFromWallet(wallet, positions);
+  const token = candidates[index];
+  if (!token) return showRichOrSend({ html: "Dust token not found. Refresh first.", keyboard: [[settingButton("Dust", "tg:dust")]], messageId });
+  const quote = await quoteSwapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance });
+  const priceImpactBps = finiteNumberOrNull(quote?.swap_trace?.price_impact_bps);
+  const expectedOutRaw = quote?.swap_trace?.expected_out_raw ?? quote?.swap_trace?.order?.outAmount ?? null;
+  const quoteBlocked = !quote?.success || expectedOutRaw == null || (priceImpactBps != null && priceImpactBps > TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS);
+  const actionId = quoteBlocked ? null : createTelegramAction("sell_dust", msg, {
+    mint: token.mint,
+    symbol: token.symbol,
+    amount: token.balance,
+    usd: token.usd,
+    expected_out_raw: expectedOutRaw,
+    price_impact_bps: priceImpactBps,
+  });
+  const html = [
+    `<b>Dust Sell Preview</b>`,
+    `<b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b> ${escapeHtml(formatCompactUsd(token.usd))}`,
+    `Mint: <code>${escapeHtml(shortAddress(token.mint, 6, 6))}</code>`,
+    `Amount: ${escapeHtml(formatNum(token.balance, 8))}`,
+    "",
+    quote?.success
+      ? `Quote: expected SOL raw <code>${escapeHtml(expectedOutRaw ?? "?")}</code> | impact ${escapeHtml(priceImpactBps ?? "?")} bps`
+      : `Quote failed: ${escapeHtml(quote?.error || "unknown")}`,
+    quoteBlocked ? `Blocked: quote missing or impact > ${TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS} bps.` : `Confirm to swap this dust token to SOL.`,
+  ].join("\n");
+  return showRichOrSend({
+    html,
+    keyboard: [
+      ...(actionId ? [[settingButton("Confirm Sell Dust", `tg:act:${actionId}`)]] : []),
+      [settingButton("Back", "tg:dust")],
+    ],
+    messageId,
+  });
+}
+
+async function executeSellDustAction(action) {
+  const tokenUsd = finiteNumberOrNull(action.payload.usd) ?? 0;
+  if (tokenUsd > TELEGRAM_DUST_MAX_USD) {
+    return `Dust sell blocked: token value ${escapeHtml(formatCompactUsd(tokenUsd))} is above threshold.`;
+  }
+  const priceImpactBps = finiteNumberOrNull(action.payload.price_impact_bps);
+  if (!action.payload.expected_out_raw || (priceImpactBps != null && priceImpactBps > TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS)) {
+    return "Dust sell blocked: quote is missing output or exceeds price-impact threshold. Refresh the dust preview.";
+  }
+  const result = await executeTool("swap_token", {
+    input_mint: action.payload.mint,
+    output_mint: "SOL",
+    amount: action.payload.amount,
+  });
+  if (!result?.success) return `Dust sell failed: ${escapeHtml(result?.error || "unknown")}`;
+  return [
+    `<b>Dust Sell Result</b>`,
+    `${escapeHtml(action.payload.symbol || shortAddress(action.payload.mint))}: swapped to SOL`,
+    `Tx: <code>${escapeHtml(shortAddress(result.tx, 8, 8))}</code>`,
+    `Out: ${escapeHtml(result.amount_out ?? "?")}`,
+  ].join("\n");
+}
+
+async function showStopPreview(msg, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId });
+  }
+  if (process.env.TELEGRAM_ENABLE_PM2_STOP !== "true") {
+    return showRichOrSend({
+      html: "PM2 stop is disabled. Set TELEGRAM_ENABLE_PM2_STOP=true on VPS to enable this danger control.",
+      keyboard: [[settingButton("Dashboard", "tg:dash")]],
+      messageId,
+    });
+  }
+  const pmId = process.env.pm_id;
+  if (!pmId) {
+    return showRichOrSend({
+      html: "PM2 stop unavailable: process.env.pm_id is missing. Use SSH/PM2 directly.",
+      keyboard: [[settingButton("Dashboard", "tg:dash")]],
+      messageId,
+    });
+  }
+  const actionId = createTelegramAction("pm2_stop", msg, { pmId });
+  return showRichOrSend({
+    html: [
+      `<b>Confirm Stop Bot</b>`,
+      "",
+      `This will run <code>pm2 stop ${escapeHtml(pmId)}</code>. Telegram control may go offline until restarted from SSH/PM2.`,
+      `Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
+    ].join("\n"),
+    keyboard: [
+      [settingButton("Confirm Stop Bot", `tg:act:${actionId}`)],
+      [settingButton("Cancel", "tg:dash")],
+    ],
+    messageId,
+  });
+}
+
+function pm2StopSelf(pmId) {
+  return new Promise((resolve) => {
+    execFile("pm2", ["stop", String(pmId)], { timeout: 10_000 }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ success: false, error: error.message, stderr });
+        return;
+      }
+      resolve({ success: true, stdout });
+    });
+  });
+}
+
+async function executePm2StopAction(action) {
+  if (process.env.TELEGRAM_ENABLE_PM2_STOP !== "true") return "PM2 stop is disabled.";
+  if (!process.env.pm_id || String(process.env.pm_id) !== String(action.payload.pmId)) {
+    return "PM2 stop blocked: pm_id changed or is missing.";
+  }
+  const result = await pm2StopSelf(action.payload.pmId);
+  return result.success
+    ? `PM2 stop requested for ${escapeHtml(action.payload.pmId)}.`
+    : `PM2 stop failed: ${escapeHtml(result.error || result.stderr || "unknown")}`;
+}
+
+async function executeTelegramAction(msg, id) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    await answerCallbackQuery(msg.callbackQueryId, "Blocked");
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId: msg.messageId });
+  }
+  const raw = _telegramActions.get(id);
+  const expectedType = raw?.type;
+  const { action, error } = consumeTelegramAction(id, msg, expectedType);
+  if (error) {
+    await answerCallbackQuery(msg.callbackQueryId, "Expired");
+    return showRichOrSend({ html: escapeHtml(error), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId: msg.messageId });
+  }
+  await answerCallbackQuery(msg.callbackQueryId, "Executing");
+  let html;
+  if (action.type === "close_one") html = await executeCloseOneAction(action);
+  else if (action.type === "close_all") html = await executeCloseAllAction(action);
+  else if (action.type === "sell_dust") html = await executeSellDustAction(action);
+  else if (action.type === "pm2_stop") html = await executePm2StopAction(action);
+  else html = "Unknown action.";
+  return showRichOrSend({
+    html,
+    keyboard: [[settingButton("Dashboard", "tg:dash"), settingButton("Positions", "tg:pos:0")]],
+    messageId: msg.messageId,
+  });
+}
+
+async function applyTelegramControlCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const parts = data.split(":");
+  const action = parts[1];
+  if (action === "dash") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramDashboard(msg.messageId);
+  } else if (action === "pos") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramPositions({ messageId: msg.messageId, page: Number(parts[2] || 0) });
+  } else if (action === "detail") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramPositionDetail({ messageId: msg.messageId, index: Number(parts[2] || 0), page: Number(parts[3] || 0) });
+  } else if (action === "close_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showClosePreview(msg, { index: Number(parts[2] || 0), page: Number(parts[3] || 0), messageId: msg.messageId });
+  } else if (action === "close_all_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showCloseAllPreview(msg, msg.messageId);
+  } else if (action === "dust") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showDustMenu(msg.messageId);
+  } else if (action === "dust_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showDustPreview(msg, Number(parts[2] || 0), msg.messageId);
+  } else if (action === "burn_info") {
+    await answerCallbackQuery(msg.callbackQueryId, "Deferred");
+    await showRichOrSend({
+      html: "Burn execution is deferred. It requires a separate approved ticket because token burns are irreversible.",
+      keyboard: [[settingButton("Dust", "tg:dust")]],
+      messageId: msg.messageId,
+    });
+  } else if (action === "pause") {
+    stopCronJobs();
+    cronStarted = false;
+    await answerCallbackQuery(msg.callbackQueryId, "Paused");
+    await showRichOrSend({ html: "Autonomous cycles paused. Telegram control remains online.", keyboard: dashboardKeyboard(), messageId: msg.messageId });
+  } else if (action === "resume") {
+    if (!cronStarted) {
+      cronStarted = true;
+      timers.managementLastRun = Date.now();
+      timers.screeningLastRun = Date.now();
+      startCronJobs();
+    }
+    await answerCallbackQuery(msg.callbackQueryId, "Resumed");
+    await showRichOrSend({ html: "Autonomous cycles resumed.", keyboard: dashboardKeyboard(), messageId: msg.messageId });
+  } else if (action === "stop_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showStopPreview(msg, msg.messageId);
+  } else if (action === "act") {
+    await executeTelegramAction(msg, parts[2]);
+  } else {
+    await answerCallbackQuery(msg.callbackQueryId, "Unknown");
+  }
+}
+
 function toggleButton(key, label) {
   return settingButton(`${label}: ${fmtSettingValue(settingValue(key))}`, `cfg:toggle:${key}`);
 }
@@ -2381,10 +3055,11 @@ function formatHelpText() {
     "/help — show commands",
     "/status — wallet + positions snapshot",
     "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
-    "/pool <n> — detailed info for one open position",
-    "/close <n> — close one position by index",
-    "/closeall — close all open positions",
+    "/menu — rich Telegram control dashboard",
+    "/positions — rich open-position menu",
+    "/pool <n> — rich detail for one open position",
+    "/close <n> — preview close for one position",
+    "/closeall — preview close all open positions",
     "/set <n> <note> — set note/instruction on position",
     "/config — show important runtime config",
     "/settings — read-only inline settings menu",
@@ -2399,7 +3074,7 @@ function formatHelpText() {
     "/hive pull — manual HiveMind pull now",
     "/pause — stop cron cycles",
     "/resume — start cron cycles again",
-    "/stop — shut down agent",
+    "/stop — guarded PM2 stop preview when explicitly enabled",
   ].join("\n");
 }
 
@@ -2576,12 +3251,22 @@ async function telegramHandler(msg) {
   const text = (msg?.callbackData || msg?.text || "").trim();
   if (!text) return;
 
+  if (text.startsWith("tg:")) {
+    await applyTelegramControlCallback(msg);
+    return;
+  }
+
   if (text.startsWith("cfg:")) {
     await applySettingsMenuCallback(msg);
     return;
   }
 
-  if (["/settings", "/menu", "/configmenu"].includes(text)) {
+  if (text === "/menu") {
+    await showTelegramDashboard();
+    return;
+  }
+
+  if (["/settings", "/configmenu"].includes(text)) {
     await showSettingsMenu();
     return;
   }
@@ -2616,11 +3301,20 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/wallet" || text === "/status") {
+  if (text === "/status") {
+    try {
+      await showTelegramDashboard();
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/wallet") {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
+      const suffix = positions.total_positions
+        ? `\n\nUse /positions for the rich position menu.`
         : "";
       await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
@@ -2673,16 +3367,7 @@ async function telegramHandler(msg) {
 
   if (text === "/positions") {
     try {
-      const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const range = formatPositionRangeLabel(p);
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age} | ${range}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await showTelegramPositions();
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -2691,19 +3376,7 @@ async function telegramHandler(msg) {
   if (poolMatch) {
     try {
       const idx = parseInt(poolMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${formatPositionRangeLabel(pos)}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      await showTelegramPositionDetail({ index: idx, page: 0 });
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2714,37 +3387,14 @@ async function telegramHandler(msg) {
   if (closeMatch) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage(`Closing ${pos.pair}...`);
-      const result = await closePosition({ position_address: pos.position });
-      if (result.success) {
-        const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
-      } else {
-        await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
-      }
+      await showClosePreview(msg, { index: idx, page: 0 });
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
   if (text === "/closeall") {
     try {
-      const { positions } = await getMyPositions({ force: true });
-      if (!positions.length) { await sendMessage("No open positions."); return; }
-      await sendMessage(`Closing ${positions.length} position(s)...`);
-      const results = [];
-      for (const pos of positions) {
-        try {
-          const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
-        } catch (error) {
-          results.push(`${pos.pair}: failed (${error.message})`);
-        }
-      }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      await showCloseAllPreview(msg);
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2837,6 +3487,15 @@ async function telegramHandler(msg) {
       await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
     } else {
       await sendMessage("Autonomous cycles are already running.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/stop") {
+    try {
+      await showStopPreview(msg);
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }

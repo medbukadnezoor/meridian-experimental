@@ -60,9 +60,10 @@ function sliceBetween(src, startNeedle, endNeedle) {
 
 const displayStateHelper = extractFunction(source, "buildPositionDisplayRangeState");
 const formatHelper = extractFunction(source, "formatPositionRangeLabel");
+const telegramRangeStatusHelper = extractFunction(source, "positionRangeStatus");
+const telegramCompactCardHelper = extractFunction(source, "buildPositionCompactLine");
+const telegramDetailCardHelper = extractFunction(source, "buildPositionDetailHtml");
 const managementReportBlock = sliceBetween(source, "const reportLines = positionData.map", "const needsAction");
-const telegramPositionsBlock = sliceBetween(source, "if (text === \"/positions\")", "const poolMatch = text.match");
-const telegramPoolBlock = sliceBetween(source, "const poolMatch = text.match", "const setMatch = text.match");
 const startupReportBlock = sliceBetween(source, "if (positions.total_positions > 0) {", "console.log(`Top pools");
 const cliStatusBlock = sliceBetween(source, "if (input === \"/status\")", "if (input === \"/briefing\")");
 
@@ -76,8 +77,8 @@ assert(formatHelper.includes("API: IN") && formatHelper.includes("API: OOR"), "f
 
 for (const [name, block] of [
   ["management report", managementReportBlock],
-  ["telegram /positions", telegramPositionsBlock],
-  ["telegram /pool", telegramPoolBlock],
+  ["telegram positions rich cards", telegramCompactCardHelper],
+  ["telegram position detail rich card", telegramDetailCardHelper],
   ["startup open positions", startupReportBlock],
   ["CLI /status", cliStatusBlock],
 ]) {
@@ -87,6 +88,7 @@ for (const [name, block] of [
 for (const forbidden of ["executeTool", "closePosition", "close_position", "deploy_position", "updatePnlAndCheckExits"]) {
   assert(!displayStateHelper.includes(forbidden), `display state helper must not call ${forbidden}`);
   assert(!formatHelper.includes(forbidden), `format helper must not call ${forbidden}`);
+  assert(!telegramRangeStatusHelper.includes(forbidden), `telegram range status helper must not call ${forbidden}`);
 }
 
 const controlPathMarkers = [
@@ -96,7 +98,6 @@ const controlPathMarkers = [
   "const exit = updatePnlAndCheckExits(p.position, p, config.management);",
   "const supertrendExit = await evaluateSupertrendLossExit(",
   "executeTool(\"close_position\"",
-  "closePosition({ position_address",
   "executeTool(\"deploy_position\"",
 ];
 for (const marker of controlPathMarkers) {
@@ -108,7 +109,7 @@ for (const marker of controlPathMarkers) {
 }
 
 assert(countOccurrences(source, "function buildPositionDisplayRangeState") === 1, "display state helper should have one definition");
-assert(countOccurrences(source, "buildPositionDisplayRangeState(") === 2, "display state helper should only be defined and used by the formatter");
+assert(countOccurrences(source, "buildPositionDisplayRangeState(") === 3, "display state helper should only be defined and used by display formatters");
 assert(countOccurrences(source, "function formatPositionRangeLabel") === 1, "display formatter should have one definition");
 assert(countOccurrences(source, "formatPositionRangeLabel(") === 6, "display formatter should only be defined plus five operator-facing display uses");
 assert(source.includes("If in_range says true but range_side is above_range or below_range"), "startup prompt must warn about API lag telemetry");
@@ -124,8 +125,8 @@ console.log(JSON.stringify({
   reportingOnly: true,
   coveredSurfaces: [
     "management report",
-    "telegram /positions",
-    "telegram /pool",
+    "telegram positions rich cards",
+    "telegram position detail rich card",
     "startup open positions",
     "CLI /status",
   ],

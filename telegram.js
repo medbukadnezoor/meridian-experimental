@@ -93,6 +93,14 @@ export function isEnabled() {
   return !!TOKEN;
 }
 
+export function hasAllowedTelegramUsers() {
+  return ALLOWED_USER_IDS.size > 0;
+}
+
+export function isAllowedTelegramUser(userId) {
+  return userId != null && ALLOWED_USER_IDS.has(String(userId));
+}
+
 function getRetryAfterMs(payloadText) {
   try {
     const payload = JSON.parse(payloadText);
@@ -185,6 +193,24 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
 }
 
+export async function sendRichMessage({ html, keyboard = null }) {
+  if (!TOKEN || !chatId) return null;
+  const richBody = {
+    rich_message: {
+      html: String(html ?? "").slice(0, 32768),
+      skip_entity_detection: true,
+    },
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  };
+  const richResult = await postTelegram("sendRichMessage", richBody);
+  if (richResult) return richResult;
+  return postTelegram("sendMessage", {
+    text: String(html ?? "").slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    parse_mode: "HTML",
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {
@@ -199,6 +225,25 @@ export async function editMessageWithButtons(text, messageId, keyboard) {
     message_id: messageId,
     text: String(text).slice(0, TELEGRAM_MAX_TEXT_LENGTH),
     reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+export async function editRichMessage({ html, messageId, keyboard = null }) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  const richResult = await postTelegram("editMessageText", {
+    message_id: messageId,
+    rich_message: {
+      html: String(html ?? "").slice(0, 32768),
+      skip_entity_detection: true,
+    },
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+  if (richResult) return richResult;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: String(html ?? "").slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    parse_mode: "HTML",
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
   });
 }
 

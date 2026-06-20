@@ -563,6 +563,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       screeningCycleBudgetMs: normalizePositiveInteger(u.rpcPressure?.screeningCycleBudgetMs ?? u.screeningCycleBudgetMs, 4 * 60_000),
     },
 
+    telegram: {
+      dustMaxUsd: normalizeNullableNumber(u.telegram?.dustMaxUsd ?? u.telegramDustMaxUsd, 5),
+      dustMaxPriceImpactBps: normalizeNullableNumber(u.telegram?.dustMaxPriceImpactBps ?? u.telegramDustMaxPriceImpactBps, 250),
+      actionTtlMs: normalizePositiveInteger(u.telegram?.actionTtlMs ?? u.telegramActionTtlMs, 60_000),
+    },
+
     llm: {
       temperature: u.temperature ?? 0.373,
       maxTokens: u.maxTokens ?? 4096,
