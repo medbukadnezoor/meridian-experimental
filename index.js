@@ -125,6 +125,31 @@ const _peakConfirmTimers = new Map();
 const _trailingDropConfirmTimers = new Map();
 const _stopLossConfirmTimers = new Map();
 const _activeBinOracleEmergencyInFlight = new Set();
+// Addresses of on-chain positions with no tracked-state entry ("orphans") that have
+// already been alerted, so the PnL poll alerts exactly once per distinct orphan.
+const _alertedOrphans = new Set();
+
+// Pure dedup helper for orphan-position alerting. Given the set of already-alerted
+// orphan addresses, the live on-chain address list, and the addresses found to be
+// orphans this tick, returns the orphan addresses that are new (need an alert) and
+// mutates `alerted` to (a) drop addresses no longer live so a future re-occurrence
+// re-alerts, and (b) record the new orphans. Kept pure/synchronous and exported for
+// unit testing in scripts/verify-orphan-live-position-skip.js.
+export function reconcileOrphanAlerts(alerted, liveAddresses, orphanAddresses) {
+  const live = new Set(liveAddresses);
+  // Prune addresses that are no longer present on-chain.
+  for (const addr of [...alerted]) {
+    if (!live.has(addr)) alerted.delete(addr);
+  }
+  const newOrphans = [];
+  for (const addr of orphanAddresses) {
+    if (!alerted.has(addr)) {
+      alerted.add(addr);
+      newOrphans.push(addr);
+    }
+  }
+  return newOrphans;
+}
 const TRAILING_PEAK_CONFIRM_DELAY_MS = 15_000;
 const TRAILING_PEAK_CONFIRM_TOLERANCE = 0.85;
 const TRAILING_DROP_CONFIRM_DELAY_MS = 15_000;
@@ -951,8 +976,31 @@ export async function runManagementCycle({ silent = false } = {}) {
       return mgmtReport;
     }
 
+    // Orphan guard (same policy as the PnL poll): drop on-chain positions with no
+    // tracked-state entry before any exit/deterministic-rule evaluation, and alert the
+    // owner once per distinct orphan address. Prune already-alerted addresses no longer
+    // live so a future re-occurrence can re-alert. Do NOT auto-adopt.
+    {
+      const liveAddrs = new Set(positions.map((pos) => pos.position));
+      for (const addr of [..._alertedOrphans]) {
+        if (!liveAddrs.has(addr)) _alertedOrphans.delete(addr);
+      }
+    }
+    const managedPositions = positions.filter((p) => {
+      if (getTrackedPosition(p.position)) return true;
+      if (!_alertedOrphans.has(p.position)) {
+        _alertedOrphans.add(p.position);
+        const msg = `[Management] Untracked live position skipped — ${p.position} (${p.pair}) — not managed, close/handle manually`;
+        log("cron_error", msg);
+        if (telegramEnabled()) {
+          sendMessage(`⚠️ ${msg}`).catch(() => {});
+        }
+      }
+      return false;
+    });
+
     // Snapshot + load pool memory
-    const positionData = positions.map((p) => {
+    const positionData = managedPositions.map((p) => {
       recordPositionSnapshot(p.pool, p);
       return { ...p, recall: recallForPool(p.pool) };
     });
@@ -1751,7 +1799,31 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       activeBinOracleRecorder.updatePositions(result?.positions || []);
       if (!result?.positions?.length) return;
+      // Prune already-alerted orphan addresses that are no longer live so a future
+      // re-occurrence can re-alert (in-memory dedup; see reconcileOrphanAlerts).
+      {
+        const liveAddrs = new Set(result.positions.map((pos) => pos.position));
+        for (const addr of [..._alertedOrphans]) {
+          if (!liveAddrs.has(addr)) _alertedOrphans.delete(addr);
+        }
+      }
       for (const p of result.positions) {
+        // Orphan guard: an on-chain position with no tracked-state entry has no
+        // deployed_at/baseline/peak/strategy, so every exit rule below would act on
+        // fabricated data. Skip it entirely and alert the owner once per distinct
+        // orphan address (deduped via _alertedOrphans). Do NOT auto-adopt.
+        const tracked = getTrackedPosition(p.position);
+        if (!tracked) {
+          if (!_alertedOrphans.has(p.position)) {
+            _alertedOrphans.add(p.position);
+            const msg = `[PnL poll] Untracked live position skipped — ${p.position} (${p.pair}) — not managed, close/handle manually`;
+            log("cron_error", msg);
+            if (telegramEnabled()) {
+              sendMessage(`⚠️ ${msg}`).catch(() => {});
+            }
+          }
+          continue;
+        }
         if (!p.pnl_pct_suspicious && queuePeakConfirmation(p.position, p.pnl_pct)) {
           schedulePeakConfirmation(p.position);
         }
@@ -1849,7 +1921,6 @@ Summarize the current portfolio health, total fees earned, and performance of al
         // Max-hold time exit closes stale positions; it is not an adverse-signal cooldown.
         const maxHoldMinutes = config.management.maxHoldMinutes;
         if (maxHoldMinutes != null) {
-          const tracked = getTrackedPosition(p.position);
           const deployedAt = tracked?.deployed_at ? new Date(tracked.deployed_at).getTime() : null;
           const currentPnlPct = finiteNumberOrNull(p.pnl_pct);
           const canMaxHoldClose = allowsRecoveryHoldNonFeeExit(
