@@ -14,6 +14,7 @@ function src(file) {
 const files = {
   index: src("index.js"),
   telegram: src("telegram.js"),
+  render: src("telegram-render.js"),
   configBuilder: src("config-builder.js"),
   exampleConfig: src("user-config.example.json"),
 };
@@ -29,20 +30,92 @@ function has(source, pattern) {
 }
 
 check("telegram rich helpers call sendRichMessage/editMessageText with rich_message and HTML fallback", () =>
+  // Menu surfaces render via standard parse_mode HTML (preserves newlines);
+  // the rich_message field collapsed line breaks so it is intentionally unused.
   has(files.telegram, /export\s+async\s+function\s+sendRichMessage/) &&
-  has(files.telegram, /postTelegram\("sendRichMessage"[\s\S]*?rich_message:\s*\{[\s\S]*?html:[\s\S]*?skip_entity_detection:\s*true/) &&
   has(files.telegram, /export\s+async\s+function\s+editRichMessage/) &&
-  has(files.telegram, /postTelegram\("editMessageText"[\s\S]*?rich_message:\s*\{[\s\S]*?skip_entity_detection:\s*true/) &&
-  has(files.telegram, /parse_mode:\s*"HTML"/)
+  has(files.telegram, /sendRichMessage[\s\S]*?postTelegram\("sendMessage"[\s\S]*?parse_mode:\s*"HTML"/) &&
+  has(files.telegram, /editRichMessage[\s\S]*?postTelegram\("editMessageText"[\s\S]*?parse_mode:\s*"HTML"/) &&
+  !has(files.telegram, /postTelegram\("sendRichMessage"/)
 );
 
 check("rich surfaces escape dynamic HTML before interpolation", () =>
-  has(files.index, /function\s+escapeHtml\(value\)/) &&
-  has(files.index, /\.replaceAll\("&",\s*"&amp;"\)/) &&
-  has(files.index, /buildPositionCompactLine[\s\S]*?escapeHtml/) &&
-  has(files.index, /buildPositionDetailHtml[\s\S]*?escapeHtml/) &&
-  has(files.index, /buildDashboardHtml[\s\S]*?escapeHtml/) &&
+  has(files.render, /export\s+function\s+escapeHtml\(value\)/) &&
+  has(files.render, /\.replaceAll\("&",\s*"&amp;"\)/) &&
+  has(files.render, /buildPositionCompactLine[\s\S]*?escapeHtml/) &&
+  has(files.render, /buildPositionDetailHtml[\s\S]*?\bbuildDetail/) &&
+  has(files.render, /buildDashboardHtml[\s\S]*?escapeHtml/) &&
+  has(files.index, /import\s*\{[\s\S]*?escapeHtml[\s\S]*?\}\s*from\s*"\.\/telegram-render\.js"/) &&
   has(files.index, /closeResultLine[\s\S]*?escapeHtml/)
+);
+
+check("renderer is a pure module with budgeted message builders", () =>
+  has(files.render, /export\s+const\s+TELEGRAM_BUDGETS\s*=/) &&
+  has(files.render, /export\s+function\s+clampHtml\(html,\s*max\)/) &&
+  has(files.render, /buildDashboardHtml[\s\S]*?clampHtml[\s\S]*?TELEGRAM_BUDGETS\.dashboard/) &&
+  has(files.render, /buildPositionsPageHtml[\s\S]*?clampHtml[\s\S]*?TELEGRAM_BUDGETS\.positionsPage/) &&
+  has(files.render, /buildPositionDetailHtml[\s\S]*?clampHtml[\s\S]*?TELEGRAM_BUDGETS\.detail/) &&
+  has(files.render, /buildCloseAllPreviewHtml[\s\S]*?clampHtml[\s\S]*?TELEGRAM_BUDGETS\.closeAllPreview/) &&
+  !has(files.render, /\bimport\b/)
+);
+
+check("dashboard is short: control summary only, no position cards", () => {
+  const body = files.render.match(/export\s+function\s+buildDashboardHtml\(summary[\s\S]*?\n\}/);
+  return (
+    has(files.index, /function\s+buildDashboardSummary\(wallet,\s*positionsResult\)/) &&
+    Boolean(body) &&
+    !has(body[0], /buildPositionCompactLine/)
+  );
+});
+
+check("position detail is split into summary/range/market tabs", () =>
+  has(files.render, /export\s+const\s+DETAIL_TABS\s*=\s*\["summary",\s*"range",\s*"market"\]/) &&
+  has(files.render, /function\s+buildDetailSummary\(view\)/) &&
+  has(files.render, /function\s+buildDetailRange\(view\)/) &&
+  has(files.render, /function\s+buildDetailMarket\(view\)/) &&
+  has(files.index, /detailTabButton/) &&
+  has(files.index, /tab:\s*parts\[4\]/)
+);
+
+check("close-all preview is capped with overflow summary, not full cards", () =>
+  has(files.render, /buildCloseAllPreviewHtml\(\{[\s\S]*?maxRows\s*=\s*4/) &&
+  has(files.render, /and\s+\$\{extra\}\s+more/)
+);
+
+check("markdown→HTML converter escapes first, then applies a fixed style allow-list", () =>
+  has(files.render, /export\s+function\s+mdToTelegramHtml\(text\)/) &&
+  has(files.render, /let\s+out\s*=\s*escapeHtml\(text\)/) &&
+  has(files.render, /<b>\$\{bold\}<\/b>/) &&
+  has(files.render, /<code>\$\{code\}<\/code>/)
+);
+
+check("live-message system supports HTML mode with a tag-stripped plain fallback", () =>
+  has(files.telegram, /import\s*\{[\s\S]*?escapeHtml[\s\S]*?stripTags[\s\S]*?\}\s*from\s*"\.\/telegram-render\.js"/) &&
+  has(files.telegram, /createLiveMessage\(title,\s*intro\s*=\s*"Starting\.\.\.",\s*\{\s*html\s*=\s*false\s*\}/) &&
+  has(files.telegram, /parse_mode:\s*"HTML"/) &&
+  has(files.telegram, /stripTags\(richText\)/)
+);
+
+check("dashboard equity is SOL-denominated and surfaces the SOL-equity sidecar", () =>
+  has(files.render, /buildDashboardHtml[\s\S]*?🏦 Equity\s*<b>\$\{solAmount\(summary\.equitySol\)\}/) &&
+  has(files.render, /function\s+solAmount\(value\)/) &&
+  has(files.render, /SOL Equity[\s\S]*?day \$\{escapeHtml\(dayPnl\)\}[\s\S]*?prev-day/) &&
+  !has(files.render, /formatCompactUsd\(summary\.equityUsd\)/) &&
+  has(files.index, /function\s+readSolEquityTracker\(/) &&
+  has(files.index, /function\s+wibDayCutoffUtc\(/) &&
+  has(files.index, /sol-balance-snapshots-/) &&
+  has(files.index, /const\s+tracker\s*=\s*readSolEquityTracker\(\)/) &&
+  has(files.index, /const\s+liveEquitySol\s*=\s*freeSol\s*\+\s*totalValue/) &&
+  has(files.index, /tracker\.equitySol\s*!=\s*null\)\s*\?\s*tracker\.equitySol\s*:\s*liveEquitySol/)
+);
+
+check("autonomous cycle/startup reports render as HTML (no literal markdown)", () =>
+  has(files.index, /createLiveMessage\("🔄 Management Cycle"[\s\S]*?\{\s*html:\s*true\s*\}/) &&
+  has(files.index, /createLiveMessage\("🔍 Screening Cycle"[\s\S]*?\{\s*html:\s*true\s*\}/) &&
+  has(files.index, /createLiveMessage\("🚀 Startup Check"[\s\S]*?\{\s*html:\s*true\s*\}/) &&
+  has(files.index, /mgmtReport\s*=\s*buildCycleReportHtml\(/) &&
+  has(files.index, /screenReport\s*=\s*mdToTelegramHtml\(stripThink\(content\)\)/) &&
+  has(files.index, /mdToTelegramHtml\(stripThink\(content\)\)/)
 );
 
 check("destructive callbacks require TELEGRAM_ALLOWED_USER_IDS user allowlist", () =>
