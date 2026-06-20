@@ -25,6 +25,7 @@ import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-gu
 import { applyRangeWidthDecision } from "../range-width-decision.js";
 import { applyDynamicPoolSizing } from "../dynamic-pool-sizing.js";
 import { evaluateFabriqOhlcvEntryGate } from "../fabriq-ohlcv-entry-gate.js";
+import { evaluateCriticalThinEntryOverlay } from "../critical-thin-entry-overlay.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -196,6 +197,16 @@ const toolMap = {
       fabriqOhlcvEntryGateLookbackMinutes: ["screening", "fabriqOhlcvEntryGateLookbackMinutes"],
       fabriqOhlcvEntryGateMinRows: ["screening", "fabriqOhlcvEntryGateMinRows"],
       fabriqOhlcvEntryGateBlockOnMissingOhlcv: ["screening", "fabriqOhlcvEntryGateBlockOnMissingOhlcv"],
+      criticalThinEntryOverlayEnabled: ["screening", "criticalThinEntryOverlayEnabled"],
+      criticalThinEntryOverlayMode: ["screening", "criticalThinEntryOverlayMode"],
+      criticalThinMcapUsd: ["screening", "criticalThinMcapUsd"],
+      criticalThinActiveTvlUsd: ["screening", "criticalThinActiveTvlUsd"],
+      criticalThinWatchMcapUsd: ["screening", "criticalThinWatchMcapUsd"],
+      criticalThinWatchActiveTvlUsd: ["screening", "criticalThinWatchActiveTvlUsd"],
+      criticalThinRequireChartAccept: ["screening", "criticalThinRequireChartAccept"],
+      criticalThinMinFeeActiveTvlRatio: ["screening", "criticalThinMinFeeActiveTvlRatio"],
+      criticalThinMinVolumeActiveTvlMultiple: ["screening", "criticalThinMinVolumeActiveTvlMultiple"],
+      criticalThinBlockOnMissingInputs: ["screening", "criticalThinBlockOnMissingInputs"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -732,6 +743,44 @@ export async function executeTool(name, args) {
           fabriq_ohlcv_entry_gate: fabriqOhlcvEntryGate,
         };
       }
+    }
+
+    const criticalThinOverlay = evaluateCriticalThinEntryOverlay(args, config, {
+      fabriqOhlcvEntryGate,
+      dynamicPoolSizingDecision: dynamicPoolSizing.decision,
+    });
+    args = {
+      ...args,
+      critical_thin_entry_overlay: criticalThinOverlay.overlay,
+    };
+    if (criticalThinOverlay.overlay?.bucket !== "none" || criticalThinOverlay.overlay?.enabled === true) {
+      log("deploy", `[critical-thin-entry-overlay] bucket=${criticalThinOverlay.overlay.bucket} decision=${criticalThinOverlay.overlay.decision} reasons=${criticalThinOverlay.overlay.reason_codes.join(",") || "none"}`);
+    }
+    if (!criticalThinOverlay.ok) {
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
+        reason: criticalThinOverlay.overlay.reason,
+        metrics: {
+          critical_thin_entry_overlay: criticalThinOverlay.overlay,
+          fabriq_ohlcv_entry_gate: args?.fabriq_ohlcv_entry_gate ?? null,
+          dynamic_pool_sizing_decision: args?.dynamic_pool_sizing_decision ?? null,
+        },
+        deploy: {
+          critical_thin_entry_overlay: criticalThinOverlay.overlay,
+          args,
+        },
+        source: "executor.critical_thin_entry_overlay",
+      });
+      return {
+        success: false,
+        blocked: true,
+        reason: criticalThinOverlay.overlay.reason,
+        critical_thin_entry_overlay: criticalThinOverlay.overlay,
+      };
     }
 
     const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard({

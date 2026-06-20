@@ -293,6 +293,7 @@ async function main() {
       normalizeMeteoraRows,
       normalizeGmgnRows,
       normalizeDexPaprikaRows,
+      rollOneMinuteRows,
       fetchOhlcv,
     } = providerTestApi;
     const meteoraRows = normalizeMeteoraRows({
@@ -337,9 +338,21 @@ async function main() {
       meteoraFull: makeProviderRows(40),
       gmgnEmpty: [],
       gmgnFull: makeProviderRows(40, 20_000),
+      gmgnFullOneMinute: makeProviderRows(108, 1_800_020_040, 60),
       dexPartial: makeProviderRows(29, 30_000),
       dexFullOneMinute: makeProviderRows(40, 40_000, 60),
+      dexThreeMinuteFullRaw: makeProviderRows(108, 1_800_000_060, 60),
+      dexThreeMinutePartialRaw: makeProviderRows(30, 1_800_010_080, 60),
     };
+    const rolledFixture = rollOneMinuteRows(providerRows.dexThreeMinuteFullRaw.map(([timestamp, open, high, low, close, volumeUsd]) => ({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      volumeUsd,
+    })), 3);
+    assert(rolledFixture.length === 36, "3m rollup should turn 108 complete 1m rows into 36 complete 3m rows");
     globalThis.fetch = async (url) => {
       const href = String(url);
       providerCalls.push(href);
@@ -362,13 +375,30 @@ async function main() {
           },
         };
       }
+      if (href.includes("mint-3m-gmgn-full")) {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              data: {
+                list: providerRows.gmgnFullOneMinute.map(([timestamp, open, high, low, close, volume]) => ({ time: timestamp, open, high, low, close, volume })),
+              },
+            });
+          },
+        };
+      }
       if (href.includes("openapi.gmgn.ai")) {
         return { ok: true, status: 200, async text() { return JSON.stringify({ data: { list: providerRows.gmgnEmpty } }); } };
       }
       if (href.includes("api.dexpaprika.com")) {
         const parsed = new URL(href);
         const isOneMinute = parsed.searchParams.get("interval") === "1m";
-        const rows = isOneMinute ? providerRows.dexFullOneMinute : providerRows.dexPartial;
+        const rows = href.includes("pool-3m-dex-full")
+          ? providerRows.dexThreeMinuteFullRaw
+          : href.includes("pool-3m-dex-partial")
+            ? providerRows.dexThreeMinutePartialRaw
+            : isOneMinute ? providerRows.dexFullOneMinute : providerRows.dexPartial;
         return {
           ok: true,
           status: 200,
@@ -407,6 +437,26 @@ async function main() {
     assert(dexPaprikaFallback.aggregateMin === 1, "DexPaprika should retry at 1m when 5m rows are insufficient");
     assert(dexPaprikaFallback.rows.length === 40, "DexPaprika fallback should provide enough rows");
 
+    const dexPaprikaThreeMinute = await fetchOhlcv("pool-3m-dex-full", "mint-gmgn-empty", {
+      aggregateMin: 3,
+      beforeTimestamp: 1_800_007_000,
+      lookbackMinutes: 90,
+      minRows: 35,
+    });
+    assert(dexPaprikaThreeMinute.source === "dexpaprika_1m_rollup", "3m confluence should prefer pool-specific DexPaprika 1m rollup");
+    assert(dexPaprikaThreeMinute.aggregateMin === 3, "DexPaprika 1m rollup should report actual 3m aggregate");
+    assert(dexPaprikaThreeMinute.rows.length === 36, "DexPaprika 1m rollup should provide complete 3m rows");
+
+    const gmgnThreeMinute = await fetchOhlcv("pool-3m-dex-partial", "mint-3m-gmgn-full", {
+      aggregateMin: 3,
+      beforeTimestamp: 1_800_027_000,
+      lookbackMinutes: 90,
+      minRows: 35,
+    });
+    assert(gmgnThreeMinute.source === "gmgn_1m_rollup", "3m confluence should fall back to GMGN 1m rollup when DexPaprika is insufficient");
+    assert(gmgnThreeMinute.aggregateMin === 3, "GMGN 1m rollup should report actual 3m aggregate");
+    assert(gmgnThreeMinute.rows.length === 36, "GMGN 1m rollup should provide complete 3m rows");
+
     const meteoraEnough = await fetchOhlcv("pool-meteora-full", "mint-gmgn-full", {
       aggregateMin: 5,
       beforeTimestamp: 202_000,
@@ -423,6 +473,7 @@ async function main() {
     assert(providerCalls.some((url) => url.includes("api.dexpaprika.com/networks/solana/pools/")), "provider fallback proof should call DexPaprika");
     assert(providerCalls.some((url) => url.includes("api.dexpaprika.com") && url.includes("interval=1m")), "provider fallback proof should retry DexPaprika at 1m");
     assert(providerCalls.filter((url) => url.includes("pool-meteora-full")).length === 1, "sufficient Meteora proof should not call fallbacks");
+    assert(!providerCalls.some((url) => url.includes("dlmm.datapi.meteora.ag") && url.includes("pool-3m-")), "3m confluence provider proof must not call Meteora 5m");
 
     assert(!("normalizeBirdeyeRows" in providerTestApi), "Birdeye normalizer must not be exported from live OHLCV module");
     const providerNormalizersOk = true;
@@ -447,6 +498,7 @@ async function main() {
       fallbackProviderCalls: providerCalls.length,
       providerNormalizersOk,
       providerFallbacksOk: true,
+      threeMinuteRollupOk: dexPaprikaThreeMinute.source === "dexpaprika_1m_rollup" && gmgnThreeMinute.source === "gmgn_1m_rollup",
     };
     console.log(JSON.stringify(summary, null, 2));
   } finally {

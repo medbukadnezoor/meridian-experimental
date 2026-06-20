@@ -61,8 +61,11 @@ function sliceBetween(src, startNeedle, endNeedle) {
 const displayStateHelper = extractFunction(source, "buildPositionDisplayRangeState");
 const formatHelper = extractFunction(source, "formatPositionRangeLabel");
 const telegramRangeStatusHelper = extractFunction(source, "positionRangeStatus");
-const telegramCompactCardHelper = extractFunction(source, "buildPositionCompactLine");
-const telegramDetailCardHelper = extractFunction(source, "buildPositionDetailHtml");
+// Telegram menu rendering now flows through a plain view-model built by
+// toPositionView() (runtime-coupled), which is consumed by the pure
+// ./telegram-render.js module. The derived-aware range label is carried into
+// the rich cards/detail tabs via that view-model.
+const telegramViewModelHelper = extractFunction(source, "toPositionView");
 const managementReportBlock = sliceBetween(source, "const reportLines = positionData.map", "const needsAction");
 const startupReportBlock = sliceBetween(source, "if (positions.total_positions > 0) {", "console.log(`Top pools");
 const cliStatusBlock = sliceBetween(source, "if (input === \"/status\")", "if (input === \"/briefing\")");
@@ -77,8 +80,7 @@ assert(formatHelper.includes("API: IN") && formatHelper.includes("API: OOR"), "f
 
 for (const [name, block] of [
   ["management report", managementReportBlock],
-  ["telegram positions rich cards", telegramCompactCardHelper],
-  ["telegram position detail rich card", telegramDetailCardHelper],
+  ["telegram view-model (rich cards + detail tabs)", telegramViewModelHelper],
   ["startup open positions", startupReportBlock],
   ["CLI /status", cliStatusBlock],
 ]) {
@@ -111,7 +113,7 @@ for (const marker of controlPathMarkers) {
 assert(countOccurrences(source, "function buildPositionDisplayRangeState") === 1, "display state helper should have one definition");
 assert(countOccurrences(source, "buildPositionDisplayRangeState(") === 3, "display state helper should only be defined and used by display formatters");
 assert(countOccurrences(source, "function formatPositionRangeLabel") === 1, "display formatter should have one definition");
-assert(countOccurrences(source, "formatPositionRangeLabel(") === 6, "display formatter should only be defined plus five operator-facing display uses");
+assert(countOccurrences(source, "formatPositionRangeLabel(") === 5, "display formatter should only be defined plus four operator-facing display uses (telegram view-model, management report, startup, CLI /status)");
 assert(source.includes("If in_range says true but range_side is above_range or below_range"), "startup prompt must warn about API lag telemetry");
 assert(toolDefinitions.includes("source/API in-range boolean plus effective derived bin range state"), "get_my_positions tool description must expose source/API vs effective derived range state");
 assert(toolDefinitions.includes("API lag telemetry"), "get_my_positions tool description must tell LLM to report API lag telemetry");
@@ -125,8 +127,7 @@ console.log(JSON.stringify({
   reportingOnly: true,
   coveredSurfaces: [
     "management report",
-    "telegram positions rich cards",
-    "telegram position detail rich card",
+    "telegram view-model (rich cards + detail tabs)",
     "startup open positions",
     "CLI /status",
   ],

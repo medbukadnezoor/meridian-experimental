@@ -207,6 +207,7 @@ WARNING: This executes a real on-chain transaction. Check DRY_RUN mode.`,
           price_change_pct: { type: "number", description: "Candidate recent price change or drawdown percentage for range-width guard telemetry/enforcement" },
           deploy_share_of_active_tvl_pct: { type: "number", description: "Estimated deploy share of active TVL percentage for range-width guard telemetry/enforcement" },
           fee_tvl_ratio: { type: "number", description: "fee/TVL ratio at deploy time" },
+          volume_active_tvl_multiple: { type: "number", description: "Recent volume divided by active TVL at deploy time for critical-thin entry proof" },
           organic_score: { type: "number", description: "Base token organic score at deploy time" },
           initial_value_usd: { type: "number", description: "Estimated USD value being deployed" }
         },

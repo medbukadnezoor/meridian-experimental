@@ -14,6 +14,8 @@ import { fileURLToPath } from "url";
 import { evaluateFeeExitPolicy } from "../fee-exit-policy.js";
 import {
   evaluateFeeExitConfluenceFromRows,
+  feeExitConfluenceBypassReason,
+  filterClosedConfluenceCandles,
   shouldGateFeeExitDecision,
 } from "../fee-exit-confluence.js";
 import { buildConfig } from "../config-builder.js";
@@ -58,7 +60,10 @@ function baseManagement(policyOverrides = {}) {
       feeHarvestEnabled: true,
       feeHarvestMinHoldMinutes: 25,
       feeHarvestMinFeePctOfEntry: 0.75,
-      feeHarvestMinNetPnlPct: 0.35,
+      feeHarvestMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceMinFeePctOfEntry: 2.0,
+      feeHarvestBypassConfluenceMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceStrongNetPnlPct: 0.75,
       noFeeAbortEnabled: true,
       noFeeAbortMaxHoldMinutes: 60,
       noFeeAbortMaxFeePctOfEntry: 0.05,
@@ -82,8 +87,10 @@ function baseManagement(policyOverrides = {}) {
       exitConfluenceRsiOverbought: 90,
       exitConfluenceBbPeriod: 20,
       exitConfluenceBbStdDev: 2,
-      exitConfluenceAggregateMin: 5,
-      exitConfluenceLookbackMinutes: 180,
+      exitConfluenceAggregateMin: 3,
+      exitConfluenceLookbackMinutes: 90,
+      exitConfluenceClosedCandlesOnly: true,
+      exitConfluenceCandleCloseLagSeconds: 10,
       exitConfluenceRules: ["fee_harvest", "max_hold_timeout"],
       ...policyOverrides,
     },
@@ -239,6 +246,11 @@ async function main() {
   const harvest = decision({ age_minutes: 30, pnl_pct: 0.5, total_value_usd: 0.503, unclaimed_fees_usd: 0.004 });
   assert.strictEqual(harvest?.rule, "fee_harvest", "fee harvest threshold should still trigger");
   assert.strictEqual(shouldGateFeeExitDecision(harvest, baseManagement().feeExitPolicy), true, "fee harvest should require confluence");
+  assert.strictEqual(feeExitConfluenceBypassReason(harvest, baseManagement().feeExitPolicy), null, "ordinary fee harvest should still wait for confluence");
+  const highFeeHarvest = decision({ age_minutes: 30, pnl_pct: 0.3, total_value_usd: 0.503, unclaimed_fees_usd: 0.011 });
+  assert.strictEqual(feeExitConfluenceBypassReason(highFeeHarvest, baseManagement().feeExitPolicy), "fee_harvest_fee_and_net_pnl_bypass", "high-fee positive harvest should bypass confluence");
+  const strongNetHarvest = decision({ age_minutes: 30, pnl_pct: 0.8, total_value_usd: 0.504, unclaimed_fees_usd: 0.004 });
+  assert.strictEqual(feeExitConfluenceBypassReason(strongNetHarvest, baseManagement().feeExitPolicy), "fee_harvest_strong_net_pnl_bypass", "strong net-PnL harvest should bypass confluence");
 
   const emergency = decision({ age_minutes: 10, pnl_pct: -7, total_value_usd: 0.465, unclaimed_fees_usd: 0.0001 }, {
     feeHarvestEnabled: false,
@@ -253,6 +265,13 @@ async function main() {
   const strongConfluence = evaluateFeeExitConfluenceFromRows(makeRows({ breakout: true }), baseManagement().feeExitPolicy);
   assert.strictEqual(strongConfluence.accepted, true, "breakout rows should pass discretionary exit");
   assert.ok(strongConfluence.signalCount >= 2, "confluence pass should have at least 2 signals");
+  const closedFilter = filterClosedConfluenceCandles([
+    { timestamp: 1_800, open: 1, high: 1.1, low: 0.9, close: 1.05 },
+    { timestamp: 1_981, open: 1.05, high: 1.2, low: 1.0, close: 1.1 },
+  ], { closedCandlesOnly: true, candleCloseLagSeconds: 10, nowMs: 1_990_000 });
+  assert.strictEqual(closedFilter.rows.length, 1, "closed-candle filter should drop candles after now-lag");
+  assert.strictEqual(closedFilter.latestClosedCandleTs, 1_800, "closed-candle filter should expose latest closed candle timestamp");
+  assert.strictEqual(closedFilter.droppedOpenCandleCount, 1, "closed-candle filter should count dropped open candles");
 
   const example = loadJson("user-config.example.json");
   assert.strictEqual(example.deployAmountSol, 5, "Fabriq example deploy size is 5 SOL");
@@ -271,8 +290,17 @@ async function main() {
   assert.strictEqual(example.supertrendLossExitEnabled, false, "Fabriq recovery-hold disables Supertrend loss close");
   assert.strictEqual(example.feeExitPolicy.recoveryHoldPositiveOnly, true, "Fabriq recovery-hold gates fee exits to positive PnL");
   assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 8, "Fabriq fee harvest can exit after 8m");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinFeePctOfEntry, 0.75, "Fabriq base fee harvest fee floor remains 0.75%");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestMinNetPnlPct, 0.25, "Fabriq base fee harvest net PnL floor remains 0.25%");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceMinFeePctOfEntry, 2.0, "Fabriq high-fee harvest bypass requires 2.0% fees");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceMinNetPnlPct, 0.25, "Fabriq high-fee harvest bypass keeps 0.25% net PnL floor");
+  assert.strictEqual(example.feeExitPolicy.feeHarvestBypassConfluenceStrongNetPnlPct, 0.75, "Fabriq strong net PnL bypass requires 0.75%");
   assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 20, "Fabriq no-fee abort is rapid");
   assert.strictEqual(example.feeExitPolicy.exitConfluenceEnabled, true, "confluence enabled");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceAggregateMin, 3, "Fabriq confluence targets locally rolled 3m candles");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceLookbackMinutes, 90, "Fabriq confluence uses 90m lookback");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceClosedCandlesOnly, true, "Fabriq confluence uses complete candles only");
+  assert.strictEqual(example.feeExitPolicy.exitConfluenceCandleCloseLagSeconds, 10, "Fabriq confluence waits 10s after candle close");
 
   const built = buildConfig(example, {});
   assert.strictEqual(built.risk.maxPositions, 4, "runtime config resolves maxPositions=4");
@@ -283,6 +311,10 @@ async function main() {
   assert.strictEqual(built.management.recoveryHoldProfileEnabled, true, "runtime keeps recovery-hold profile enabled");
   assert.strictEqual(built.management.feeExitPolicy.recoveryHoldPositiveOnly, true, "runtime keeps fee exits positive-only");
   assert.strictEqual(built.management.feeExitPolicy.exitConfluenceMinSignals, 2, "runtime keeps confluence threshold");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceAggregateMin, 3, "runtime keeps 3m confluence target");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceLookbackMinutes, 90, "runtime keeps 90m confluence lookback");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceClosedCandlesOnly, true, "runtime keeps closed-candle confluence");
+  assert.strictEqual(built.management.feeExitPolicy.exitConfluenceCandleCloseLagSeconds, 10, "runtime keeps confluence lag");
   assert.strictEqual(built.management.noFeeAbortCooldownHours, 12, "runtime keeps no-fee cooldown");
   assert.strictEqual(built.management.velocityStopCooldownHours, 24, "runtime keeps velocity cooldown");
   assert.strictEqual(built.management.pnlSnapshotBotName, "meridian", "main profile resolves meridian PnL snapshot bot name");
@@ -321,6 +353,8 @@ async function main() {
   const confluence = read("fee-exit-confluence.js");
   assert.ok(index.includes("management.feeExitPolicy.confluence"), "runtime logs confluence decision context");
   assert.ok(index.includes("shouldGateFeeExitDecision(decision, policy)"), "runtime checks confluence gate");
+  assert.ok(index.includes("confluence_bypass_reason"), "runtime logs confluence bypass reason");
+  assert.ok(index.includes("closedCandlesOnly"), "runtime logs closed-candle confluence metadata");
   assert.ok(dlmm.includes("getActiveStrategy()?.id"), "deploy profile is derived from active strategy library");
   assert.ok(dlmm.includes("close_verification_status: \"rpc_rate_limited\""), "close verification degraded tx evidence preserved");
   assert.ok(dlmm.includes("recordDegradedClosePerformance"), "degraded close verification records performance for pool-memory cooldowns");
@@ -335,6 +369,8 @@ async function main() {
       "no-fee abort waits 60m",
       "emergency exits bypass confluence",
       "fee harvest requires 2-signal confluence",
+      "hybrid fee harvest bypasses confluence only for high-fee or strong-net cases",
+      "closed-candle confluence drops open candles",
       "pool memory blocks no-fee and velocity-stop pools/mints",
       "example config resolves Fabriq 5 SOL / 4 max positions",
       "Fabriq strategy-library profile is active and fixed 35-bin SOL-only",
