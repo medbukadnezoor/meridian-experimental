@@ -978,26 +978,30 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // Orphan guard (same policy as the PnL poll): drop on-chain positions with no
     // tracked-state entry before any exit/deterministic-rule evaluation, and alert the
-    // owner once per distinct orphan address. Prune already-alerted addresses no longer
-    // live so a future re-occurrence can re-alert. Do NOT auto-adopt.
+    // owner once per distinct orphan address. Reconcile via the shared
+    // reconcileOrphanAlerts helper: it prunes already-alerted addresses no longer live
+    // (so a future re-occurrence re-alerts) and returns the newly-seen orphans to alert
+    // on (deduped via _alertedOrphans). Do NOT auto-adopt.
     {
-      const liveAddrs = new Set(positions.map((pos) => pos.position));
-      for (const addr of [..._alertedOrphans]) {
-        if (!liveAddrs.has(addr)) _alertedOrphans.delete(addr);
+      const orphanByAddr = new Map();
+      for (const p of positions) {
+        if (!getTrackedPosition(p.position)) orphanByAddr.set(p.position, p);
       }
-    }
-    const managedPositions = positions.filter((p) => {
-      if (getTrackedPosition(p.position)) return true;
-      if (!_alertedOrphans.has(p.position)) {
-        _alertedOrphans.add(p.position);
+      const newOrphans = reconcileOrphanAlerts(
+        _alertedOrphans,
+        positions.map((pos) => pos.position),
+        [...orphanByAddr.keys()],
+      );
+      for (const addr of newOrphans) {
+        const p = orphanByAddr.get(addr);
         const msg = `[Management] Untracked live position skipped — ${p.position} (${p.pair}) — not managed, close/handle manually`;
         log("cron_error", msg);
         if (telegramEnabled()) {
           sendMessage(`⚠️ ${msg}`).catch(() => {});
         }
       }
-      return false;
-    });
+    }
+    const managedPositions = positions.filter((p) => getTrackedPosition(p.position));
 
     // Snapshot + load pool memory
     const positionData = managedPositions.map((p) => {
@@ -1799,29 +1803,34 @@ Summarize the current portfolio health, total fees earned, and performance of al
       const result = await getMyPositions({ force: true, silent: true }).catch(() => null);
       activeBinOracleRecorder.updatePositions(result?.positions || []);
       if (!result?.positions?.length) return;
-      // Prune already-alerted orphan addresses that are no longer live so a future
-      // re-occurrence can re-alert (in-memory dedup; see reconcileOrphanAlerts).
+      // Orphan guard: an on-chain position with no tracked-state entry has no
+      // deployed_at/baseline/peak/strategy, so every exit rule below would act on
+      // fabricated data. Reconcile via the shared reconcileOrphanAlerts helper: it
+      // prunes already-alerted addresses no longer live (so a future re-occurrence
+      // re-alerts) and returns the newly-seen orphans to alert on (deduped via
+      // _alertedOrphans). Each orphan is then skipped in the loop below. Do NOT auto-adopt.
       {
-        const liveAddrs = new Set(result.positions.map((pos) => pos.position));
-        for (const addr of [..._alertedOrphans]) {
-          if (!liveAddrs.has(addr)) _alertedOrphans.delete(addr);
+        const orphanByAddr = new Map();
+        for (const p of result.positions) {
+          if (!getTrackedPosition(p.position)) orphanByAddr.set(p.position, p);
+        }
+        const newOrphans = reconcileOrphanAlerts(
+          _alertedOrphans,
+          result.positions.map((pos) => pos.position),
+          [...orphanByAddr.keys()],
+        );
+        for (const addr of newOrphans) {
+          const p = orphanByAddr.get(addr);
+          const msg = `[PnL poll] Untracked live position skipped — ${p.position} (${p.pair}) — not managed, close/handle manually`;
+          log("cron_error", msg);
+          if (telegramEnabled()) {
+            sendMessage(`⚠️ ${msg}`).catch(() => {});
+          }
         }
       }
       for (const p of result.positions) {
-        // Orphan guard: an on-chain position with no tracked-state entry has no
-        // deployed_at/baseline/peak/strategy, so every exit rule below would act on
-        // fabricated data. Skip it entirely and alert the owner once per distinct
-        // orphan address (deduped via _alertedOrphans). Do NOT auto-adopt.
         const tracked = getTrackedPosition(p.position);
         if (!tracked) {
-          if (!_alertedOrphans.has(p.position)) {
-            _alertedOrphans.add(p.position);
-            const msg = `[PnL poll] Untracked live position skipped — ${p.position} (${p.pair}) — not managed, close/handle manually`;
-            log("cron_error", msg);
-            if (telegramEnabled()) {
-              sendMessage(`⚠️ ${msg}`).catch(() => {});
-            }
-          }
           continue;
         }
         if (!p.pnl_pct_suspicious && queuePeakConfirmation(p.position, p.pnl_pct)) {
