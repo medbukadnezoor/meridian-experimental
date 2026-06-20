@@ -194,11 +194,30 @@ const safe = applyRangeWidthDecision({
   deploy_share_of_active_tvl_pct: 1,
   volatility: 2,
   price_change_pct: 12,
-}, liveConfig());
+}, liveConfig({ strategy: { dynamicRangeWidthRequireFeeProofToTighten: true } }));
 assert.strictEqual(safe.ok, true, "safe/deeper pool passes");
-assert.strictEqual(safe.decision.decision, "keep", "safe/deeper pool keeps fallback when fee-density proof is missing");
-assert.strictEqual(safe.args.bins_below, 35, "safe/deeper pool does not tighten without fee-density proof");
-assert.ok(safe.decision.reason_codes.includes("tighten_blocked_missing_fee_density"), "missing fee-density proof blocks tightening");
+assert.strictEqual(safe.decision.decision, "keep", "with requireFeeProofToTighten=true, deep pool keeps fallback when fee-density proof is missing");
+assert.strictEqual(safe.args.bins_below, 35, "with the flag on, deep pool does not tighten without fee-density proof");
+assert.ok(safe.decision.reason_codes.includes("tighten_blocked_missing_fee_density"), "with the flag on, missing fee-density proof blocks tightening");
+
+// Default (flag off): the SAME deep/weak-fee pool now tightens to the tier target — the Merlin fix
+const safeDefault = applyRangeWidthDecision({
+  pool_address: "safe-default-pool",
+  amount_y: 12,
+  amount_x: 0,
+  bins_above: 0,
+  bins_below: 35,
+  bin_step: 125,
+  mcap: 2_000_000,
+  active_tvl: 150_000,
+  deploy_share_of_active_tvl_pct: 1,
+  volatility: 2,
+  price_change_pct: 12,
+}, liveConfig());
+assert.strictEqual(safeDefault.decision.decision, "override", "by default, weak fee-density no longer blocks tier tightening");
+assert.ok(safeDefault.decision.reason_codes.includes("llm_bins_tightened"), "default path tightens the LLM range");
+assert.ok(!safeDefault.decision.reason_codes.includes("tighten_blocked_missing_fee_density"), "default path is not blocked by missing fee density");
+assert.ok(safeDefault.args.bins_below < 35, "default path caps downside by tightening toward the tier target");
 
 const missing = applyRangeWidthDecision({
   pool_address: "missing-input-pool",
