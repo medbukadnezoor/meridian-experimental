@@ -72,6 +72,7 @@ const POSITION_RANGE_DISPLAY_VERIFIER_PATH = join(__dirname, "verify-position-ra
 const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-range-state-telemetry.js");
 const EFFECTIVE_RANGE_STATE_VERIFIER_PATH = join(__dirname, "verify-effective-range-state.js");
 const PROVIDER_RATE_LIMIT_REPORT_VERIFIER_PATH = join(__dirname, "verify-provider-rate-limit-report.js");
+const TELEGRAM_RICH_CONTROLS_VERIFIER_PATH = join(__dirname, "verify-telegram-rich-controls.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -803,6 +804,22 @@ function runEvilPandaFeeDumpProof() {
   return JSON.parse(result.stdout);
 }
 
+function runTelegramRichControlsProof() {
+  const result = spawnSync(process.execPath, [TELEGRAM_RICH_CONTROLS_VERIFIER_PATH, "--json"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-telegram-rich-controls failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -860,8 +877,22 @@ function buildChecks() {
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
   const recoveryHoldExitProfileProof = runRecoveryHoldExitProfileProof();
   const providerRateLimitReportProof = runProviderRateLimitReportProof();
+  const telegramRichControlsProof = runTelegramRichControlsProof();
 
   return [
+    {
+      file: "scripts/verify-telegram-rich-controls.js",
+      label: "[Telegram rich controls] rich UI, expiring action IDs, executor closes, dust preview, and PM2 gates pass",
+      test: () =>
+        telegramRichControlsProof?.success === true &&
+        telegramRichControlsProof?.checks?.includes("telegram rich helpers call sendRichMessage/editMessageText with rich_message and HTML fallback") &&
+        telegramRichControlsProof?.checks?.includes("destructive callbacks require TELEGRAM_ALLOWED_USER_IDS user allowlist") &&
+        telegramRichControlsProof?.checks?.includes("callback execution uses expiring server-side action IDs bound to chat and user") &&
+        telegramRichControlsProof?.checks?.includes("close one/all execute through executor close_position and close-all is sequential") &&
+        telegramRichControlsProof?.checks?.includes("dust menu excludes SOL/USDC/USDT and active base mints, quotes first, then executor swaps to SOL") &&
+        telegramRichControlsProof?.checks?.includes("PM2 stop is allowlisted, confirmed, env-gated, and pm_id-bound") &&
+        telegramRichControlsProof?.checks?.includes("burn execution is deferred and no burn executor path exists"),
+    },
     {
       file: "scripts/verify-dynamic-range-width-guard.js",
       label: "[Dynamic range width guard] executor enforces downside coverage before deploy_position transaction paths",
@@ -980,7 +1011,7 @@ function buildChecks() {
       label: "[Direct close guard] all direct close paths route through one per-position in-flight guard",
       test: () =>
         directCloseInflightGuardProof?.success === true &&
-        directCloseInflightGuardProof?.checks?.includes("all index.js close_position calls route through guarded helper") &&
+        directCloseInflightGuardProof?.checks?.includes("all index.js close_position calls route through guarded or Telegram-confirmed executor helpers") &&
         directCloseInflightGuardProof?.checks?.includes("fresh duplicate close attempts are skipped"),
     },
     {
