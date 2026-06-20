@@ -82,6 +82,18 @@ check("close-all preview is capped with overflow summary, not full cards", () =>
   has(files.render, /and\s+\$\{extra\}\s+more/)
 );
 
+check("dust menu shows amount/SOL/USD and a GMGN+OKX spam verdict", () =>
+  has(files.render, /export\s+function\s+buildDustMenuHtml/) &&
+  has(files.render, /export\s+function\s+dustSpamIcon/) &&
+  has(files.render, /◎\$\{escapeHtml\(formatNum\(t\.valueSol/) &&
+  has(files.index, /function\s+classifyDustRisk\(okx,\s*gmgn\)/) &&
+  has(files.index, /getOkxAdvancedInfo\(mint\)/) &&
+  has(files.index, /fetchGmgnTokenRisk\(mint\)/) &&
+  has(files.index, /function\s+toDustView\(/) &&
+  has(files.index, /buildDustMenuHtml\(\{/) &&
+  has(files.index, /is_honeypot/)
+);
+
 check("markdown→HTML converter escapes first, then applies a fixed style allow-list", () =>
   has(files.render, /export\s+function\s+mdToTelegramHtml\(text\)/) &&
   has(files.render, /let\s+out\s*=\s*escapeHtml\(text\)/) &&
