@@ -121,8 +121,7 @@ export function buildStopLossExitDecision({
   includeSoftStop = true,
 } = {}) {
   const current = toFiniteNumberOrNull(currentPnlPct);
-  const stopLossPct = toFiniteNumberOrNull(managementConfig.stopLossPct);
-  if (current == null || stopLossPct == null) return null;
+  if (current == null) return null;
 
   const hardStopLossPct = toFiniteNumberOrNull(managementConfig.hardStopLossPct);
   if (hardStopLossPct != null && current <= hardStopLossPct) {
@@ -133,6 +132,9 @@ export function buildStopLossExitDecision({
       urgent: true,
     };
   }
+
+  const stopLossPct = toFiniteNumberOrNull(managementConfig.stopLossPct);
+  if (stopLossPct == null) return null;
 
   const fastClosePct = toFiniteNumberOrNull(managementConfig.stopLossFastClosePct);
   if (fastClosePct != null && current <= fastClosePct) {
