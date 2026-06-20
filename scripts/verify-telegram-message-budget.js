@@ -14,6 +14,7 @@ import {
   buildClosePreviewHtml,
   buildCloseAllPreviewHtml,
   buildCycleReportHtml,
+  buildDustMenuHtml,
   mdToTelegramHtml,
 } from "../telegram-render.js";
 
@@ -117,6 +118,21 @@ budgetCheck("management cycle report within budget", buildCycleReportHtml({
   solMode: true,
   actionSummary: "CLOSE (profit giveback)",
 }), 1600);
+
+// Dust menu — 8 worst-case spam rows with amount/SOL/USD + flags.
+budgetCheck("dust menu within budget", buildDustMenuHtml({
+  tokens: Array.from({ length: 8 }, (_, i) => ({
+    symbol: `SCAMTOKENNAME${i}`,
+    mint: `MintAddrExample${i}00000000000000000000000000`,
+    amount: 123456789.123,
+    valueSol: 0.0123,
+    usd: 4.99,
+    verdict: "spam",
+    flags: ["honeypot", "dev rugged 3x", "top10 99%"],
+  })),
+  thresholdUsd: 5,
+  nowLabel: "Jun 20 14:52 WIB",
+}), TELEGRAM_BUDGETS.dustMenu);
 
 // mdToTelegramHtml must neutralize raw HTML (no injection) and convert markdown.
 function correctnessCheck(label, ok) {

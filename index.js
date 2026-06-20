@@ -25,10 +25,13 @@ import {
   buildClosePreviewHtml,
   buildCloseAllPreviewHtml,
   buildCycleReportHtml,
+  buildDustMenuHtml,
+  dustSpamIcon,
   mdToTelegramHtml,
   DETAIL_TABS,
 } from "./telegram-render.js";
 import { resolveTrackerConfig, listJsonlFiles, readJsonlFiles } from "./sol-equity-tracker.js";
+import { getAdvancedInfo as getOkxAdvancedInfo } from "./tools/okx.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { buildDynamicRangeShadowTelemetry, describeRangePolicyForPrompt, getActiveStrategy, normalizeCandidateEvidenceForDeploy, resolveStrategyRangePolicy, computeDownsideBinsForPct, resolveDynamicRangeLiveDeployArgs } from "./strategy-library.js";
@@ -2617,6 +2620,59 @@ async function executeCloseAllAction(action) {
   return [`<b>Close All Result</b>`, "", ...results].join("\n");
 }
 
+// Spam/scam classification for dust tokens, combining OKX advanced-info and
+// GMGN top-trader risk. Cached briefly so opening/refreshing the dust menu
+// doesn't re-hit the APIs for every token each time.
+const _dustRiskCache = new Map(); // mint -> { ts, data }
+const DUST_RISK_TTL_MS = 5 * 60 * 1000;
+
+function classifyDustRisk(okx, gmgn) {
+  const flags = [];
+  if (okx) {
+    if (okx.is_honeypot) flags.push("honeypot");
+    const rl = finiteNumberOrNull(okx.risk_level);
+    if (rl != null && rl >= 4) flags.push(`risk ${rl}/5`);
+    if ((finiteNumberOrNull(okx.dev_rug_count) ?? 0) > 0) flags.push(`dev rugged ${okx.dev_rug_count}x`);
+    if (okx.dev_sold_all) flags.push("dev dumped");
+    if (okx.low_liquidity) flags.push("low liq");
+  }
+  if (gmgn) {
+    const top10 = finiteNumberOrNull(gmgn.top10_concentration_pct);
+    if (top10 != null && top10 >= 80) flags.push(`top10 ${Math.round(top10)}%`);
+    if ((finiteNumberOrNull(gmgn.suspicious_count) ?? 0) >= 3) flags.push(`${gmgn.suspicious_count} sus wallets`);
+  }
+  const haveData = Boolean(okx || gmgn);
+  return { verdict: !haveData ? "unknown" : (flags.length ? "spam" : "ok"), flags };
+}
+
+async function getDustRisk(mint) {
+  if (!mint) return { verdict: "unknown", flags: [] };
+  const cached = _dustRiskCache.get(mint);
+  if (cached && Date.now() - cached.ts < DUST_RISK_TTL_MS) return cached.data;
+  const [okx, gmgn] = await Promise.all([
+    getOkxAdvancedInfo(mint).catch(() => null),
+    fetchGmgnTokenRisk(mint).catch(() => null),
+  ]);
+  const data = classifyDustRisk(okx, gmgn);
+  _dustRiskCache.set(mint, { ts: Date.now(), data });
+  return data;
+}
+
+function toDustView(token, wallet, risk) {
+  const solPrice = finiteNumberOrNull(wallet?.sol_price);
+  const usd = finiteNumberOrNull(token.usd);
+  const valueSol = (usd != null && solPrice && solPrice > 0) ? usd / solPrice : null;
+  return {
+    symbol: token.symbol,
+    mint: token.mint,
+    amount: finiteNumberOrNull(token.balance),
+    usd,
+    valueSol,
+    verdict: risk?.verdict ?? "unknown",
+    flags: risk?.flags ?? [],
+  };
+}
+
 function dustCandidatesFromWallet(wallet, positions) {
   const activeBaseMints = new Set((positions || []).map((position) => position.base_mint).filter(Boolean));
   const stableMints = new Set([config.tokens.SOL, config.tokens.USDC, config.tokens.USDT]);
@@ -2629,23 +2685,19 @@ function dustCandidatesFromWallet(wallet, positions) {
 
 async function showDustMenu(messageId = null) {
   const [wallet, { positions = [] }] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-  const candidates = dustCandidatesFromWallet(wallet, positions);
-  const rows = candidates.slice(0, 8).map((token, index) => [
-    settingButton(`Sell ${token.symbol || shortAddress(token.mint)} $${formatNum(token.usd, 2)}`, `tg:dust_preview:${index}`),
+  const candidates = dustCandidatesFromWallet(wallet, positions).slice(0, 8);
+  const risks = await Promise.all(candidates.map((token) => getDustRisk(token.mint)));
+  const tokens = candidates.map((token, index) => toDustView(token, wallet, risks[index]));
+  const rows = candidates.map((token, index) => [
+    settingButton(`${dustSpamIcon(tokens[index].verdict)} Sell ${token.symbol || shortAddress(token.mint)} ${formatCompactUsd(token.usd)}`, `tg:dust_preview:${index}`),
   ]);
-  rows.push([settingButton("Refresh", "tg:dust"), settingButton("Dashboard", "tg:dash")]);
-  rows.push([settingButton("Burn Tokens", "tg:burn_info")]);
-  const html = [
-    `<b>Dust Tokens</b>`,
-    `Threshold: <= ${escapeHtml(formatCompactUsd(TELEGRAM_DUST_MAX_USD))} | excludes SOL/USDC/USDT and active-position base mints`,
-    "",
-    candidates.length
-      ? candidates.slice(0, 8).map((token, index) => `${index + 1}. <b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b> ${escapeHtml(formatCompactUsd(token.usd))} | bal ${escapeHtml(formatNum(token.balance, 6))}`).join("\n")
-      : "No sellable dust candidates.",
-    "",
-    "Burn execution is deferred and requires a separate approved ticket.",
-  ].join("\n");
-  return showRichOrSend({ html, keyboard: rows, messageId });
+  rows.push([settingButton("🔄 Refresh", "tg:dust"), settingButton("🏠 Dashboard", "tg:dash")]);
+  rows.push([settingButton("🔥 Burn Tokens", "tg:burn_info")]);
+  return showRichOrSend({
+    html: buildDustMenuHtml({ tokens, thresholdUsd: TELEGRAM_DUST_MAX_USD, nowLabel: telegramNowLabel() }),
+    keyboard: rows,
+    messageId,
+  });
 }
 
 async function showDustPreview(msg, index, messageId = null) {
@@ -2657,7 +2709,11 @@ async function showDustPreview(msg, index, messageId = null) {
   const candidates = dustCandidatesFromWallet(wallet, positions);
   const token = candidates[index];
   if (!token) return showRichOrSend({ html: "Dust token not found. Refresh first.", keyboard: [[settingButton("Dust", "tg:dust")]], messageId });
-  const quote = await quoteSwapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance });
+  const [quote, risk] = await Promise.all([
+    quoteSwapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance }),
+    getDustRisk(token.mint),
+  ]);
+  const view = toDustView(token, wallet, risk);
   const priceImpactBps = finiteNumberOrNull(quote?.swap_trace?.price_impact_bps);
   const expectedOutRaw = quote?.swap_trace?.expected_out_raw ?? quote?.swap_trace?.order?.outAmount ?? null;
   const quoteBlocked = !quote?.success || expectedOutRaw == null || (priceImpactBps != null && priceImpactBps > TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS);
@@ -2671,9 +2727,11 @@ async function showDustPreview(msg, index, messageId = null) {
   });
   const html = [
     `<b>Dust Sell Preview</b>`,
-    `<b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b> ${escapeHtml(formatCompactUsd(token.usd))}`,
+    `${dustSpamIcon(view.verdict)} <b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b>`,
     `Mint: <code>${escapeHtml(shortAddress(token.mint, 6, 6))}</code>`,
     `Amount: ${escapeHtml(formatNum(token.balance, 8))}`,
+    `Value: ◎${escapeHtml(formatNum(view.valueSol, 4))} · ${escapeHtml(formatCompactUsd(token.usd))}`,
+    `Risk: ${dustSpamIcon(view.verdict)} ${escapeHtml(view.verdict)}${view.flags.length ? ` — ${escapeHtml(view.flags.join(", "))}` : ""} <i>(GMGN+OKX)</i>`,
     "",
     quote?.success
       ? `Quote: expected SOL raw <code>${escapeHtml(expectedOutRaw ?? "?")}</code> | impact ${escapeHtml(priceImpactBps ?? "?")} bps`

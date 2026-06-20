@@ -19,7 +19,7 @@ export const TELEGRAM_BUDGETS = {
   detail: 900,
   closePreview: 700,
   closeAllPreview: 1100,
-  dustMenu: 1000,
+  dustMenu: 1500,
   result: 700,
 };
 
@@ -366,6 +366,40 @@ export function buildCycleReportHtml({ headline = null, items = [], totalValue =
     extra ? "" : null,
     extra || null,
   ]);
+}
+
+// ─── Dust menu ───────────────────────────────────────────────────────────────
+// Spam verdict icon (risk from GMGN + OKX, classified in index.js).
+export function dustSpamIcon(verdict) {
+  if (verdict === "spam") return "🚫";
+  if (verdict === "ok") return "✅";
+  return "❔";
+}
+
+// tokens: [{ symbol, mint, amount, valueSol, usd, verdict, flags }]
+export function buildDustMenuHtml({ tokens = [], thresholdUsd = 5, nowLabel = "" } = {}) {
+  const body = tokens.length
+    ? tokens.map((t, i) => {
+        const sym = escapeHtml(t.symbol || shortAddress(t.mint));
+        const amt = escapeHtml(formatNum(t.amount, finite(t.amount) != null && Math.abs(t.amount) >= 1000 ? 0 : 4));
+        const sol = `◎${escapeHtml(formatNum(t.valueSol, 4))}`;
+        const usd = escapeHtml(formatCompactUsd(t.usd));
+        const flags = (t.flags || []).slice(0, 3).join(", ");
+        return joinLines([
+          `${i + 1}. ${dustSpamIcon(t.verdict)} <b>${sym}</b>`,
+          `${amt} · ${sol} · ${usd}${flags ? ` · <i>${escapeHtml(flags)}</i>` : ""}`,
+        ]);
+      }).join("\n\n")
+    : "No sellable dust candidates.";
+  return clampHtml(joinLines([
+    `🧹 <b>Dust Tokens</b>`,
+    `<i>≤ ${escapeHtml(formatCompactUsd(thresholdUsd))} · excludes SOL/USDC/USDT + active mints</i>`,
+    nowLabel ? `<i>${escapeHtml(nowLabel)}</i>` : null,
+    "",
+    body,
+    "",
+    `🚫 spam · ✅ ok · ❔ unknown — risk via GMGN + OKX`,
+  ]), TELEGRAM_BUDGETS.dustMenu);
 }
 
 export function buildCloseAllPreviewHtml({ views = [], totalValue = 0, totalPnlPct = null, solMode = true, ttlSeconds = 60, maxRows = 4 } = {}) {
