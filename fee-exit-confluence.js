@@ -79,6 +79,55 @@ function rowOpen(row) {
   return finiteNumberOrNull(row?.open ?? row?.o);
 }
 
+function rowTimestamp(row) {
+  const ts = finiteNumberOrNull(row?.closeTimestamp ?? row?.close_timestamp ?? row?.timestamp ?? row?.t);
+  return ts == null ? null : Math.floor(ts);
+}
+
+export function filterClosedConfluenceCandles(rows = [], {
+  closedCandlesOnly = true,
+  candleCloseLagSeconds = 10,
+  nowMs = Date.now(),
+} = {}) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  if (closedCandlesOnly !== true) {
+    const sortedRows = sourceRows
+      .filter((row) => rowClose(row) != null)
+      .sort((a, b) => Number(rowTimestamp(a) ?? 0) - Number(rowTimestamp(b) ?? 0));
+    const latest = sortedRows[sortedRows.length - 1] ?? null;
+    return {
+      rows: sortedRows,
+      closedCandlesOnly: false,
+      latestClosedCandleTs: rowTimestamp(latest),
+      droppedOpenCandleCount: 0,
+      closeCutoffTs: null,
+    };
+  }
+
+  const lagSeconds = Math.max(0, Number(candleCloseLagSeconds) || 0);
+  const closeCutoffTs = Math.floor((Number(nowMs) - (lagSeconds * 1000)) / 1000);
+  const closedRows = [];
+  let droppedOpenCandleCount = 0;
+  for (const row of sourceRows) {
+    if (rowClose(row) == null) continue;
+    const ts = rowTimestamp(row);
+    if (ts != null && ts > closeCutoffTs) {
+      droppedOpenCandleCount += 1;
+      continue;
+    }
+    closedRows.push(row);
+  }
+  closedRows.sort((a, b) => Number(rowTimestamp(a) ?? 0) - Number(rowTimestamp(b) ?? 0));
+  const latest = closedRows[closedRows.length - 1] ?? null;
+  return {
+    rows: closedRows,
+    closedCandlesOnly: true,
+    latestClosedCandleTs: rowTimestamp(latest),
+    droppedOpenCandleCount,
+    closeCutoffTs,
+  };
+}
+
 export function evaluateFeeExitConfluenceFromRows(rows = [], policy = {}) {
   if (policy.exitConfluenceEnabled !== true) {
     return { enabled: false, accepted: true, reason: "exit confluence disabled", signalCount: 0, signals: {} };
@@ -166,4 +215,23 @@ export function shouldGateFeeExitDecision(decision = {}, policy = {}) {
     return false;
   }
   return true;
+}
+
+export function feeExitConfluenceBypassReason(decision = {}, policy = {}) {
+  if (decision?.rule !== "fee_harvest") return null;
+  const feePct = finiteNumberOrNull(decision?.metrics?.fee_pct_of_entry);
+  const netPnlPct = finiteNumberOrNull(decision?.metrics?.net_pnl_pct);
+  if (feePct == null || netPnlPct == null) return null;
+
+  const minFeePct = finiteNumberOrNull(policy.feeHarvestBypassConfluenceMinFeePctOfEntry) ?? 2.0;
+  const minNetPnlPct = finiteNumberOrNull(policy.feeHarvestBypassConfluenceMinNetPnlPct) ?? 0.25;
+  const strongNetPnlPct = finiteNumberOrNull(policy.feeHarvestBypassConfluenceStrongNetPnlPct) ?? 0.75;
+
+  if (feePct >= minFeePct && netPnlPct >= minNetPnlPct) {
+    return "fee_harvest_fee_and_net_pnl_bypass";
+  }
+  if (netPnlPct >= strongNetPnlPct) {
+    return "fee_harvest_strong_net_pnl_bypass";
+  }
+  return null;
 }

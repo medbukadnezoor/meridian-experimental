@@ -1,5 +1,35 @@
 # Changelog
 
+## [main live stabilization] - 2026-06-20 - Telegram UI, hybrid fee harvest, and critical-thin entry overlay
+
+### Change: Commit deployed Main Meridian runtime hardening as one stabilization set
+
+- Added the Critical-Thin Entry Overlay for Main deploys:
+  - critical bucket: `mcap < 300000` or `active_tvl < 5000`
+  - watch bucket: `mcap < 500000` or `active_tvl < 10000`
+  - live critical entries require Fabriq/OHLCV chart accept, fee density, activity proof, and valid dynamic pool sizing evidence.
+  - missing `mcap` or `active_tvl` now blocks in live overlay mode instead of silently bypassing classification.
+- Kept dynamic pool sizing live and kept dynamic range width disabled/shadow.
+- Added `volume_active_tvl_multiple` deploy metadata so the entry overlay can verify activity density from the screening candidate.
+- Added hybrid fee-harvest confluence:
+  - base fee harvest remains permissive at positive PnL.
+  - strong fee/profit cases can bypass confluence.
+  - normal fee harvest uses closed 3m confluence built from complete 1m OHLCV rows.
+- Added complete-candle OHLCV handling and 1m-to-3m local aggregation for confluence checks.
+- Preserved recovery-hold behavior: non-catastrophic negative exits remain blocked while positive exits remain enabled.
+- Kept the already-live Telegram HTML rendering/menu/status improvements in the same stabilization commit because shared hunks in `index.js` and `scripts/verify-patches.js` were interleaved in the same deployed worktree.
+
+### Verification
+
+- Completed before commit:
+  - `node scripts/verify-critical-thin-entry-overlay.js`
+  - `node scripts/verify-fabriq-ohlcv-entry-gate.js`
+  - `node scripts/verify-dynamic-pool-sizing.js`
+  - `node scripts/verify-dynamic-range-width-guard.js`
+  - `node scripts/verify-patches.js`
+
+---
+
 ## [relay guard evidence hardening] - 2026-04-25 - owner proof for guarded relay rollout
 
 ### Change: read-only guard exercise report

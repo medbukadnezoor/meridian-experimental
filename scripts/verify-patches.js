@@ -58,6 +58,7 @@ const DYNAMIC_RANGE_SHADOW_VERIFIER_PATH = join(__dirname, "verify-dynamic-range
 const DYNAMIC_RANGE_WIDTH_GUARD_VERIFIER_PATH = join(__dirname, "verify-dynamic-range-width-guard.js");
 const DYNAMIC_POOL_SIZING_VERIFIER_PATH = join(__dirname, "verify-dynamic-pool-sizing.js");
 const FABRIQ_OHLCV_ENTRY_GATE_VERIFIER_PATH = join(__dirname, "verify-fabriq-ohlcv-entry-gate.js");
+const CRITICAL_THIN_ENTRY_OVERLAY_VERIFIER_PATH = join(__dirname, "verify-critical-thin-entry-overlay.js");
 const TWO_LANE_GATE_VERIFIER_PATH = join(__dirname, "verify-two-lane-gate.js");
 const MOMENTUM_SCORE_V1_VERIFIER_PATH = join(__dirname, "verify-momentum-score-v1.js");
 const ATH_PULLBACK_BAND_VERIFIER_PATH = join(__dirname, "verify-ath-pullback-band.js");
@@ -73,6 +74,7 @@ const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-rang
 const EFFECTIVE_RANGE_STATE_VERIFIER_PATH = join(__dirname, "verify-effective-range-state.js");
 const PROVIDER_RATE_LIMIT_REPORT_VERIFIER_PATH = join(__dirname, "verify-provider-rate-limit-report.js");
 const TELEGRAM_RICH_CONTROLS_VERIFIER_PATH = join(__dirname, "verify-telegram-rich-controls.js");
+const TELEGRAM_MESSAGE_BUDGET_VERIFIER_PATH = join(__dirname, "verify-telegram-message-budget.js");
 const MATERIAL_UPDATE_CONFIG_FIELDS = Object.freeze([
   "materialWinPct",
   "materialLossPct",
@@ -692,6 +694,10 @@ function runFabriqOhlcvEntryGateProof() {
   return runJsonVerifier(FABRIQ_OHLCV_ENTRY_GATE_VERIFIER_PATH, "verify-fabriq-ohlcv-entry-gate");
 }
 
+function runCriticalThinEntryOverlayProof() {
+  return runJsonVerifier(CRITICAL_THIN_ENTRY_OVERLAY_VERIFIER_PATH, "verify-critical-thin-entry-overlay");
+}
+
 function runMainCandidateShadowCollectionProof() {
   return runJsonVerifier(MAIN_CANDIDATE_SHADOW_COLLECTION_VERIFIER_PATH, "verify-main-candidate-shadow-collection");
 }
@@ -820,6 +826,22 @@ function runTelegramRichControlsProof() {
   return JSON.parse(result.stdout);
 }
 
+function runTelegramMessageBudgetProof() {
+  const result = spawnSync(process.execPath, [TELEGRAM_MESSAGE_BUDGET_VERIFIER_PATH, "--json"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: { ...process.env, LOG_LEVEL: "error" },
+  });
+
+  if (result.status !== 0) {
+    const stderr = result.stderr?.trim() || "(no stderr)";
+    const stdout = result.stdout?.trim() || "(no stdout)";
+    throw new Error(`verify-telegram-message-budget failed\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  }
+
+  return JSON.parse(result.stdout);
+}
+
 function buildChecks() {
   const nanocapUserConfig = parseNanocapUserConfig();
   const defaultProofPath = join(ROOT, `.runtime-config-default-proof-${process.pid}-${Date.now()}.json`);
@@ -866,6 +888,7 @@ function buildChecks() {
   const dynamicRangeWidthGuardProof = runDynamicRangeWidthGuardProof();
   const dynamicPoolSizingProof = runDynamicPoolSizingProof();
   const fabriqOhlcvEntryGateProof = runFabriqOhlcvEntryGateProof();
+  const criticalThinEntryOverlayProof = runCriticalThinEntryOverlayProof();
   const mainCandidateShadowCollectionProof = runMainCandidateShadowCollectionProof();
   const twoLaneGateProof = runTwoLaneGateProof();
   const momentumScoreV1Proof = runMomentumScoreV1Proof();
@@ -878,6 +901,7 @@ function buildChecks() {
   const recoveryHoldExitProfileProof = runRecoveryHoldExitProfileProof();
   const providerRateLimitReportProof = runProviderRateLimitReportProof();
   const telegramRichControlsProof = runTelegramRichControlsProof();
+  const telegramMessageBudgetProof = runTelegramMessageBudgetProof();
 
   return [
     {
@@ -892,6 +916,11 @@ function buildChecks() {
         telegramRichControlsProof?.checks?.includes("dust menu excludes SOL/USDC/USDT and active base mints, quotes first, then executor swaps to SOL") &&
         telegramRichControlsProof?.checks?.includes("PM2 stop is allowlisted, confirmed, env-gated, and pm_id-bound") &&
         telegramRichControlsProof?.checks?.includes("burn execution is deferred and no burn executor path exists"),
+    },
+    {
+      file: "scripts/verify-telegram-message-budget.js",
+      label: "[Telegram message budget] dashboard, positions, detail tabs, and close previews render within rendered-length budgets",
+      test: () => telegramMessageBudgetProof?.success === true && telegramMessageBudgetProof?.failed?.length === 0,
     },
     {
       file: "scripts/verify-dynamic-range-width-guard.js",
@@ -934,6 +963,26 @@ function buildChecks() {
         fabriqOhlcvEntryGateProof?.cases?.missing === "missing_evidence",
     },
     {
+      file: "scripts/verify-critical-thin-entry-overlay.js",
+      label: "[Critical-thin entry overlay] low mcap/thin active TVL requires chart plus fee/activity proof",
+      test: () =>
+        criticalThinEntryOverlayProof?.success === true &&
+        criticalThinEntryOverlayProof?.checks?.includes("mcap below 300k blocks without proof") &&
+        criticalThinEntryOverlayProof?.checks?.includes("active TVL below 5k is critical") &&
+        criticalThinEntryOverlayProof?.checks?.includes("non-critical pool bypasses overlay") &&
+        criticalThinEntryOverlayProof?.checks?.includes("missing classifier inputs block live overlay") &&
+        criticalThinEntryOverlayProof?.checks?.includes("watch-band pool logs shadow-only metadata") &&
+        criticalThinEntryOverlayProof?.checks?.includes("critical-thin Fabriq reject blocks") &&
+        criticalThinEntryOverlayProof?.checks?.includes("critical-thin missing chart evidence blocks") &&
+        criticalThinEntryOverlayProof?.checks?.includes("critical-thin chart accept plus fee/activity proof passes") &&
+        criticalThinEntryOverlayProof?.checks?.includes("dynamic pool sizing stays before critical-thin overlay") &&
+        criticalThinEntryOverlayProof?.checks?.includes("dynamic range width remains disabled in example config") &&
+        criticalThinEntryOverlayProof?.cases?.mcapCriticalMissingProof === "block" &&
+        criticalThinEntryOverlayProof?.cases?.missingClassifier === "block" &&
+        criticalThinEntryOverlayProof?.cases?.watchBand === "watch_only" &&
+        criticalThinEntryOverlayProof?.cases?.passed === "allow",
+    },
+    {
       file: "scripts/verify-provider-rate-limit-report.js",
       label: "[Provider rate-limit report] read-only log scanner buckets Helius, LPAgent, Jupiter, and other RPC errors",
       test: () =>
@@ -950,6 +999,8 @@ function buildChecks() {
         evilPandaFeeDumpProof?.success === true &&
         evilPandaFeeDumpProof?.checks?.includes("no-fee abort waits 60m") &&
         evilPandaFeeDumpProof?.checks?.includes("fee harvest requires 2-signal confluence") &&
+        evilPandaFeeDumpProof?.checks?.includes("hybrid fee harvest bypasses confluence only for high-fee or strong-net cases") &&
+        evilPandaFeeDumpProof?.checks?.includes("closed-candle confluence drops open candles") &&
         evilPandaFeeDumpProof?.checks?.includes("pool memory blocks no-fee and velocity-stop pools/mints") &&
         evilPandaFeeDumpProof?.checks?.includes("daily report groups by exit reason and strategy profile") &&
         evilPandaFeeDumpProof?.checks?.includes("close verification degraded evidence remains preserved"),
@@ -1173,6 +1224,9 @@ function buildChecks() {
         fnmfFeeExitPolicyProof?.success === true &&
         fnmfFeeExitPolicyProof?.orderedRules?.[0] === "fee_harvest" &&
         fnmfFeeExitPolicyProof?.liveShadowOnly === false &&
+        fnmfFeeExitPolicyProof?.hybridBypassReasons?.[0] === null &&
+        fnmfFeeExitPolicyProof?.hybridBypassReasons?.includes("fee_harvest_fee_and_net_pnl_bypass") &&
+        fnmfFeeExitPolicyProof?.hybridBypassReasons?.includes("fee_harvest_strong_net_pnl_bypass") &&
         fnmfFeeExitPolicyProof?.missingFeeSafety === null &&
         fnmfFeeExitPolicyProof?.sourceOrder?.deterministicOorBeforeTakeProfit === true &&
         fnmfFeeExitPolicyProof?.sourceOrder?.pnlPollStopBeforeFee === true &&
@@ -1832,7 +1886,10 @@ function buildChecks() {
         ohlcvDrawdownShadowProof?.logRows === 9 &&
         ohlcvDrawdownShadowProof?.tempStateFileCreated === true &&
         ohlcvDrawdownShadowProof?.tempDirRemoved === true &&
+        ohlcvDrawdownShadowProof?.threeMinuteRollupOk === true &&
         src.includes("GeckoTerminal") &&
+        src.includes("dexpaprika_1m_rollup") &&
+        src.includes("gmgn_1m_rollup") &&
         src.includes("combined_profit_ohlcv_drawdown") &&
         src.includes("source: \"ohlcv-drawdown-shadow\"") &&
         src.includes("shadowOnly: true") &&

@@ -13,6 +13,22 @@ import { config, reloadScreeningThresholds, computeDeployAmount } from "./config
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, sendRichMessage, editRichMessage, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, hasAllowedTelegramUsers, isAllowedTelegramUser, createLiveMessage } from "./telegram.js";
+import {
+  escapeHtml,
+  shortAddress,
+  formatNum,
+  formatCompactUsd,
+  formatSignedPct,
+  buildDashboardHtml,
+  buildPositionsPageHtml,
+  buildPositionDetailHtml,
+  buildClosePreviewHtml,
+  buildCloseAllPreviewHtml,
+  buildCycleReportHtml,
+  mdToTelegramHtml,
+  DETAIL_TABS,
+} from "./telegram-render.js";
+import { resolveTrackerConfig, listJsonlFiles, readJsonlFiles } from "./sol-equity-tracker.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
 import { buildDynamicRangeShadowTelemetry, describeRangePolicyForPrompt, getActiveStrategy, normalizeCandidateEvidenceForDeploy, resolveStrategyRangePolicy, computeDownsideBinsForPct, resolveDynamicRangeLiveDeployArgs } from "./strategy-library.js";
@@ -30,7 +46,13 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
-import { evaluateFeeExitConfluenceFromRows, feeExitConfluenceMinRows, shouldGateFeeExitDecision } from "./fee-exit-confluence.js";
+import {
+  evaluateFeeExitConfluenceFromRows,
+  feeExitConfluenceBypassReason,
+  feeExitConfluenceMinRows,
+  filterClosedConfluenceCandles,
+  shouldGateFeeExitDecision,
+} from "./fee-exit-confluence.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 import { fetchOhlcv, getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
@@ -558,6 +580,18 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
     return { enabled: false, accepted: true, reason: "fee-exit confluence not required" };
   }
 
+  const bypassReason = feeExitConfluenceBypassReason(decision, policy);
+  if (bypassReason) {
+    return {
+      enabled: true,
+      accepted: true,
+      reason: `exit confluence bypassed: ${bypassReason}`,
+      signalCount: null,
+      signals: {},
+      confluenceBypassReason: bypassReason,
+    };
+  }
+
   const pool = position?.pool ?? position?.pool_address ?? tracked?.pool ?? null;
   const baseMint = position?.base_mint ?? tracked?.base_mint ?? null;
   if (!pool) {
@@ -565,29 +599,43 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
   }
 
   try {
-    const aggregateMin = policy.exitConfluenceAggregateMin ?? 5;
+    const aggregateMin = policy.exitConfluenceAggregateMin ?? 3;
     const minRows = feeExitConfluenceMinRows(policy);
+    const closedCandlesOnly = policy.exitConfluenceClosedCandlesOnly !== false;
+    const candleCloseLagSeconds = Math.max(0, Number(policy.exitConfluenceCandleCloseLagSeconds ?? 10) || 0);
+    const beforeTimestamp = Math.floor((Date.now() - (closedCandlesOnly ? candleCloseLagSeconds * 1000 : 0)) / 1000);
     const lookbackMinutes = Math.max(
-      policy.exitConfluenceLookbackMinutes ?? 180,
+      policy.exitConfluenceLookbackMinutes ?? 90,
       Math.ceil(Number(position?.age_minutes ?? 0) || 0),
       60,
     );
     const ohlcv = await fetchOhlcv(pool, baseMint, {
       aggregateMin,
-      beforeTimestamp: Math.floor(Date.now() / 1000),
+      beforeTimestamp,
       lookbackMinutes,
       minRows,
     });
     if (!ohlcv?.rows?.length) {
       return { enabled: true, accepted: false, reason: "exit confluence unavailable: no OHLCV rows" };
     }
-    const result = evaluateFeeExitConfluenceFromRows(ohlcv.rows, policy);
+    const closed = filterClosedConfluenceCandles(ohlcv.rows, {
+      closedCandlesOnly,
+      candleCloseLagSeconds,
+      nowMs: Date.now(),
+    });
+    const result = evaluateFeeExitConfluenceFromRows(closed.rows, policy);
     return {
       ...result,
       ohlcv: {
         source: ohlcv.source,
+        requestedAggregateMin: aggregateMin,
         aggregateMin: ohlcv.aggregateMin,
-        rowCount: ohlcv.rows.length,
+        rowCount: closed.rows.length,
+        rawRowCount: ohlcv.rows.length,
+        closedCandlesOnly: closed.closedCandlesOnly,
+        latestClosedCandleTs: closed.latestClosedCandleTs,
+        droppedOpenCandleCount: closed.droppedOpenCandleCount,
+        closeCutoffTs: closed.closeCutoffTs,
       },
     };
   } catch (error) {
@@ -623,6 +671,7 @@ async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL p
         signal_count: confluence.signalCount ?? null,
         signals: confluence.signals ?? null,
         confluence_metrics: confluence.metrics ?? null,
+        confluence_bypass_reason: confluence.confluenceBypassReason ?? null,
         ohlcv: confluence.ohlcv ?? null,
       },
       source: "management.feeExitPolicy.confluence",
@@ -886,7 +935,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", { html: true });
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -894,7 +943,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
-      mgmtReport = "No open positions. Triggering screening cycle.";
+      mgmtReport = "🩶 No open positions — triggering a screening cycle to find an entry.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
       return mgmtReport;
     }
@@ -1099,22 +1148,51 @@ export async function runManagementCycle({ silent = false } = {}) {
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
+    // Build pretty per-position cards (view-model + action annotations). The
+    // derived-aware range label is computed here via formatPositionRangeLabel.
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = formatPositionRangeLabel(p);
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSED_DIRECT") line += `\n⚡ Closed directly: ${act.reason}`;
-      if (act.action === "DIRECT_CLOSE_FAILED") line += `\n⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      if (act.indicatorHold) line += `\n📊 Indicator hold: ${act.indicatorHold}`;
-      return line;
+      const inRange = formatPositionRangeLabel(p, { icon: false });
+      const actionTag = act.action === "INSTRUCTION"
+        ? "🧭 HOLD (instruction)"
+        : act.action === "STAY"
+          ? "STAY"
+          : act.action === "CLAIM"
+            ? "🪙 CLAIM"
+            : act.action === "CLOSED_DIRECT"
+              ? "⚡ CLOSED"
+              : act.action === "DIRECT_CLOSE_FAILED"
+                ? "⚠️ CLOSE FAILED"
+                : act.action === "CLOSE"
+                  ? (act.rule === "exit" ? "⚡ CLOSE" : "🔒 CLOSE")
+                  : act.action;
+      const notes = [];
+      if (p.instruction) notes.push(`📝 "${p.instruction}"`);
+      if (act.action === "CLOSED_DIRECT") notes.push(`⚡ Closed directly: ${act.reason}`);
+      if (act.action === "DIRECT_CLOSE_FAILED") notes.push(`⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`);
+      if (act.action === "CLOSE" && act.rule === "exit") notes.push(`⚡ Exit trigger: ${act.reason}`);
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") notes.push(`Rule ${act.rule}: ${act.reason}`);
+      if (act.action === "CLAIM") notes.push(`→ Claiming fees`);
+      if (act.indicatorHold) notes.push(`📊 Indicator hold: ${act.indicatorHold}`);
+      return {
+        tag: actionTag,
+        notes,
+        view: {
+          pair: p.pair,
+          address: p.position,
+          statusLabel: positionRangeStatus(p),
+          rangeLabel: inRange,
+          pnlPct: p.pnl_pct,
+          value: p.total_value_usd,
+          fees: p.unclaimed_fees_usd,
+          lowerBin: p.lower_bin,
+          upperBin: p.upper_bin,
+          activeBin: p.active_bin,
+          feePerTvl: finiteNumberOrNull(p.fee_per_tvl_24h),
+          ageMin: p.age_minutes,
+          solMode: config.management.solMode,
+        },
+      };
     });
 
     const needsAction = [...actionMap.values()].filter(a => !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action));
@@ -1122,9 +1200,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
-    const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    mgmtReport = buildCycleReportHtml({
+      items: reportLines,
+      totalValue,
+      totalFees: totalUnclaimed,
+      solMode: config.management.solMode,
+      actionSummary,
+    });
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -1165,10 +1247,10 @@ After executing, write a brief one-line result per position.
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += `\n\n<b>⚙️ Actions taken</b>\n${mdToTelegramHtml(stripThink(content))}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
-      await liveMessage?.note("No tool actions needed.");
+      await liveMessage?.note("All positions healthy — no action needed.");
     }
 
     // Trigger screening after management
@@ -1180,13 +1262,13 @@ After executing, write a brief one-line result per position.
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
-    mgmtReport = `Management cycle failed: ${error.message}`;
+    mgmtReport = mdToTelegramHtml(`❌ Management cycle failed: ${error.message}`);
   } finally {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         const rangeState = buildEffectiveRangeStateFromPosition(p);
@@ -1234,7 +1316,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   const screeningDeadlineAt = Date.now() + Math.max(60_000, Number(config.rpcPressure?.screeningCycleBudgetMs ?? 4 * 60_000));
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...");
+    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...", { html: true });
   }
   try {
     prePositions = await getMyPositions({ force: true });
@@ -1524,15 +1606,15 @@ STEPS:
    If bins_below bounds are configured by the active strategy, keep bins_below inside those bounds. Do not use volatility expansion unless the strategy JSON explicitly defines it.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-3. Report in this exact format (no tables, no extra sections):
-   🚀 DEPLOYED
+3. Report in this exact format (use Telegram markdown — wrap every label in **double asterisks** so it renders bold; keep it compact and scannable, one metric per line, a blank line between sections; no tables, no extra sections):
+   🚀 **DEPLOYED**
 
-   <pool name>
-   <pool address>
+   **<pool name>**
+   \`<pool address>\`
 
-   ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
-   Range: <minPrice> → <maxPrice>
-   Range cover: <downside %> downside | <upside %> upside | <total width %> total
+   💰 **Size** ◎<deploy amount> SOL  ·  **<strategy>**  ·  **bin** <active_bin>
+   📐 **Range** <minPrice> → <maxPrice>
+   🛡 **Cover** <downside %> down · <upside %> up · <total width %> total
 
    IMPORTANT:
    - Do NOT calculate the range percentages yourself.
@@ -1541,41 +1623,41 @@ STEPS:
      range_coverage.upside_pct
      range_coverage.width_pct
 
-   MARKET
-   Fee/TVL: <x>%
-   Volume: $<x>
-   TVL: $<x>
-   Volatility: <x>
-   Organic: <x>
-   Mcap: $<x>
-   Age: <x>h
+   📊 **Market**
+   • **Fee/TVL** <x>%
+   • **Volume** $<x>
+   • **TVL** $<x>
+   • **Volatility** <x>
+   • **Organic** <x>
+   • **Mcap** $<x>
+   • **Age** <x>h
 
-   AUDIT
-   Top10: <x>%
-   Bots: <x>%
-   Fees paid: <x> SOL
-   Smart wallets: <names or none>
+   🔍 **Audit**
+   • **Top 10** <x>%
+   • **Bots** <x>%
+   • **Fees paid** <x> SOL
+   • **Smart wallets** <names or none>
 
-   RISK
-   <If OKX advanced/risk data exists, list only the fields that actually exist: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
+   ⚠️ **Risk**
+   <If OKX advanced/risk data exists, list only the fields that actually exist, one per "• **Label** value" line: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
    <If only rugpull/wash exist, list just those.>
-   <If OKX enrichment is missing, write exactly: OKX: unavailable>
+   <If OKX enrichment is missing, write exactly: • OKX: unavailable>
 
-   WHY THIS WON
-   <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-4. If no pool qualifies, report in this exact format instead:
-   ⛔ NO DEPLOY
+   🏆 **Why this won**
+   <2-4 concise, information-dense sentences: the decisive metrics that won it, the key risks you are accepting, and why it beat the runner-up by name.>
+4. If no pool qualifies, report in this EXACT format instead (also bold every label):
+   ⛔ **NO DEPLOY**
 
    Cycle finished with no valid entry.
 
-   BEST LOOKING CANDIDATE
+   👀 **Best looking candidate**
    <name or none>
 
-   WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
+   🚫 **Why skipped**
+   <2-4 concise sentences explaining why nothing cleared the bar.>
 
-   REJECTED
-   <short flat list of top candidate names and why they were skipped>
+   📋 **Rejected**
+   <short flat list, one per "• <name> — <reason>" line>
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
@@ -1583,7 +1665,7 @@ IMPORTANT:
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
-    screenReport = content;
+    screenReport = mdToTelegramHtml(stripThink(content));
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
         type: "no_deploy",
@@ -1594,13 +1676,13 @@ IMPORTANT:
     }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    screenReport = mdToTelegramHtml(`❌ Screening cycle failed: ${error.message}`);
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
   }
@@ -2133,61 +2215,11 @@ const TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS = Number(config.telegram?.dustMaxPriceI
 const _telegramActions = new Map();
 let _telegramActionSeq = 0;
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-function shortAddress(value, head = 5, tail = 4) {
-  const text = String(value || "");
-  if (text.length <= head + tail + 3) return text || "?";
-  return `${text.slice(0, head)}...${text.slice(-tail)}`;
-}
-
-function formatNum(value, digits = 2) {
-  const num = finiteNumberOrNull(value);
-  if (num == null) return "?";
-  return num.toLocaleString("en-US", {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits,
-  });
-}
-
-function formatCompactUsd(value) {
-  const num = finiteNumberOrNull(value);
-  if (num == null) return "$?";
-  const abs = Math.abs(num);
-  if (abs >= 1_000_000) return `$${formatNum(num / 1_000_000, 2)}M`;
-  if (abs >= 1_000) return `$${formatNum(num / 1_000, 1)}k`;
-  return `$${formatNum(num, 2)}`;
-}
-
-function formatCurrencyValue(value) {
-  const cur = config.management.solMode ? "◎" : "$";
-  const num = finiteNumberOrNull(value);
-  if (num == null) return `${cur}?`;
-  const sign = num > 0 ? "+" : num < 0 ? "-" : "";
-  return `${sign}${cur}${formatNum(Math.abs(num), config.management.solMode ? 4 : 2)}`;
-}
-
-function formatSignedPct(value) {
-  const num = finiteNumberOrNull(value);
-  if (num == null) return "?%";
-  return `${num > 0 ? "+" : ""}${formatNum(num, 2)}%`;
-}
-
-function formatAgeMinutes(minutes) {
-  const value = finiteNumberOrNull(minutes);
-  if (value == null) return "?";
-  const total = Math.max(0, Math.floor(value));
-  const h = Math.floor(total / 60);
-  const m = total % 60;
-  return h > 0 ? `${h}h${m ? ` ${m}m` : ""}` : `${m}m`;
-}
+// Presentation primitives (escapeHtml, formatNum, formatCurrency, rangeBar,
+// and the build* HTML helpers) live in the pure ./telegram-render.js module so
+// rendered message length can be budget-tested with fixtures. The helpers below
+// are the runtime-coupled glue: they read live tracker/config/range state and
+// turn a raw position into the plain view-model the renderer consumes.
 
 function telegramNowLabel() {
   return new Date().toLocaleString("en-US", {
@@ -2211,18 +2243,6 @@ function positionRangeStatus(position = {}) {
   return "UNKNOWN";
 }
 
-function buildRangeBar(position = {}) {
-  const lower = finiteNumberOrNull(position.lower_bin);
-  const upper = finiteNumberOrNull(position.upper_bin);
-  const active = finiteNumberOrNull(position.active_bin);
-  if (lower == null || upper == null || active == null || upper <= lower) return "▱▱▱▱▱";
-  if (active < lower) return "▰▱▱▱▱";
-  if (active > upper) return "▱▱▱▱▰";
-  const pct = Math.max(0, Math.min(1, (active - lower) / (upper - lower)));
-  const index = Math.min(4, Math.max(0, Math.round(pct * 4)));
-  return Array.from({ length: 5 }, (_, i) => i === index ? "▰" : "▱").join("");
-}
-
 function trackedForPosition(position = {}) {
   return position?.position ? getTrackedPosition(position.position) : null;
 }
@@ -2241,85 +2261,117 @@ function positionDownCoverage(position = {}, tracked = null) {
   return Number(((width * binStep) / 10_000 * 100).toFixed(2));
 }
 
-function buildPositionCompactLine(position, index) {
+// Turn a raw position (+ live tracker/range state) into the plain view-model the
+// pure renderer consumes. All runtime coupling lives here; the renderer stays
+// fixture-testable.
+function toPositionView(position = {}, index = 0) {
   const tracked = trackedForPosition(position);
-  const pair = escapeHtml(position.pair || tracked?.pool_name || shortAddress(position.pool));
-  const status = escapeHtml(positionRangeStatus(position));
-  const pnlPct = escapeHtml(formatSignedPct(position.pnl_pct));
-  const value = escapeHtml(formatCurrencyValue(position.total_value_usd));
-  const fees = escapeHtml(formatCurrencyValue(position.unclaimed_fees_usd));
-  const width = positionWidth(position, tracked) ?? "?";
-  const down = positionDownCoverage(position, tracked);
-  const age = escapeHtml(formatAgeMinutes(position.age_minutes));
-  const range = `${position.active_bin ?? "?"} / ${position.lower_bin ?? "?"}..${position.upper_bin ?? "?"}`;
-  const displayRange = escapeHtml(formatPositionRangeLabel(position, { icon: false }));
-  return [
-    `${index + 1}. <b>${pair}</b>  <b>${pnlPct}</b>  ${value}`,
-    `Range: <code>${status}</code> ${displayRange} | bin <code>${escapeHtml(range)}</code> | width ${escapeHtml(width)} | down ${escapeHtml(down != null ? `${down}%` : "?")}`,
-    `Fees: ${fees} unclaimed | age ${age} | ${buildRangeBar(position)}`,
-  ].join("\n");
-}
-
-function buildPositionDetailHtml(position, index) {
-  const tracked = trackedForPosition(position);
-  const pair = escapeHtml(position.pair || tracked?.pool_name || shortAddress(position.pool));
-  const status = escapeHtml(positionRangeStatus(position));
-  const width = positionWidth(position, tracked);
-  const down = positionDownCoverage(position, tracked);
-  const binStep = position.bin_step ?? tracked?.bin_step ?? "?";
-  const deploySol = tracked?.amount_sol ?? "?";
   const entryMcap = tracked?.mcap ?? tracked?.signal_snapshot?.mcap ?? null;
-  const baseFee = tracked?.base_fee ?? "?";
-  const claimed = tracked?.total_fees_claimed_usd ?? "?";
-  const displayRange = escapeHtml(formatPositionRangeLabel(position, { icon: false }));
-  return [
-    `<b>${pair}</b>`,
-    `<code>pos ${escapeHtml(shortAddress(position.position, 6, 6))}</code>`,
-    "",
-    `<b>PnL</b>`,
-    `Net: <b>${escapeHtml(formatSignedPct(position.pnl_pct))}</b> | ${escapeHtml(formatCurrencyValue(position.pnl_usd))}`,
-    `Value: ${escapeHtml(formatCurrencyValue(position.total_value_usd))}`,
-    `Fees: ${escapeHtml(formatCurrencyValue(position.unclaimed_fees_usd))} unclaimed | ${escapeHtml(formatCurrencyValue(claimed))} claimed`,
-    `Generated: token ? | SOL ?`,
-    "",
-    `<b>Range</b>`,
-    `Status: <code>${status}</code> ${buildRangeBar(position)} | ${displayRange}`,
-    `Bins: <code>${escapeHtml(position.lower_bin ?? "?")} -> ${escapeHtml(position.upper_bin ?? "?")}</code> | active <code>${escapeHtml(position.active_bin ?? "?")}</code>`,
-    `Width: ${escapeHtml(width ?? "?")} bins | step ${escapeHtml(binStep)} | base fee ${escapeHtml(baseFee)}%`,
-    `Coverage: ${escapeHtml(down != null ? `${down}%` : "?")} down | 0.0% up`,
-    "",
-    `<b>Market</b>`,
-    `Mcap: entry ${escapeHtml(entryMcap != null ? formatCompactUsd(entryMcap) : "$?")} | current $? | range low/high $?`,
-    `TVL: $? | fee/aTVL ${escapeHtml(position.fee_per_tvl_24h ?? tracked?.initial_fee_tvl_24h ?? "?")}% | age ${escapeHtml(formatAgeMinutes(position.age_minutes))}`,
-    `Deploy: ${escapeHtml(deploySol)} SOL | strategy ${escapeHtml(tracked?.strategy ?? "?")}`,
-    "",
-    `<b>Actions</b>`,
-    `Use buttons below. Close requires a fresh preview and confirmation.`,
-  ].join("\n");
+  return {
+    index,
+    pair: position.pair || tracked?.pool_name || shortAddress(position.pool),
+    address: position.position,
+    statusLabel: positionRangeStatus(position),
+    rangeLabel: formatPositionRangeLabel(position, { icon: false }),
+    pnlPct: position.pnl_pct,
+    pnlUsd: position.pnl_usd,
+    value: position.total_value_usd,
+    fees: position.unclaimed_fees_usd,
+    claimed: finiteNumberOrNull(tracked?.total_fees_claimed_usd),
+    lowerBin: position.lower_bin,
+    upperBin: position.upper_bin,
+    activeBin: position.active_bin,
+    binStep: finiteNumberOrNull(position.bin_step ?? tracked?.bin_step),
+    width: positionWidth(position, tracked),
+    downCoverage: positionDownCoverage(position, tracked),
+    baseFee: finiteNumberOrNull(tracked?.base_fee),
+    ageMin: position.age_minutes,
+    deploySol: finiteNumberOrNull(tracked?.amount_sol),
+    entryMcap,
+    feePerTvl: finiteNumberOrNull(position.fee_per_tvl_24h ?? tracked?.initial_fee_tvl_24h),
+    strategy: tracked?.strategy ?? null,
+    solMode: config.management.solMode,
+  };
 }
 
-function buildDashboardHtml(wallet, positionsResult) {
+function toPositionViews(positions = []) {
+  return positions.map((position, index) => toPositionView(position, index));
+}
+
+// Most recent WIB (Asia/Jakarta, UTC+7, no DST) midnight, as a UTC instant.
+function wibDayCutoffUtc(now = new Date()) {
+  const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
+  const shifted = new Date(now.getTime() + WIB_OFFSET_MS);
+  const midnightWib = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+  return new Date(midnightWib - WIB_OFFSET_MS);
+}
+
+// Read the SOL-equity sidecar (sol-equity-tracker) snapshots and derive the
+// numbers the dashboard surfaces: latest equity, since-baseline owner-adjusted
+// PnL, day PnL (vs the previous WIB-day-cutoff balance), and that prev-day
+// balance — all in SOL. Read-only; never throws into the caller.
+function readSolEquityTracker(now = new Date()) {
+  try {
+    const cfg = resolveTrackerConfig();
+    const files = listJsonlFiles(cfg.logDir, "sol-balance-snapshots-");
+    if (!files.length) return { available: false };
+    const { rows } = readJsonlFiles(files);
+    const snaps = rows
+      .filter((r) => r && r.event === "sol_balance_snapshot" && r.ts && finiteNumberOrNull(r.estimatedEquitySol) != null)
+      .filter((r) => !cfg.botName || !r.bot || r.bot === cfg.botName)
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts));
+    if (!snaps.length) return { available: false };
+    const latest = snaps[snaps.length - 1];
+    const cutoff = wibDayCutoffUtc(now);
+    const prior = snaps.filter((r) => new Date(r.ts) <= cutoff);
+    const prevDay = prior.length ? prior[prior.length - 1] : null;
+    const equitySol = finiteNumberOrNull(latest.estimatedEquitySol);
+    const prevDaySol = prevDay ? finiteNumberOrNull(prevDay.estimatedEquitySol) : null;
+    const dayPnlSol = (equitySol != null && prevDaySol != null) ? Number((equitySol - prevDaySol).toFixed(6)) : null;
+    const dayPnlPct = (dayPnlSol != null && prevDaySol) ? Number(((dayPnlSol / prevDaySol) * 100).toFixed(2)) : null;
+    return {
+      available: true,
+      stale: now.getTime() - new Date(latest.ts).getTime() > 10 * 60 * 1000,
+      asOf: latest.ts,
+      equitySol,
+      ownerPnlSol: finiteNumberOrNull(latest.ownerAdjustedPnlSol),
+      ownerPnlPct: finiteNumberOrNull(latest.ownerAdjustedPnlPct),
+      baselineEquitySol: finiteNumberOrNull(latest.baselineEquitySol),
+      dayPnlSol,
+      dayPnlPct,
+      prevDaySol,
+    };
+  } catch {
+    return { available: false };
+  }
+}
+
+function buildDashboardSummary(wallet, positionsResult) {
   const positions = positionsResult?.positions || [];
-  const totalValue = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.total_value_usd) ?? 0), 0);
-  const totalFees = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.unclaimed_fees_usd) ?? 0), 0);
-  const stateLabel = cronStarted ? "RUNNING" : "PAUSED";
-  const equity = finiteNumberOrNull(wallet?.total_usd) != null ? formatCompactUsd(wallet.total_usd) : "$?";
-  return [
-    `<b>Meridian Control</b>`,
-    `Updated ${escapeHtml(telegramNowLabel())}`,
-    "",
-    `<b>Wallet</b>`,
-    `SOL: <b>${escapeHtml(formatNum(wallet?.sol, 4))}</b> (${escapeHtml(formatCompactUsd(wallet?.sol_usd))})`,
-    `Equity: ${escapeHtml(equity)} | Open: ${positions.length}/${config.risk.maxPositions}`,
-    "",
-    `<b>Positions</b>`,
-    `Value: ${escapeHtml(formatCurrencyValue(totalValue))} | Fees: ${escapeHtml(formatCurrencyValue(totalFees))}`,
-    `Runtime: <code>${stateLabel}</code> | Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    "",
-    positions.length
-      ? positions.slice(0, TELEGRAM_POSITIONS_PAGE_SIZE).map((position, index) => buildPositionCompactLine(position, index)).join("\n\n")
-      : "No open positions.",
-  ].join("\n");
+  const totalValue = positions.reduce((sum, p) => sum + (finiteNumberOrNull(p.total_value_usd) ?? 0), 0);
+  const freeSol = finiteNumberOrNull(wallet?.sol) ?? 0;
+  const tracker = readSolEquityTracker();
+  // Equity = TOTAL wallet value in SOL (free SOL + open-position SOL value +
+  // residual tokens). The SOL-equity sidecar is the free, accurate source of
+  // truth; fall back to a live free+positions estimate if it has no data. We do
+  // NOT call the paid/low-rpm LP Agent equity endpoint here.
+  const liveEquitySol = freeSol + totalValue;
+  const equitySol = (tracker?.available && tracker.equitySol != null) ? tracker.equitySol : liveEquitySol;
+  return {
+    nowLabel: telegramNowLabel(),
+    running: cronStarted,
+    dryRun: process.env.DRY_RUN === "true",
+    sol: wallet?.sol,
+    solUsd: wallet?.sol_usd,
+    equitySol,
+    equitySource: (tracker?.available && tracker.equitySol != null) ? "sidecar" : "live",
+    open: positions.length,
+    maxPositions: config.risk.maxPositions,
+    totalValue,
+    totalFees: positions.reduce((sum, p) => sum + (finiteNumberOrNull(p.unclaimed_fees_usd) ?? 0), 0),
+    solMode: config.management.solMode,
+    tracker,
+  };
 }
 
 function positionKeyboard(page = 0, positions = []) {
@@ -2328,37 +2380,50 @@ function positionKeyboard(page = 0, positions = []) {
   const rows = visible.map((_, offset) => {
     const index = start + offset;
     return [
-      settingButton(`${index + 1} Detail`, `tg:detail:${index}:${page}`),
-      settingButton(`${index + 1} Close`, `tg:close_preview:${index}:${page}`),
+      settingButton(`🔎 ${index + 1}`, `tg:detail:${index}:${page}:summary`),
+      settingButton(`🔒 Close ${index + 1}`, `tg:close_preview:${index}:${page}`),
     ];
   });
   const nav = [];
-  if (page > 0) nav.push(settingButton("Prev", `tg:pos:${page - 1}`));
-  if (start + TELEGRAM_POSITIONS_PAGE_SIZE < positions.length) nav.push(settingButton("Next", `tg:pos:${page + 1}`));
+  if (page > 0) nav.push(settingButton("◀ Prev", `tg:pos:${page - 1}`));
+  if (start + TELEGRAM_POSITIONS_PAGE_SIZE < positions.length) nav.push(settingButton("Next ▶", `tg:pos:${page + 1}`));
   if (nav.length) rows.push(nav);
   rows.push([
-    settingButton("Refresh", `tg:pos:${page}`),
-    settingButton("Dashboard", "tg:dash"),
+    settingButton("🔄 Refresh", `tg:pos:${page}`),
+    settingButton("🏠 Dashboard", "tg:dash"),
   ]);
   rows.push([
-    settingButton("Close All", "tg:close_all_preview"),
-    settingButton("Dust", "tg:dust"),
+    settingButton("🔒 Close All", "tg:close_all_preview"),
+    settingButton("🧹 Dust", "tg:dust"),
   ]);
   return rows;
 }
 
 function dashboardKeyboard() {
+  const cycleButton = cronStarted
+    ? settingButton("⏸ Pause", "tg:pause")
+    : settingButton("▶️ Resume", "tg:resume");
   return [
-    [settingButton("Positions", "tg:pos:0"), settingButton("Dust Tokens", "tg:dust")],
-    [settingButton("Pause Cycles", "tg:pause"), settingButton("Resume Cycles", "tg:resume")],
-    [settingButton("Stop Bot", "tg:stop_preview"), settingButton("Settings", "cfg:page:main")],
+    [settingButton("📦 Positions", "tg:pos:0"), settingButton("🧹 Dust", "tg:dust")],
+    [cycleButton, settingButton("🔄 Refresh", "tg:dash")],
+    [settingButton("⛔ Stop Bot", "tg:stop_preview"), settingButton("⚙️ Settings", "cfg:page:main")],
   ];
 }
 
-function detailKeyboard(index, page = 0) {
+function detailTabButton(label, tab, index, page, activeTab) {
+  const text = tab === activeTab ? `• ${label}` : label;
+  return settingButton(text, `tg:detail:${index}:${page}:${tab}`);
+}
+
+function detailKeyboard(index, page = 0, activeTab = "summary") {
   return [
-    [settingButton("Refresh", `tg:detail:${index}:${page}`), settingButton("Close", `tg:close_preview:${index}:${page}`)],
-    [settingButton("Back", `tg:pos:${page}`), settingButton("Dashboard", "tg:dash")],
+    [
+      detailTabButton("Summary", "summary", index, page, activeTab),
+      detailTabButton("Range", "range", index, page, activeTab),
+      detailTabButton("Market", "market", index, page, activeTab),
+    ],
+    [settingButton("🔒 Close", `tg:close_preview:${index}:${page}`), settingButton("🔄 Refresh", `tg:detail:${index}:${page}:${activeTab}`)],
+    [settingButton("◀ Back", `tg:pos:${page}`), settingButton("🏠 Dashboard", "tg:dash")],
   ];
 }
 
@@ -2372,7 +2437,7 @@ async function showRichOrSend({ html, keyboard = null, messageId = null }) {
 async function showTelegramDashboard(messageId = null) {
   const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
   return showRichOrSend({
-    html: buildDashboardHtml(wallet, positions),
+    html: buildDashboardHtml(buildDashboardSummary(wallet, positions)),
     keyboard: dashboardKeyboard(),
     messageId,
   });
@@ -2382,35 +2447,33 @@ async function showTelegramPositions({ messageId = null, page = 0 } = {}) {
   const { positions = [] } = await getMyPositions({ force: true });
   const safePage = Math.max(0, Math.min(page, Math.floor(Math.max(positions.length - 1, 0) / TELEGRAM_POSITIONS_PAGE_SIZE)));
   const start = safePage * TELEGRAM_POSITIONS_PAGE_SIZE;
-  const visible = positions.slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
-  const html = [
-    `<b>Positions</b> ${positions.length}/${config.risk.maxPositions}`,
-    `Updated ${escapeHtml(telegramNowLabel())}`,
-    "",
-    visible.length
-      ? visible.map((position, offset) => buildPositionCompactLine(position, start + offset)).join("\n\n")
-      : "No open positions.",
-  ].join("\n");
+  const visible = toPositionViews(positions).slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
   return showRichOrSend({
-    html,
+    html: buildPositionsPageHtml({
+      views: visible,
+      total: positions.length,
+      maxPositions: config.risk.maxPositions,
+      nowLabel: telegramNowLabel(),
+    }),
     keyboard: positionKeyboard(safePage, positions),
     messageId,
   });
 }
 
-async function showTelegramPositionDetail({ messageId = null, index = 0, page = 0 } = {}) {
+async function showTelegramPositionDetail({ messageId = null, index = 0, page = 0, tab = "summary" } = {}) {
+  const safeTab = DETAIL_TABS.includes(tab) ? tab : "summary";
   const { positions = [] } = await getMyPositions({ force: true });
   const position = positions[index];
   if (!position) {
     return showRichOrSend({
       html: "Position not found. Refresh the positions list.",
-      keyboard: [[settingButton("Positions", `tg:pos:${page}`)]],
+      keyboard: [[settingButton("📦 Positions", `tg:pos:${page}`)]],
       messageId,
     });
   }
   return showRichOrSend({
-    html: buildPositionDetailHtml(position, index),
-    keyboard: detailKeyboard(index, page),
+    html: buildPositionDetailHtml(toPositionView(position, index), safeTab),
+    keyboard: detailKeyboard(index, page, safeTab),
     messageId,
   });
 }
@@ -2467,7 +2530,7 @@ async function showClosePreview(msg, { index = 0, page = 0, messageId = null } =
   const { positions = [] } = await getMyPositions({ force: true });
   const position = positions[index];
   if (!position) {
-    return showRichOrSend({ html: "Position not found. Refresh first.", keyboard: [[settingButton("Positions", `tg:pos:${page}`)]], messageId });
+    return showRichOrSend({ html: "Position not found. Refresh first.", keyboard: [[settingButton("📦 Positions", `tg:pos:${page}`)]], messageId });
   }
   const actionId = createTelegramAction("close_one", msg, {
     position: position.position,
@@ -2479,19 +2542,11 @@ async function showClosePreview(msg, { index = 0, page = 0, messageId = null } =
       unclaimed_fees_usd: position.unclaimed_fees_usd,
     },
   });
-  const html = [
-    `<b>Confirm Close</b>`,
-    "",
-    buildPositionCompactLine(position, index),
-    "",
-    `This will call <code>close_position</code> through the executor and keep post-close autoswap evidence.`,
-    `Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
-  ].join("\n");
   return showRichOrSend({
-    html,
+    html: buildClosePreviewHtml(toPositionView(position, index), Math.round(TELEGRAM_ACTION_TTL_MS / 1000)),
     keyboard: [
-      [settingButton("Confirm Close", `tg:act:${actionId}`)],
-      [settingButton("Cancel", `tg:detail:${index}:${page}`)],
+      [settingButton("✅ Confirm Close", `tg:act:${actionId}`)],
+      [settingButton("Cancel", `tg:detail:${index}:${page}:summary`)],
     ],
     messageId,
   });
@@ -2516,7 +2571,7 @@ async function showCloseAllPreview(msg, messageId = null) {
   }
   const { positions = [] } = await getMyPositions({ force: true });
   if (!positions.length) {
-    return showRichOrSend({ html: "No open positions.", keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId });
+    return showRichOrSend({ html: "No open positions.", keyboard: [[settingButton("🏠 Dashboard", "tg:dash")]], messageId });
   }
   const actionId = createTelegramAction("close_all", msg, {
     positions: positions.map((position) => ({
@@ -2526,19 +2581,20 @@ async function showCloseAllPreview(msg, messageId = null) {
       total_value_usd: position.total_value_usd,
     })),
   });
+  const views = toPositionViews(positions);
   const totalValue = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.total_value_usd) ?? 0), 0);
-  const html = [
-    `<b>Confirm Close All</b>`,
-    `Positions: ${positions.length} | Value: ${escapeHtml(formatCurrencyValue(totalValue))}`,
-    "",
-    positions.map((position, index) => buildPositionCompactLine(position, index)).join("\n\n"),
-    "",
-    `Sequential executor closes. Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
-  ].join("\n");
+  const totalPnlUsd = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.pnl_usd) ?? 0), 0);
+  const totalPnlPct = totalValue ? (totalPnlUsd / Math.max(1e-9, totalValue - totalPnlUsd)) * 100 : null;
   return showRichOrSend({
-    html,
+    html: buildCloseAllPreviewHtml({
+      views,
+      totalValue,
+      totalPnlPct,
+      solMode: config.management.solMode,
+      ttlSeconds: Math.round(TELEGRAM_ACTION_TTL_MS / 1000),
+    }),
     keyboard: [
-      [settingButton("Confirm Close All", `tg:act:${actionId}`)],
+      [settingButton("✅ Confirm Close All", `tg:act:${actionId}`)],
       [settingButton("Cancel", "tg:pos:0")],
     ],
     messageId,
@@ -2755,7 +2811,7 @@ async function applyTelegramControlCallback(msg) {
     await showTelegramPositions({ messageId: msg.messageId, page: Number(parts[2] || 0) });
   } else if (action === "detail") {
     await answerCallbackQuery(msg.callbackQueryId);
-    await showTelegramPositionDetail({ messageId: msg.messageId, index: Number(parts[2] || 0), page: Number(parts[3] || 0) });
+    await showTelegramPositionDetail({ messageId: msg.messageId, index: Number(parts[2] || 0), page: Number(parts[3] || 0), tab: parts[4] || "summary" });
   } else if (action === "close_preview") {
     await answerCallbackQuery(msg.callbackQueryId);
     await showClosePreview(msg, { index: Number(parts[2] || 0), page: Number(parts[3] || 0), messageId: msg.messageId });
@@ -3213,6 +3269,7 @@ async function deployLatestCandidate(index) {
     price_change_pct: candidate.price_change_pct ?? candidate.change_1h,
     deploy_share_of_active_tvl_pct: candidate.deploy_share_of_active_tvl_pct ?? candidate.dynamic_entry_shadow?.deploy_share_of_active_tvl_pct,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+    volume_active_tvl_multiple: candidate.volume_active_tvl_multiple,
     organic_score: candidate.organic_score,
     initial_value_usd: candidate.active_tvl ?? candidate.tvl ?? null,
     shadow_data_collection: (candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate))?.shadow_data_collection ?? null,
@@ -3873,6 +3930,9 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 } else {
   // Non-TTY: start immediately
   log("startup", "Non-TTY mode — starting cron cycles immediately.");
+  cronStarted = true; // reflect running state so the Telegram dashboard shows Running, not Paused
+  timers.managementLastRun = Date.now();
+  timers.screeningLastRun = Date.now();
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
@@ -3880,7 +3940,7 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
     let startupLiveMessage = null;
     try {
       if (telegramEnabled()) {
-        startupLiveMessage = await createLiveMessage("🚀 Startup Check", "Checking wallet, open positions, and best current opportunity...");
+        startupLiveMessage = await createLiveMessage("🚀 Startup Check", "Checking wallet, open positions, and best current opportunity...", { html: true });
       }
       const startupStep3 = process.env.DRY_RUN === "true"
         ? `3. Ignore wallet SOL threshold in dry run: get_top_candidates then simulate deploy ${DEPLOY} SOL.`
@@ -3889,20 +3949,36 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
 When reporting open positions, use effective derived bin range state (range_side from fresh active/lower/upper bins) as the range truth when available. If in_range says true but range_side is above_range or below_range, explicitly report API lag telemetry and do not describe the position as simply healthy in range.
+
+REPORT FORMAT — use Telegram markdown (wrap every label in **double asterisks** for bold), keep it compact and scannable, one metric per line, a blank line between sections:
+
+💼 **Wallet**
+• **SOL** <balance> ($<usd>)
+• **Equity** $<total portfolio value>
+• **Threshold** <met/not met — deployed N SOL | skipped>
+
+📦 **Open positions (<count>)**
+For each, two lines:
+**<name>** — **<IN | OOR↑ | OOR↓ | API lag>**  ·  PnL <±x%>  ·  fees $<x>
+bins <lower>→<upper> · active <active> · <minutes OOR if any>
+
+🆕 **New deploy** (only if you deployed this startup; otherwise omit this whole section)
+**<name>** — ◎<size> SOL · <strategy> · bin <active>
+<one sentence on why it qualified>
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, null, {
         onToolStart: async ({ name }) => { await startupLiveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await startupLiveMessage?.toolFinish(name, result, success); },
       });
       if (startupLiveMessage) {
-        await startupLiveMessage.finalize(stripThink(content)).catch(() => {});
+        await startupLiveMessage.finalize(mdToTelegramHtml(stripThink(content))).catch(() => {});
       } else if (telegramEnabled()) {
-        await sendMessage(`🚀 Startup Check\n\n${stripThink(content)}`).catch(() => {});
+        await sendHTML(`🚀 <b>Startup Check</b>\n\n${mdToTelegramHtml(stripThink(content))}`).catch(() => {});
       }
     } catch (e) {
       if (startupLiveMessage) {
         await startupLiveMessage.fail(e.message).catch(() => {});
       } else if (telegramEnabled()) {
-        await sendMessage(`🚀 Startup Check\n\n❌ ${e.message}`).catch(() => {});
+        await sendHTML(`🚀 <b>Startup Check</b>\n\n❌ ${mdToTelegramHtml(e.message)}`).catch(() => {});
       }
       log("startup_error", e.message);
     }

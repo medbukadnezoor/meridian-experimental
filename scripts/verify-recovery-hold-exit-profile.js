@@ -102,6 +102,9 @@ function feeDecision({ pnlPct, feePct = 0.01, ageMinutes = 120, overrides = {} }
         feeHarvestMinHoldMinutes: 8,
         feeHarvestMinFeePctOfEntry: 0.75,
         feeHarvestMinNetPnlPct: 0.25,
+        feeHarvestBypassConfluenceMinFeePctOfEntry: 2.0,
+        feeHarvestBypassConfluenceMinNetPnlPct: 0.25,
+        feeHarvestBypassConfluenceStrongNetPnlPct: 0.75,
         noFeeAbortEnabled: true,
         noFeeAbortMaxHoldMinutes: 20,
         noFeeAbortMaxFeePctOfEntry: 0.08,
@@ -258,6 +261,15 @@ async function main() {
     assert.equal(built.management.requirePositivePnlForLowYieldExit, true, "example gates low-yield exits to positive PnL");
     assert.equal(built.management.requirePositivePnlForMaxHoldExit, true, "example gates legacy max-hold exits to positive PnL");
     assert.equal(built.management.feeExitPolicy.recoveryHoldPositiveOnly, true, "example gates fee exits to positive PnL");
+    assert.equal(built.management.feeExitPolicy.feeHarvestMinFeePctOfEntry, 0.75, "example keeps base fee harvest fee floor at 0.75%");
+    assert.equal(built.management.feeExitPolicy.feeHarvestMinNetPnlPct, 0.25, "example keeps base fee harvest net PnL floor at +0.25%");
+    assert.equal(built.management.feeExitPolicy.feeHarvestBypassConfluenceMinFeePctOfEntry, 2.0, "example high-fee harvest bypass requires 2.0% fees");
+    assert.equal(built.management.feeExitPolicy.feeHarvestBypassConfluenceMinNetPnlPct, 0.25, "example high-fee harvest bypass requires +0.25% net PnL");
+    assert.equal(built.management.feeExitPolicy.feeHarvestBypassConfluenceStrongNetPnlPct, 0.75, "example strong net harvest bypass requires +0.75% net PnL");
+    assert.equal(built.management.feeExitPolicy.exitConfluenceAggregateMin, 3, "example targets locally rolled 3m confluence candles");
+    assert.equal(built.management.feeExitPolicy.exitConfluenceLookbackMinutes, 90, "example uses 90m confluence lookback");
+    assert.equal(built.management.feeExitPolicy.exitConfluenceClosedCandlesOnly, true, "example uses closed confluence candles only");
+    assert.equal(built.management.feeExitPolicy.exitConfluenceCandleCloseLagSeconds, 10, "example waits 10s after candle close");
     assert.equal(built.management.activeBinVelocityEmergencyLiveEnabled, false, "example disables active-bin velocity live emergency");
     assert.equal(built.management.activeBinBelowRangeEmergencyLiveEnabled, false, "example keeps below-range emergency disabled");
 
