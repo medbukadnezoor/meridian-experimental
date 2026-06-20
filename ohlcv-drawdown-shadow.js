@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 const METEORA_DLMM_POOL_OHLCV = "https://dlmm.datapi.meteora.ag/pools";
 const GMGN_TOKEN_KLINE = "https://openapi.gmgn.ai/v1/market/token_kline";
+const DEXPAPRIKA_POOL_OHLCV = "https://api.dexpaprika.com/networks/solana/pools";
 const GECKOTERMINAL_SOLANA_POOL_OHLCV = "https://api.geckoterminal.com/api/v2/networks/solana/pools";
 const CACHE_TTL_MS = 60_000;
 const CACHE_BUCKET_SEC = 60;
@@ -13,6 +14,7 @@ const ohlcvCache = new Map();
 const providerBackoff = {
   meteora: { until: 0 },
   gmgn: { until: 0 },
+  dexpaprika: { until: 0 },
   geckoterminal: { until: 0 },
 };
 
@@ -24,16 +26,21 @@ function finiteNumberOrNull(value) {
 
 function clampAggregate(value) {
   const aggregate = Math.trunc(Number(value));
+  return [1, 3, 5, 15].includes(aggregate) ? aggregate : 1;
+}
+
+function providerAggregate(value) {
+  const aggregate = Math.trunc(Number(value));
   return [1, 5, 15].includes(aggregate) ? aggregate : 1;
 }
 
 function meteoraTimeframe(aggregateMin) {
-  const aggregate = Math.max(5, clampAggregate(aggregateMin));
+  const aggregate = Math.max(5, providerAggregate(aggregateMin));
   return aggregate >= 15 ? "15m" : "5m";
 }
 
 function gmgnResolution(aggregateMin) {
-  const aggregate = clampAggregate(aggregateMin);
+  const aggregate = providerAggregate(aggregateMin);
   if (aggregate === 15) return "15m";
   if (aggregate === 5) return "5m";
   return "1m";
@@ -109,6 +116,39 @@ function normalizeGmgnRows(payload) {
         low: finiteNumberOrNull(item?.low ?? item?.l),
         close: finiteNumberOrNull(item?.close ?? item?.c),
         volumeUsd: finiteNumberOrNull(item?.volume ?? item?.v_usd ?? item?.volume_usd ?? item?.v),
+      };
+    })
+    .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
+    .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function normalizeDexPaprikaRows(payload) {
+  const raw = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.data)
+      ? payload.data
+      : Array.isArray(payload?.results)
+        ? payload.results
+        : [];
+  return raw
+    .map((item) => {
+      const rawTime = item?.time_close ?? item?.time_open ?? item?.timestamp ?? item?.time ?? item?.t;
+      const parsedTime = typeof rawTime === "string" && rawTime
+        ? Date.parse(rawTime)
+        : finiteNumberOrNull(rawTime);
+      const timestamp = parsedTime == null
+        ? null
+        : parsedTime > 10_000_000_000
+          ? Math.floor(parsedTime / 1000)
+          : Math.floor(parsedTime);
+      return {
+        timestamp,
+        iso: timestamp != null ? new Date(timestamp * 1000).toISOString() : null,
+        open: finiteNumberOrNull(item?.open ?? item?.o),
+        high: finiteNumberOrNull(item?.high ?? item?.h),
+        low: finiteNumberOrNull(item?.low ?? item?.l),
+        close: finiteNumberOrNull(item?.close ?? item?.c),
+        volumeUsd: finiteNumberOrNull(item?.volume_usd ?? item?.volumeUsd ?? item?.volume ?? item?.v),
       };
     })
     .filter((row) => Number.isFinite(row.timestamp) && row.close != null)
@@ -225,6 +265,52 @@ async function fetchGmgnKlineOhlcv(tokenMint, { aggregateMin = 1, beforeTimestam
   }
 }
 
+async function fetchDexPaprikaPoolOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
+  if (!pool) return null;
+  if (Date.now() < providerBackoff.dexpaprika.until) return null;
+
+  const aggregate = providerAggregate(aggregateMin);
+  const endTime = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
+  const requestedLookbackSec = Math.max(1, Number(lookbackMinutes) || 60) * 60;
+  const startTime = endTime - requestedLookbackSec;
+  const cacheKey = `dexpaprika:${pool}:${aggregate}:${Math.floor(endTime / CACHE_BUCKET_SEC)}`;
+  const cached = ohlcvCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) return cached.value;
+
+  const url = new URL(`${DEXPAPRIKA_POOL_OHLCV}/${pool}/ohlcv`);
+  url.searchParams.set("start", new Date(startTime * 1000).toISOString());
+  url.searchParams.set("end", new Date(endTime * 1000).toISOString());
+  url.searchParams.set("interval", `${aggregate}m`);
+  url.searchParams.set("limit", "366");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
+    if (res.status === 429) {
+      providerBackoff.dexpaprika.until = Date.now() + BACKOFF_DURATION_MS;
+      return null;
+    }
+    const text = await res.text();
+    if (!res.ok) throw new Error(`DexPaprika OHLCV ${res.status}: ${text.slice(0, 160)}`);
+    const payload = JSON.parse(text);
+    const value = {
+      source: "dexpaprika",
+      url: url.toString(),
+      aggregateMin: aggregate,
+      rows: normalizeDexPaprikaRows(payload),
+      meta: null,
+    };
+    ohlcvCache.set(cacheKey, { cachedAt: Date.now(), value });
+    return value;
+  } catch (err) {
+    if (err?.name === "AbortError") return null;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp = null } = {}) {
   const aggregate = clampAggregate(aggregateMin);
   const before = Math.floor(Number(beforeTimestamp ?? Date.now() / 1000));
@@ -268,17 +354,147 @@ async function fetchGeckoTerminalOhlcv(pool, { aggregateMin = 1, beforeTimestamp
   }
 }
 
-export async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
+function hasEnoughRows(ohlcv, minRows) {
+  return ohlcv && Array.isArray(ohlcv.rows) && ohlcv.rows.length >= minRows;
+}
+
+function betterOhlcv(current, candidate) {
+  if (!candidate?.rows?.length) return current;
+  if (!current?.rows?.length) return candidate;
+  return candidate.rows.length > current.rows.length ? candidate : current;
+}
+
+function rollOneMinuteRows(rows = [], aggregateMin = 3) {
+  const aggregateSec = Math.max(1, Math.trunc(Number(aggregateMin) || 3)) * 60;
+  const sorted = (Array.isArray(rows) ? rows : [])
+    .filter((row) =>
+      Number.isFinite(Number(row?.timestamp)) &&
+      finiteNumberOrNull(row?.open) != null &&
+      finiteNumberOrNull(row?.high) != null &&
+      finiteNumberOrNull(row?.low) != null &&
+      finiteNumberOrNull(row?.close) != null
+    )
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+  const buckets = new Map();
+  for (const row of sorted) {
+    const closeTs = Math.floor(Number(row.timestamp));
+    const bucketCloseTs = Math.floor((closeTs - 1) / aggregateSec) * aggregateSec + aggregateSec;
+    if (!buckets.has(bucketCloseTs)) buckets.set(bucketCloseTs, []);
+    buckets.get(bucketCloseTs).push(row);
+  }
+
+  const rolled = [];
+  for (const [bucketCloseTs, bucketRows] of buckets.entries()) {
+    const unique = [];
+    const seen = new Set();
+    for (const row of bucketRows.sort((a, b) => Number(a.timestamp) - Number(b.timestamp))) {
+      const ts = Math.floor(Number(row.timestamp));
+      if (seen.has(ts)) continue;
+      seen.add(ts);
+      unique.push(row);
+    }
+    if (unique.length !== Math.trunc(aggregateSec / 60)) continue;
+    const first = unique[0];
+    const last = unique[unique.length - 1];
+    rolled.push({
+      timestamp: bucketCloseTs,
+      iso: new Date(bucketCloseTs * 1000).toISOString(),
+      open: finiteNumberOrNull(first.open),
+      high: Math.max(...unique.map((row) => finiteNumberOrNull(row.high))),
+      low: Math.min(...unique.map((row) => finiteNumberOrNull(row.low))),
+      close: finiteNumberOrNull(last.close),
+      volumeUsd: unique.reduce((sum, row) => sum + (finiteNumberOrNull(row.volumeUsd) ?? 0), 0),
+      rolledFromAggregateMin: 1,
+      rolledRowCount: unique.length,
+    });
+  }
+  return rolled.sort((a, b) => a.timestamp - b.timestamp);
+}
+
+async function fetchThreeMinuteRolledOhlcv(pool, tokenMint, { beforeTimestamp = null, lookbackMinutes = 60, minRows = 1 } = {}) {
+  const requiredRows = Math.max(1, Math.trunc(Number(minRows) || 1));
+  const rawLookbackMinutes = Math.max(
+    Math.max(1, Number(lookbackMinutes) || 60),
+    (requiredRows * 3) + 6,
+  );
+  const opts = { aggregateMin: 1, beforeTimestamp, lookbackMinutes: rawLookbackMinutes };
+  let best = null;
+
+  if (pool) {
+    const dexpaprika = await fetchDexPaprikaPoolOhlcv(pool, opts);
+    if (dexpaprika?.rows?.length) {
+      const rolled = {
+        ...dexpaprika,
+        source: "dexpaprika_1m_rollup",
+        aggregateMin: 3,
+        requestedAggregateMin: 3,
+        rows: rollOneMinuteRows(dexpaprika.rows, 3),
+        meta: {
+          ...(dexpaprika.meta ?? {}),
+          rawSource: dexpaprika.source,
+          rawAggregateMin: dexpaprika.aggregateMin,
+          rawRowCount: dexpaprika.rows.length,
+          rawLookbackMinutes,
+        },
+      };
+      if (hasEnoughRows(rolled, requiredRows)) return rolled;
+      best = betterOhlcv(best, rolled);
+    }
+  }
+
+  if (tokenMint && process.env.GMGN_API_KEY) {
+    const gmgn = await fetchGmgnKlineOhlcv(tokenMint, opts);
+    if (gmgn?.rows?.length) {
+      const rolled = {
+        ...gmgn,
+        source: "gmgn_1m_rollup",
+        aggregateMin: 3,
+        requestedAggregateMin: 3,
+        rows: rollOneMinuteRows(gmgn.rows, 3),
+        meta: {
+          ...(gmgn.meta ?? {}),
+          rawSource: gmgn.source,
+          rawAggregateMin: gmgn.aggregateMin,
+          rawRowCount: gmgn.rows.length,
+          rawLookbackMinutes,
+        },
+      };
+      if (hasEnoughRows(rolled, requiredRows)) return rolled;
+      best = betterOhlcv(best, rolled);
+    }
+  }
+
+  return best;
+}
+
+export async function fetchOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60, minRows = 1 } = {}) {
   const opts = { aggregateMin, beforeTimestamp, lookbackMinutes };
+  const requiredRows = Math.max(1, Math.trunc(Number(minRows) || 1));
+  if (Math.trunc(Number(aggregateMin)) === 3) {
+    return fetchThreeMinuteRolledOhlcv(pool, tokenMint, { beforeTimestamp, lookbackMinutes, minRows: requiredRows });
+  }
+  let best = null;
   if (pool) {
     const meteora = await fetchMeteoraDlmmPoolOhlcv(pool, opts);
-    if (meteora && meteora.rows.length > 0) return meteora;
+    if (hasEnoughRows(meteora, requiredRows)) return meteora;
+    best = betterOhlcv(best, meteora);
   }
   if (tokenMint && process.env.GMGN_API_KEY) {
     const gmgn = await fetchGmgnKlineOhlcv(tokenMint, opts);
-    if (gmgn && gmgn.rows.length > 0) return gmgn;
+    if (hasEnoughRows(gmgn, requiredRows)) return gmgn;
+    best = betterOhlcv(best, gmgn);
   }
-  return null;
+  if (pool) {
+    const dexpaprika = await fetchDexPaprikaPoolOhlcv(pool, opts);
+    if (hasEnoughRows(dexpaprika, requiredRows)) return dexpaprika;
+    best = betterOhlcv(best, dexpaprika);
+    if (providerAggregate(aggregateMin) !== 1) {
+      const dexpaprikaOneMinute = await fetchDexPaprikaPoolOhlcv(pool, { ...opts, aggregateMin: 1 });
+      if (hasEnoughRows(dexpaprikaOneMinute, requiredRows)) return dexpaprikaOneMinute;
+      best = betterOhlcv(best, dexpaprikaOneMinute);
+    }
+  }
+  return best;
 }
 
 async function fetchTargetPoolOhlcv(pool, tokenMint, { aggregateMin = 1, beforeTimestamp = null, lookbackMinutes = 60 } = {}) {
@@ -548,8 +764,11 @@ export const __test = {
   normalizeRows,
   normalizeMeteoraRows,
   normalizeGmgnRows,
+  normalizeDexPaprikaRows,
+  rollOneMinuteRows,
   fetchMeteoraDlmmPoolOhlcv,
   fetchGmgnKlineOhlcv,
+  fetchDexPaprikaPoolOhlcv,
   fetchOhlcv,
   fetchTargetPoolOhlcv,
   getTargetPoolOhlcvEvidence,

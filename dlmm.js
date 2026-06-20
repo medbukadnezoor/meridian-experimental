@@ -1,0 +1,3456 @@
+import {
+  Keypair,
+  PublicKey,
+  Transaction,
+  VersionedTransaction,
+  ComputeBudgetProgram,
+} from "@solana/web3.js";
+import BN from "bn.js";
+import bs58 from "bs58";
+import { config, computeDeployAmount } from "../config.js";
+import { log } from "../logger.js";
+import {
+  trackPosition,
+  markOutOfRange,
+  markInRange,
+  recordClaim,
+  recordClose,
+  getTrackedPosition,
+  getTrackedPositions,
+  minutesOutOfRange,
+  reconcileGhostPositions,
+  syncOpenPositions,
+} from "../state.js";
+import { recordPerformance } from "../lessons.js";
+import { isBaseMintOnCooldown, isPoolOnCooldown } from "../pool-memory.js";
+import { normalizeMint } from "./wallet.js";
+import { appendDecision } from "../decision-log.js";
+import { appendDecisionContext } from "../decision-context-log.js";
+import {
+  appendMainCandidateDeploySnapshot,
+  appendMainCandidateOutcomeSnapshot,
+} from "../main-candidate-shadow-log.js";
+import { getAndClearStagedSignals } from "../signal-tracker.js";
+import { signAndSimulateRelayTransactions } from "./relay-security.js";
+import {
+  normalizeDeployRangeInputs,
+  validateSingleSidedSolBidAskRange,
+} from "./deploy-range-guard.js";
+import { buildDynamicRangeShadowTelemetry, getActiveStrategy, resolveStrategyRangePolicy } from "../strategy-library.js";
+import {
+  RPC_PRIORITY,
+  assertDeployRpcCooldownClear,
+  getSharedConnection,
+  isRpcRateLimitError,
+  recordDeployRpcRateLimit,
+  sendAndConfirmTransactionWithPriority,
+  withRpcPriority,
+} from "./rpc.js";
+import { buildEffectiveRangeState } from "../range-state.js";
+import { computeRpcPositions, recordRpcPnlShadowComparison } from "./rpc-pnl.js";
+
+// ─── Lazy SDK loader ───────────────────────────────────────────
+// @meteora-ag/dlmm → @coral-xyz/anchor uses CJS directory imports
+// that break in ESM on Node 24. Dynamic import defers loading until
+// an actual on-chain call is needed (never triggered in dry-run).
+let _DLMM = null;
+let _StrategyType = null;
+let _getBinIdFromPrice = null;
+let _getPriceOfBinByBinId = null;
+let _getBinArrayKeysCoverage = null;
+let _getBinArrayIndexesCoverage = null;
+let _deriveBinArrayBitmapExtension = null;
+let _isOverflowDefaultBinArrayBitmap = null;
+let _BIN_ARRAY_FEE = null;
+let _BIN_ARRAY_BITMAP_FEE = null;
+let _relayRetryEvidenceMarkerLogged = false;
+const POSITION_OWNER_CACHE_TTL_MS = 10 * 60 * 1000;
+const POSITION_OWNER_STALE_ON_429_TTL_MS = 60 * 60 * 1000;
+const POSITION_OWNER_WARNING_TTL_MS = 5 * 60 * 1000;
+const positionOwnerCache = new Map();
+const positionOwnerWarningCache = new Map();
+
+async function getDLMM() {
+  if (!_DLMM) {
+    const mod = await import("@meteora-ag/dlmm");
+    _DLMM = mod.default;
+    _StrategyType = mod.StrategyType;
+    _getBinIdFromPrice = mod.default?.getBinIdFromPrice;
+    _getPriceOfBinByBinId = mod.getPriceOfBinByBinId;
+    _getBinArrayKeysCoverage = mod.getBinArrayKeysCoverage;
+    _getBinArrayIndexesCoverage = mod.getBinArrayIndexesCoverage;
+    _deriveBinArrayBitmapExtension = mod.deriveBinArrayBitmapExtension;
+    _isOverflowDefaultBinArrayBitmap = mod.isOverflowDefaultBinArrayBitmap;
+    _BIN_ARRAY_FEE = mod.BIN_ARRAY_FEE;
+    _BIN_ARRAY_BITMAP_FEE = mod.BIN_ARRAY_BITMAP_FEE;
+  }
+  return {
+    DLMM: _DLMM,
+    StrategyType: _StrategyType,
+    getBinIdFromPrice: _getBinIdFromPrice,
+    getPriceOfBinByBinId: _getPriceOfBinByBinId,
+    getBinArrayKeysCoverage: _getBinArrayKeysCoverage,
+    getBinArrayIndexesCoverage: _getBinArrayIndexesCoverage,
+    deriveBinArrayBitmapExtension: _deriveBinArrayBitmapExtension,
+    isOverflowDefaultBinArrayBitmap: _isOverflowDefaultBinArrayBitmap,
+    BIN_ARRAY_FEE: _BIN_ARRAY_FEE,
+    BIN_ARRAY_BITMAP_FEE: _BIN_ARRAY_BITMAP_FEE,
+  };
+}
+
+// ─── Lazy wallet/connection init ──────────────────────────────
+// Avoids crashing on import when WALLET_PRIVATE_KEY is not yet set
+// (e.g. during screening-only tests).
+let _connection = null;
+let _wallet = null;
+const URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS = 750_000;
+
+function getConnection() {
+  if (!_connection) _connection = getSharedConnection();
+  return _connection;
+}
+
+function getWallet() {
+  if (!_wallet) {
+    if (!process.env.WALLET_PRIVATE_KEY) {
+      throw new Error("WALLET_PRIVATE_KEY not set");
+    }
+    _wallet = Keypair.fromSecretKey(bs58.decode(process.env.WALLET_PRIVATE_KEY));
+    log("init", `Wallet: ${_wallet.publicKey.toString()}`);
+  }
+  return _wallet;
+}
+
+function resolveRuntimeStrategyProfile() {
+  const activeId = getActiveStrategy()?.id ?? null;
+  const policyId = config.management?.feeExitPolicy?.strategyProfile ?? null;
+  if (activeId && policyId && activeId !== policyId) {
+    log("deploy_warn", `Active strategy profile ${activeId} differs from fee-exit policy profile ${policyId}; using active strategy profile`);
+  }
+  return activeId ?? policyId;
+}
+
+function hasComputeBudgetInstruction(tx) {
+  return tx instanceof Transaction && tx.instructions.some((ix) => ix.programId.equals(ComputeBudgetProgram.programId));
+}
+
+async function prepareCloseTransactionForSend(tx, wallet, urgent) {
+  if (!(tx instanceof Transaction)) return tx;
+  if (urgent && !hasComputeBudgetInstruction(tx)) {
+    tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: URGENT_CLOSE_PRIORITY_MICRO_LAMPORTS }));
+  }
+  tx.feePayer = wallet.publicKey;
+  const { blockhash, lastValidBlockHeight } = await withRpcPriority(
+    urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.NORMAL_SEND,
+    urgent ? "helius_rpc.close_urgent_blockhash" : "helius_rpc.close_blockhash",
+    () => getConnection().getLatestBlockhash("confirmed"),
+  );
+  tx.recentBlockhash = blockhash;
+  tx.lastValidBlockHeight = lastValidBlockHeight;
+  return tx;
+}
+
+async function positionAccountLooksClosed(positionPubKey) {
+  const account = await withRpcPriority(
+    RPC_PRIORITY.URGENT_CLOSE,
+    "helius_rpc.close_account_check",
+    () => getConnection().getAccountInfo(positionPubKey, "confirmed"),
+  );
+  return !account || !account.owner.equals(getDlmmProgramId());
+}
+
+async function sendCloseTransactionWithRetry(tx, wallet, { urgent = false, positionPubKey, label = "close" } = {}) {
+  const attempts = urgent ? 2 : 1;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const prepared = await prepareCloseTransactionForSend(tx, wallet, urgent);
+      return await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        prepared,
+        [wallet],
+        {
+          commitment: "confirmed",
+          maxRetries: urgent ? 5 : 3,
+        },
+        {
+          priority: urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.NORMAL_SEND,
+          source: urgent ? "helius_rpc.close_urgent_send" : "helius_rpc.close_send",
+        },
+      );
+    } catch (error) {
+      lastError = error;
+      const message = error?.message || String(error);
+      log("close_warn", `${urgent ? "Urgent " : ""}${label} send failed (attempt ${attempt}/${attempts}): ${message}`);
+      if (positionPubKey && await positionAccountLooksClosed(positionPubKey).catch(() => false)) {
+        log("close", `${label} account already closed after send failure; treating as closed`);
+        return "already-closed-after-send";
+      }
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 750));
+    }
+  }
+  throw lastError;
+}
+
+function getMeridianApiBase() {
+  return String(config.api.url || "https://api.agentmeridian.xyz/api").replace(/\/+$/, "");
+}
+
+function getMeridianHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  if (config.api.publicApiKey) {
+    headers["x-api-key"] = config.api.publicApiKey;
+  }
+  return headers;
+}
+
+function shouldUseLpAgentRelay() {
+  return !!config.api.lpAgentRelayEnabled;
+}
+
+function shouldUseLpAgentRelayForDeploy() {
+  return false;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function isRetryableError(error) {
+  if (isRetryableStatus(Number(error?.status || 0))) return true;
+  const name = String(error?.name || "");
+  const message = String(error?.message || "").toLowerCase();
+  return name === "AbortError" ||
+    message.includes("aborted") ||
+    message.includes("fetch failed") ||
+    message.includes("network");
+}
+
+function retryDelayMs(error, attempt) {
+  const retryAfter = Number(error?.retryAfter);
+  if (Number.isFinite(retryAfter) && retryAfter > 0) {
+    return Math.min(retryAfter * 1000, 10_000);
+  }
+  return Math.min(500 * 2 ** attempt, 5_000);
+}
+
+function attachRetryMetadata(error, metadata) {
+  error.retryMeta = metadata;
+  return error;
+}
+
+function describeRetryEvidence(error) {
+  const meta = error?.retryMeta;
+  if (!meta || !Array.isArray(meta.attempts) || meta.attempts.length === 0) return "";
+
+  const attempts = meta.attempts
+    .map((attempt) => {
+      const label = attempt.status ? `HTTP ${attempt.status}` : (attempt.name || "error");
+      return `#${attempt.attempt} ${label} retryable=${attempt.retryable} after ${attempt.elapsedMs}ms timeout=${attempt.timeoutMs}ms`;
+    })
+    .join("; ");
+
+  return `elapsed=${meta.totalElapsedMs}ms, attempts=${meta.attempts.length}/${meta.maxAttempts}, budget=${meta.maxElapsedMs}ms, perAttempt=${meta.perAttemptTimeoutMs}ms, evidence=[${attempts}]`;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return fetch(url, options);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal;
+  const abortFromParent = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener("abort", abortFromParent, { once: true });
+  }
+
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abortFromParent);
+  }
+}
+
+async function meridianJsonOnce(pathname, options = {}, timeoutMs = null) {
+  const res = await fetchWithTimeout(`${getMeridianApiBase()}${pathname}`, options, timeoutMs);
+  const text = await res.text().catch(() => "");
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = { raw: text };
+  }
+  if (!res.ok) {
+    const error = new Error(payload?.error || `${pathname} ${res.status}`);
+    error.status = res.status;
+    error.payload = payload;
+    error.retryAfter = res.headers.get("retry-after");
+    throw error;
+  }
+  return payload;
+}
+
+async function meridianJson(pathname, options = {}) {
+  const { retry, ...fetchOptions } = options;
+  if (!retry) {
+    return meridianJsonOnce(pathname, fetchOptions);
+  }
+
+  const maxElapsedMs = Number(retry.maxElapsedMs || 30_000);
+  const maxAttempts = Number(retry.maxAttempts || 10);
+  const perAttemptTimeoutMs = Number(retry.perAttemptTimeoutMs || 10_000);
+  const startedAt = Date.now();
+  let attempt = 0;
+  let lastError = null;
+  const attempts = [];
+
+  const retryMetadata = () => ({
+    pathname,
+    maxElapsedMs,
+    perAttemptTimeoutMs,
+    maxAttempts,
+    totalElapsedMs: Date.now() - startedAt,
+    attempts,
+  });
+
+  while (Date.now() - startedAt < maxElapsedMs && attempt < maxAttempts) {
+    const elapsedMs = Date.now() - startedAt;
+    const remainingMs = Math.max(1, maxElapsedMs - elapsedMs);
+    const attemptNumber = attempt + 1;
+    const timeoutMs = Math.min(perAttemptTimeoutMs, remainingMs);
+    const attemptStartedAt = Date.now();
+    try {
+      return await meridianJsonOnce(
+        pathname,
+        fetchOptions,
+        timeoutMs,
+      );
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableError(error);
+      attempts.push({
+        attempt: attemptNumber,
+        elapsedMs: Date.now() - attemptStartedAt,
+        timeoutMs,
+        status: Number(error?.status || 0) || null,
+        name: error?.name || null,
+        message: error?.message || "",
+        retryable,
+      });
+      attachRetryMetadata(error, retryMetadata());
+      if (!retryable || attempt >= maxAttempts - 1) {
+        throw error;
+      }
+      const remainingAfterAttemptMs = Math.max(0, maxElapsedMs - (Date.now() - startedAt));
+      const waitMs = Math.min(retryDelayMs(error, attempt), Math.max(0, remainingAfterAttemptMs - 1));
+      if (waitMs <= 0) break;
+      await sleep(waitMs);
+      attempt += 1;
+    }
+  }
+
+  if (lastError) {
+    throw attachRetryMetadata(lastError, retryMetadata());
+  }
+  throw attachRetryMetadata(new Error(`${pathname} retry budget exhausted`), retryMetadata());
+}
+
+function normalizeExecutionSignatures(result) {
+  const signatures = [];
+  const seen = new Set();
+  for (const value of []
+    .concat(result?.signatures || [])
+    .concat(result?.result?.txHashes || [])
+    .concat(result?.result?.signatures || [])
+    .concat(result?.result?.signature ? [result.result.signature] : [])) {
+    if (typeof value !== "string" || !value) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    signatures.push(value);
+  }
+  return signatures;
+}
+
+export const ADAPTIVE_CLOSE_MODE_DEFAULTS = Object.freeze({
+  hard_stop: "local_liquidity_first",
+  fast_stop: "local_liquidity_first",
+  velocity_stop: "local_liquidity_first",
+  rolling_drawdown: "fast_zap_attempt",
+  profit_giveback: "fast_zap_attempt",
+  low_yield: "relay_zap_normal",
+  oor_above: "relay_zap_normal",
+  manual: "relay_zap_normal",
+});
+
+const VALID_ADAPTIVE_CLOSE_MODES = new Set([
+  "local_liquidity_first",
+  "fast_zap_attempt",
+  "relay_zap_normal",
+  "local_close_no_swap",
+]);
+
+function normalizeAdaptiveCloseMode(value, fallback) {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return VALID_ADAPTIVE_CLOSE_MODES.has(normalized) ? normalized : fallback;
+}
+
+export function classifyAdaptiveCloseReason(reason, urgent = false) {
+  const text = String(reason || "").toLowerCase();
+  if (text.includes("hard stop")) return "hard_stop";
+  if (text.includes("velocity stop") || text.includes("rug_like") || text.includes("rug-like")) return "velocity_stop";
+  if (text.includes("fast stop") || text.includes("early dump")) return "fast_stop";
+  if (text.includes("rolling fast drawdown") || text.includes("rolling drawdown")) return "rolling_drawdown";
+  if (text.includes("profit giveback")) return "profit_giveback";
+  if (text.includes("low yield") || text.includes("low-yield") || text.includes("yield")) return "low_yield";
+  if ((text.includes("out of range") || text.includes("oor")) && (text.includes("above") || text.includes("benign"))) return "oor_above";
+  if (text.includes("manual") || text.includes("operator")) return "manual";
+  return urgent ? "fast_stop" : "manual";
+}
+
+export function selectAdaptiveCloseMode({
+  reason,
+  urgent = false,
+  relayEnabled = false,
+  managementConfig = {},
+} = {}) {
+  const exitType = classifyAdaptiveCloseReason(reason, urgent);
+  const enabled = managementConfig.adaptiveCloseModeEnabled === true;
+  const configuredModes = managementConfig.adaptiveCloseModes && typeof managementConfig.adaptiveCloseModes === "object"
+    ? managementConfig.adaptiveCloseModes
+    : {};
+  const configuredMode = normalizeAdaptiveCloseMode(configuredModes[exitType], ADAPTIVE_CLOSE_MODE_DEFAULTS[exitType] || "local_liquidity_first");
+  const selectedMode = enabled
+    ? configuredMode
+    : (urgent ? "local_liquidity_first" : (relayEnabled ? "relay_zap_normal" : "local_liquidity_first"));
+  const fastZapTimeoutMs = Math.max(1, Number(managementConfig.adaptiveCloseFastZapTimeoutMs ?? 1500) || 1500);
+
+  return {
+    enabled,
+    exitType,
+    selectedMode,
+    requestedMode: configuredMode,
+    fastZapTimeoutMs,
+    shouldAttemptRelay: !!relayEnabled && (selectedMode === "relay_zap_normal" || selectedMode === "fast_zap_attempt"),
+    shouldUseFastZapBudget: enabled && selectedMode === "fast_zap_attempt",
+    skipPostCloseSwap: enabled && selectedMode === "local_close_no_swap",
+  };
+}
+
+function createCloseModeAudit(positionAddress, reason, urgent, decision) {
+  return {
+    adaptive_close_enabled: decision.enabled,
+    requested_reason: reason || "agent decision",
+    exit_type: decision.exitType,
+    selected_close_mode: decision.selectedMode,
+    requested_close_mode: decision.requestedMode,
+    urgent: !!urgent,
+    zap_attempted: false,
+    zap_submitted: false,
+    zap_quote_ms: null,
+    zap_order_ms: null,
+    zap_sign_ms: null,
+    zap_submit_ms: null,
+    zap_total_ms: null,
+    zap_fast_timeout_ms: decision.shouldUseFastZapBudget ? decision.fastZapTimeoutMs : null,
+    fallback_reason: null,
+    local_close_ms: null,
+    post_close_swap_ms: null,
+    final_sol_received: null,
+    no_duplicate_close_or_swap_guard: true,
+    position: positionAddress,
+  };
+}
+
+function closeModeContext(audit) {
+  return {
+    adaptive_close_enabled: audit.adaptive_close_enabled,
+    requested_reason: audit.requested_reason,
+    exit_type: audit.exit_type,
+    selected_close_mode: audit.selected_close_mode,
+    requested_close_mode: audit.requested_close_mode,
+    zap_attempted: audit.zap_attempted,
+    zap_submitted: audit.zap_submitted,
+    zap_quote_ms: audit.zap_quote_ms,
+    zap_order_ms: audit.zap_order_ms,
+    zap_sign_ms: audit.zap_sign_ms,
+    zap_submit_ms: audit.zap_submit_ms,
+    zap_total_ms: audit.zap_total_ms,
+    zap_fast_timeout_ms: audit.zap_fast_timeout_ms,
+    fallback_reason: audit.fallback_reason,
+    local_close_ms: audit.local_close_ms,
+    post_close_swap_ms: audit.post_close_swap_ms,
+    final_sol_received: audit.final_sol_received,
+    no_duplicate_close_or_swap_guard: audit.no_duplicate_close_or_swap_guard,
+  };
+}
+
+function startTimedStage(audit, stageName) {
+  const startedAt = Date.now();
+  return () => {
+    audit[`${stageName}_ms`] = Date.now() - startedAt;
+  };
+}
+
+async function meridianJsonAdaptive(pathname, options, audit, stageName, deadlineAt = null) {
+  const finish = startTimedStage(audit, `zap_${stageName}`);
+  try {
+    if (Number.isFinite(deadlineAt)) {
+      const remainingMs = deadlineAt - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`fast zap ${stageName} budget expired before ${stageName}`);
+      }
+      return await meridianJsonOnce(pathname, options, Math.max(1, remainingMs));
+    }
+    return await meridianJson(pathname, options);
+  } finally {
+    finish();
+  }
+}
+
+function assertFastZapSubmitBudget(audit, deadlineAt) {
+  if (!Number.isFinite(deadlineAt)) return;
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    throw new Error("fast zap budget expired before submit");
+  }
+}
+
+const METEORA_INIT_BIN_ARRAY_DISCRIMINATOR = Buffer.from([35, 86, 19, 185, 78, 212, 75, 211]).toString("hex");
+const METEORA_INIT_BITMAP_EXTENSION_DISCRIMINATOR = Buffer.from([47, 157, 226, 180, 12, 240, 33, 71]).toString("hex");
+
+function getDlmmProgramId() {
+  return new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+}
+
+function formatSolFee(value) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number.toFixed(8).replace(/0+$/, "").replace(/\.$/, "") : "unknown";
+}
+
+async function assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId) {
+  const {
+    getBinArrayKeysCoverage,
+    getBinArrayIndexesCoverage,
+    deriveBinArrayBitmapExtension,
+    isOverflowDefaultBinArrayBitmap,
+    BIN_ARRAY_FEE,
+    BIN_ARRAY_BITMAP_FEE,
+  } = await getDLMM();
+
+  if (!getBinArrayKeysCoverage || !getBinArrayIndexesCoverage) {
+    throw new Error("Cannot verify Meteora bin-array initialization risk; refusing deploy.");
+  }
+
+  const programId = getDlmmProgramId();
+  const poolPubkey = new PublicKey(pool.pubkey?.toString?.() || pool.lbPair?.publicKey?.toString?.() || pool.lbPair?.pubkey?.toString?.());
+  const lower = new BN(Math.min(minBinId, maxBinId));
+  const upper = new BN(Math.max(minBinId, maxBinId));
+  const indexes = getBinArrayIndexesCoverage(lower, upper);
+  const keys = getBinArrayKeysCoverage(lower, upper, poolPubkey, programId);
+  const accounts = await withRpcPriority(
+    RPC_PRIORITY.DEPLOY,
+    "helius_rpc.deploy_bin_array_check",
+    () => getConnection().getMultipleAccountsInfo(keys, "confirmed"),
+  );
+  const missing = accounts
+    .map((account, index) => account ? null : {
+      index: indexes[index]?.toString?.() ?? String(index),
+      address: keys[index].toString(),
+    })
+    .filter(Boolean);
+
+  if (missing.length > 0) {
+    const totalFee = missing.length * Number(BIN_ARRAY_FEE ?? 0.07143744);
+    const sample = missing.slice(0, 3).map((entry) => `${entry.index}:${entry.address.slice(0, 8)}`).join(", ");
+    throw new Error(
+      `Deploy skipped: selected range requires ${missing.length} missing Meteora bin-array initialization(s) ` +
+      `(~${formatSolFee(totalFee)} SOL non-refundable pool rent; ${formatSolFee(BIN_ARRAY_FEE ?? 0.07143744)} SOL each). ` +
+      `Missing indexes: ${sample}${missing.length > 3 ? ", ..." : ""}. Pick an already-initialized range/pool.`,
+    );
+  }
+
+  if (deriveBinArrayBitmapExtension && isOverflowDefaultBinArrayBitmap) {
+    const needsBitmapExtension = indexes.some((index) => isOverflowDefaultBinArrayBitmap(index));
+    if (needsBitmapExtension) {
+      const [bitmapExtension] = deriveBinArrayBitmapExtension(poolPubkey, programId);
+      const account = await withRpcPriority(
+        RPC_PRIORITY.DEPLOY,
+        "helius_rpc.deploy_bitmap_check",
+        () => getConnection().getAccountInfo(bitmapExtension, "confirmed"),
+      );
+      if (!account) {
+        throw new Error(
+          `Deploy skipped: selected range requires Meteora bin-array bitmap extension initialization ` +
+          `(~${formatSolFee(BIN_ARRAY_BITMAP_FEE ?? 0.01180416)} SOL non-refundable pool rent). Pick a closer initialized range/pool.`,
+        );
+      }
+    }
+  }
+}
+
+function assertNoInitializeBinArrayInstructions(serializedTxs) {
+  const offenders = [];
+  for (const serialized of serializedTxs || []) {
+    if (typeof serialized !== "string" || serialized.length === 0) continue;
+    for (const discriminator of getDlmmInstructionDiscriminators(serialized)) {
+      if (discriminator === METEORA_INIT_BIN_ARRAY_DISCRIMINATOR) {
+        offenders.push("initializeBinArray");
+      } else if (discriminator === METEORA_INIT_BITMAP_EXTENSION_DISCRIMINATOR) {
+        offenders.push("initializeBinArrayBitmapExtension");
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    throw new Error(
+      `Deploy skipped: generated transaction includes Meteora ${[...new Set(offenders)].join(" / ")} ` +
+      "instruction(s), which would charge non-refundable pool initialization rent.",
+    );
+  }
+}
+
+function getDlmmInstructionDiscriminators(serialized) {
+  const bytes = Buffer.from(serialized, "base64");
+  const dlmmProgramId = getDlmmProgramId().toString();
+  try {
+    const versioned = VersionedTransaction.deserialize(bytes);
+    return versioned.message.compiledInstructions
+      .map((ix) => {
+        const programId = versioned.message.staticAccountKeys[ix.programIdIndex]?.toString();
+        if (programId !== dlmmProgramId) return null;
+        return Buffer.from(ix.data || []).subarray(0, 8).toString("hex");
+      })
+      .filter(Boolean);
+  } catch {
+    const legacy = Transaction.from(bytes);
+    return legacy.instructions
+      .map((ix) => ix.programId.toString() === dlmmProgramId ? Buffer.from(ix.data || []).subarray(0, 8).toString("hex") : null)
+      .filter(Boolean);
+  }
+}
+
+// ─── Pool Cache ────────────────────────────────────────────────
+const poolCache = new Map();
+const poolMetadataCache = new Map();
+
+async function getPool(poolAddress, {
+  priority = RPC_PRIORITY.DEPLOY,
+  source = "helius_rpc.dlmm_create_pool",
+} = {}) {
+  const key = poolAddress.toString();
+  if (!poolCache.has(key)) {
+    const { DLMM } = await getDLMM();
+    const pool = await withRpcPriority(
+      priority,
+      source,
+      () => DLMM.create(getConnection(), new PublicKey(poolAddress)),
+    );
+    poolCache.set(key, pool);
+  }
+  return poolCache.get(key);
+}
+
+setInterval(() => poolCache.clear(), 5 * 60 * 1000);
+setInterval(() => poolMetadataCache.clear(), 15 * 60 * 1000);
+
+async function getPoolMetadata(poolAddress) {
+  const key = String(poolAddress);
+  if (poolMetadataCache.has(key)) {
+    return poolMetadataCache.get(key);
+  }
+
+  try {
+    const res = await fetch(`https://dlmm.datapi.meteora.ag/pools/${key}`);
+    if (!res.ok) {
+      if (res.status === 429) {
+        log("rpc_pressure", JSON.stringify({
+          provider: "meteora_datapi",
+          lane: "fetch",
+          method: "pool_metadata",
+          error_bucket: "rate_limited",
+        }));
+      }
+      throw new Error(`Pool metadata API ${res.status}`);
+    }
+
+    const data = await res.json();
+    const tokenX = data?.token_x?.symbol || null;
+    const tokenY = data?.token_y?.symbol || null;
+    const pair = data?.name || (tokenX && tokenY ? `${tokenX}-${tokenY}` : null);
+    const meta = {
+      address: data?.address || key,
+      name: pair,
+      token_x_symbol: tokenX,
+      token_y_symbol: tokenY,
+    };
+    poolMetadataCache.set(key, meta);
+    return meta;
+  } catch (error) {
+    log("pool_meta_warn", `Pool metadata lookup failed for ${key.slice(0, 8)}: ${error.message}`);
+    const fallback = { address: key, name: null, token_x_symbol: null, token_y_symbol: null };
+    poolMetadataCache.set(key, fallback);
+    return fallback;
+  }
+}
+
+// ─── Get Active Bin ────────────────────────────────────────────
+export async function getActiveBin({ pool_address }) {
+  pool_address = normalizeMint(pool_address);
+  const pool = await getPool(pool_address, {
+    priority: RPC_PRIORITY.SCREENING,
+    source: "helius_rpc.screening_pool_create",
+  });
+  const activeBin = await withRpcPriority(
+    RPC_PRIORITY.SCREENING,
+    "helius_rpc.screening_active_bin",
+    () => pool.getActiveBin(),
+  );
+
+  return {
+    binId: activeBin.binId,
+    price: pool.fromPricePerLamport(Number(activeBin.price)),
+    pricePerLamport: activeBin.price.toString(),
+  };
+}
+
+// ─── Deploy Position ───────────────────────────────────────────
+export async function deployPosition({
+  pool_address,
+  amount_sol, // legacy: will be used as amount_y if amount_y is not provided
+  amount_x,
+  amount_y,
+  strategy,
+  bins_below,
+  bins_above,
+  downside_pct,
+  upside_pct,
+  // optional pool metadata for learning (passed by agent when available)
+  pool_name,
+  bin_step,
+  base_fee,
+  volatility,
+  fee_tvl_ratio,
+  organic_score,
+  mcap,
+  active_tvl,
+  price_change_pct,
+  deploy_share_of_active_tvl_pct,
+  initial_value_usd,
+  shadow_data_collection,
+  dynamic_range_shadow,
+  range_width_decision,
+  dynamic_pool_sizing_decision,
+  fabriq_ohlcv_entry_gate,
+  deploy_provenance,
+}) {
+  pool_address = normalizeMint(pool_address);
+  try {
+    assertDeployRpcCooldownClear();
+  } catch (error) {
+    log("deploy", error.message);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: error.message,
+      source: "dlmm.deploy.rpc_cooldown",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: error.deployRpcCooldown ?? null };
+  }
+  const activeStrategy = strategy || config.strategy.strategy;
+  const strategyProfile = resolveRuntimeStrategyProfile();
+  let activeBinsBelow = bins_below ?? config.strategy.binsBelow;
+  let activeBinsAbove = bins_above ?? 0;
+
+  if (isPoolOnCooldown(pool_address)) {
+    log("deploy", `Pool ${pool_address.slice(0, 8)} is on cooldown — skipping`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: "Pool on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.pool_cooldown",
+    });
+    return { success: false, error: "Pool on cooldown — was recently closed with a cooldown reason. Try a different pool." };
+  }
+
+  let StrategyType, getBinIdFromPrice, getPriceOfBinByBinId, pool, baseMint;
+  try {
+    ({ StrategyType, getBinIdFromPrice, getPriceOfBinByBinId } = await getDLMM());
+    pool = await getPool(pool_address, {
+      priority: RPC_PRIORITY.DEPLOY,
+      source: "helius_rpc.deploy_pool_create",
+    });
+    baseMint = pool.lbPair.tokenXMint.toString();
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_pool")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      reason: error.message,
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
+  if (isBaseMintOnCooldown(baseMint)) {
+    log("deploy", `Base mint ${baseMint.slice(0, 8)} is on cooldown — skipping deploy for pool ${pool_address.slice(0, 8)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: "Token on cooldown",
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.token_cooldown",
+    });
+    return { success: false, error: "Token on cooldown — recently closed out-of-range too many times. Try a different token." };
+  }
+  let activeBin;
+  try {
+    activeBin = await withRpcPriority(
+      RPC_PRIORITY.DEPLOY,
+      "helius_rpc.deploy_active_bin",
+      () => pool.getActiveBin(),
+    );
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_active_bin")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: { strategy: activeStrategy, amount_x: amount_x ?? null, amount_y: amount_y ?? amount_sol ?? null },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
+  const actualBinStep = pool.lbPair.binStep;
+  const activePrice = Number(getPriceOfBinByBinId(activeBin.binId, actualBinStep).toString());
+
+  log("deploy_audit", `[range-raw] ${JSON.stringify({
+    pool_address,
+    pool_name: pool_name ?? null,
+    strategy: activeStrategy,
+    strategy_profile: strategyProfile,
+    amount_x: amount_x ?? null,
+    amount_y: amount_y ?? null,
+    amount_sol: amount_sol ?? null,
+    bins_below: bins_below ?? null,
+    bins_above: bins_above ?? null,
+    downside_pct: downside_pct ?? null,
+    upside_pct: upside_pct ?? null,
+    active_bin: activeBin.binId,
+    bin_step: actualBinStep,
+    base_fee: base_fee ?? null,
+    volatility: volatility ?? null,
+    mcap: mcap ?? null,
+    active_tvl: active_tvl ?? null,
+    price_change_pct: price_change_pct ?? null,
+    deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
+    fee_tvl_ratio: fee_tvl_ratio ?? null,
+    organic_score: organic_score ?? null,
+    initial_value_usd: initial_value_usd ?? null,
+    dynamic_range_shadow: dynamic_range_shadow ?? null,
+    range_width_decision: range_width_decision ?? null,
+    dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+    fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+    deploy_provenance: deploy_provenance ?? null,
+  })}`);
+
+  const normalizedRange = normalizeDeployRangeInputs({
+    activeBinId: activeBin.binId,
+    activePrice,
+    actualBinStep,
+    getBinIdFromPrice,
+    fallbackBinsBelow: config.strategy.binsBelow,
+    bins_below,
+    bins_above,
+    downside_pct,
+    upside_pct,
+  });
+  activeBinsBelow = normalizedRange.activeBinsBelow;
+  activeBinsAbove = normalizedRange.activeBinsAbove;
+
+  // ── Bin count sanity guard ───────────────────────────────────────────
+  // Prevent LLM hallucinations sending absurd bin counts (690, 6910, etc.)
+  // which cause Rust integer overflow in Meteora's InitializePosition.
+  // Note: single-sided bid_ask (bins_above=0) is fully valid — the SDK
+  // handles it natively via toWeightBidAsk(). Do NOT force symmetry.
+  const MAX_BINS = 200; // well within Meteora's 1400-bin position limit
+  {
+    const total = activeBinsBelow + activeBinsAbove;
+    if (total > MAX_BINS) {
+      const ratio = activeBinsAbove > 0 ? activeBinsAbove / total : 0;
+      activeBinsBelow = Math.min(activeBinsBelow, Math.floor(MAX_BINS * (1 - ratio)));
+      activeBinsAbove = Math.min(activeBinsAbove, MAX_BINS - activeBinsBelow);
+      log("deploy", `[guard] Clamped bins from ${total} to ${activeBinsBelow + activeBinsAbove} (max ${MAX_BINS}) — likely LLM hallucination`);
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────
+
+  const strategyMap = {
+    spot: StrategyType.Spot,
+    curve: StrategyType.Curve,
+    bid_ask: StrategyType.BidAsk,
+  };
+
+  const strategyType = strategyMap[activeStrategy];
+  if (strategyType === undefined) {
+    throw new Error(`Invalid strategy: ${activeStrategy}. Use spot, curve, or bid_ask.`);
+  }
+
+  // Calculate amounts
+  // If no explicit SOL amount is provided, fall back to the configured dynamic deploy size.
+  const isDryRun = process.env.DRY_RUN === "true";
+  const fallbackAmountY =
+    amount_y == null && amount_sol == null && !isDryRun
+      ? computeDeployAmount((await getWalletBalances()).sol)
+      : 0;
+  const finalAmountY = amount_y ?? amount_sol ?? fallbackAmountY;
+  const finalAmountX = amount_x ?? 0;
+  const isSingleSidedSol = finalAmountX <= 0 && finalAmountY > 0;
+  if (isSingleSidedSol && (Number(bins_above ?? 0) > 0 || normalizedRange.percent_inputs.upside_pct_used)) {
+    throw new Error(
+      "Single-side SOL deploy cannot use bins_above or upside_pct. Use amount_y with bins_below only; the upper bin is the SDK active bin.",
+    );
+  }
+  if (isSingleSidedSol) {
+    activeBinsAbove = 0;
+  }
+  const dynamicRangeShadowAudit = dynamic_range_shadow ?? buildDynamicRangeShadowTelemetry({
+    bin_step: actualBinStep,
+    active_tvl,
+    volatility,
+    mcap,
+    price_change_pct,
+    deploy_share_of_active_tvl_pct,
+    fee_tvl_ratio,
+    organic_score,
+  }, {
+    deployAmountSol: finalAmountY,
+    rangePolicy: resolveStrategyRangePolicy(getActiveStrategy(), config),
+  });
+  const totalBins = activeBinsBelow + activeBinsAbove;
+  const isWideRange = totalBins > 69;
+  const minBinId = activeBin.binId - activeBinsBelow;
+  const maxBinId = isSingleSidedSol ? activeBin.binId : activeBin.binId + activeBinsAbove;
+
+  if (minBinId > maxBinId) {
+    throw new Error(`Invalid bin range: ${minBinId} -> ${maxBinId}`);
+  }
+  if (isSingleSidedSol && maxBinId !== activeBin.binId) {
+    throw new Error(
+      `Single-side SOL deploy must end at the SDK active bin. Expected ${activeBin.binId}, got ${maxBinId}.`,
+    );
+  }
+
+  const minPrice = Number(getPriceOfBinByBinId(minBinId, actualBinStep).toString());
+  const maxPrice = Number(getPriceOfBinByBinId(maxBinId, actualBinStep).toString());
+  const downsideCoveragePct = activePrice > 0 ? ((activePrice - minPrice) / activePrice) * 100 : null;
+  const upsideCoveragePct = activePrice > 0 ? ((maxPrice - activePrice) / activePrice) * 100 : null;
+  const totalWidthPct = minPrice > 0 ? ((maxPrice - minPrice) / minPrice) * 100 : null;
+  const rangeCoverage = {
+    downside_pct: downsideCoveragePct,
+    upside_pct: upsideCoveragePct,
+    width_pct: totalWidthPct,
+    active_price: activePrice,
+  };
+
+  const normalizedRangeAudit = {
+    pool_address,
+    strategy: activeStrategy,
+    active_bin: activeBin.binId,
+    min_bin: minBinId,
+    max_bin: maxBinId,
+    width_bins: maxBinId - minBinId,
+    bins_below: activeBinsBelow,
+    bins_above: activeBinsAbove,
+    percent_inputs: normalizedRange.percent_inputs,
+    range_coverage: rangeCoverage,
+  };
+  log("deploy_audit", `[range-normalized] ${JSON.stringify(normalizedRangeAudit)}`);
+  appendDecisionContext({
+    stage: "deploy_attempt",
+    actor: "SCREENER",
+    pool: pool_address,
+    poolName: pool_name ?? null,
+    baseMint,
+    reason: "deploy_position called",
+    metrics: {
+      bin_step: actualBinStep,
+      base_fee: base_fee ?? null,
+      volatility: volatility ?? null,
+      mcap: mcap ?? null,
+      active_tvl: active_tvl ?? null,
+      price_change_pct: price_change_pct ?? null,
+      deploy_share_of_active_tvl_pct: deploy_share_of_active_tvl_pct ?? null,
+      fee_tvl_ratio: fee_tvl_ratio ?? null,
+      organic_score: organic_score ?? null,
+      initial_value_usd: initial_value_usd ?? null,
+      dynamic_range_shadow: dynamicRangeShadowAudit,
+      range_width_decision: range_width_decision ?? null,
+      dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+      fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+      deploy_provenance: deploy_provenance ?? null,
+    },
+    deploy: {
+      raw: {
+        strategy: activeStrategy,
+        amount_x: amount_x ?? null,
+        amount_y: amount_y ?? null,
+        amount_sol: amount_sol ?? null,
+        bins_below: bins_below ?? null,
+        bins_above: bins_above ?? null,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+      normalized: normalizedRangeAudit,
+      dynamic_range_shadow: dynamicRangeShadowAudit,
+      range_width_decision: range_width_decision ?? null,
+      dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+      fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+    },
+    source: "dlmm.deploy.range_normalized",
+  });
+
+  const narrowRangeGuard = validateSingleSidedSolBidAskRange({
+    activeStrategy,
+    isSingleSidedSol,
+    activeBinId: activeBin.binId,
+    minBinId,
+    maxBinId,
+    activeBinsBelow,
+    activeBinsAbove,
+    rangeCoverage,
+    guardConfig: config.strategy,
+  });
+  if (!narrowRangeGuard.ok) {
+    log("deploy_reject", `[narrow-range-guard] ${narrowRangeGuard.reason} ${JSON.stringify(narrowRangeGuard.details)}`);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: narrowRangeGuard.reason,
+      deploy: {
+        normalized: normalizedRangeAudit,
+        guard: narrowRangeGuard.details,
+      },
+      source: "dlmm.deploy.narrow_range_guard",
+    });
+    throw new Error(narrowRangeGuard.reason);
+  }
+
+  if (isDryRun) {
+    return {
+      dry_run: true,
+      would_deploy: {
+        pool_address,
+        strategy: activeStrategy,
+        bins_below: activeBinsBelow,
+        bins_above: activeBinsAbove,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        wide_range: isWideRange,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+        dynamic_pool_sizing_decision: dynamic_pool_sizing_decision ?? null,
+        fabriq_ohlcv_entry_gate: fabriq_ohlcv_entry_gate ?? null,
+      },
+      message: "DRY RUN — no transaction sent",
+    };
+  }
+
+  try {
+    await assertRangeDoesNotRequireBinArrayInitialization(pool, minBinId, maxBinId);
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_preflight_bin_array")
+      : null;
+    if (!deployCooldown) throw error;
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: {
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.rpc_preflight_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
+
+  // Read base fee directly from pool — baseFactor * binStep / 10^6 gives fee in %
+  const baseFactor = pool.lbPair.parameters?.baseFactor ?? 0;
+  const actualBaseFee = base_fee ?? (baseFactor > 0 ? parseFloat((baseFactor * actualBinStep / 1e6 * 100).toFixed(4)) : null);
+
+  const totalYLamports = new BN(Math.floor(finalAmountY * 1e9));
+  // For X, we assume it's also 9 decimals for now, or we'd need to fetch mint decimals.
+  // Most Meteora pools base tokens are 6 or 9. To be safe, we should fetch.
+  let totalXLamports = new BN(0);
+  if (finalAmountX > 0) {
+    let mintInfo;
+    try {
+      mintInfo = await withRpcPriority(
+        RPC_PRIORITY.DEPLOY,
+        "helius_rpc.deploy_mint_decimals",
+        () => getConnection().getParsedAccountInfo(new PublicKey(pool.lbPair.tokenXMint)),
+      );
+    } catch (error) {
+      const deployCooldown = isRpcRateLimitError(error)
+        ? recordDeployRpcRateLimit(error, "deploy_preflight_mint_decimals")
+        : null;
+      if (!deployCooldown) throw error;
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        reason: error.message,
+        deploy: {
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.rpc_preflight_error",
+      });
+      return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+    }
+    const decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+    totalXLamports = new BN(Math.floor(finalAmountX * Math.pow(10, decimals)));
+  }
+
+  if (shouldUseLpAgentRelayForDeploy()) {
+    try {
+      const wallet = getWallet();
+      log(
+        "deploy",
+        `Relay deploy via Agent Meridian: ${pool_address} activeBin ${activeBin.binId} bins ${minBinId}->${maxBinId} amountY=${finalAmountY}`,
+      );
+      const order = await meridianJson("/execution/zap-in/order", {
+        method: "POST",
+        headers: getMeridianHeaders(),
+        body: JSON.stringify({
+          agentId: config.hiveMind.agentId || "agent-local",
+          idempotencyKey: `deploy:${pool_address}:${minBinId}:${maxBinId}:${finalAmountY}:${finalAmountX}`,
+          poolId: pool_address,
+          owner: wallet.publicKey.toString(),
+          strategy: activeStrategy === "spot" ? "Spot" : "BidAsk",
+          inputSOL: finalAmountY,
+          amountY: finalAmountY,
+          amountX: finalAmountX,
+          percentX: finalAmountX > 0 && finalAmountY > 0 ? 0.5 : 0,
+          fromBinId: minBinId,
+          toBinId: maxBinId,
+          slippageBps: 500,
+          provider: "JUPITER_ULTRA",
+        }),
+      });
+
+      const addLiquidityUnsigned = order?.order?.transactions?.addLiquidity || [];
+      const swapUnsigned = order?.order?.transactions?.swap || [];
+      if (addLiquidityUnsigned.length + swapUnsigned.length === 0) {
+        throw new Error("LPAgent order returned no transactions. Check the pool address, deploy amount, and selected range.");
+      }
+      assertNoInitializeBinArrayInstructions(addLiquidityUnsigned);
+
+      const relayAllowedDebitMints = [
+        pool.lbPair.tokenXMint.toString(),
+        pool.lbPair.tokenYMint.toString(),
+        config.tokens.SOL,
+      ];
+      const maxDeploySolLoss = Math.max(0.05, Number(finalAmountY || 0) + 0.15);
+      const addLiquidity = await signAndSimulateRelayTransactions(addLiquidityUnsigned, wallet, {
+        connection: getConnection(),
+        label: "zap-in addLiquidity",
+        allowedDebitMints: relayAllowedDebitMints,
+        maxSolLoss: maxDeploySolLoss,
+        requiredStaticAccounts: [wallet.publicKey.toString(), pool_address],
+      });
+      const swap = await signAndSimulateRelayTransactions(swapUnsigned, wallet, {
+        connection: getConnection(),
+        label: "zap-in swap",
+        allowedDebitMints: relayAllowedDebitMints,
+        maxSolLoss: maxDeploySolLoss,
+        requiredStaticAccounts: [wallet.publicKey.toString()],
+      });
+      const submit = await meridianJson("/execution/zap-in/submit", {
+        method: "POST",
+        headers: getMeridianHeaders(),
+        body: JSON.stringify({
+          requestId: order.requestId,
+          lastValidBlockHeight: order?.order?.lastValidBlockHeight,
+          transactions: {
+            addLiquidity,
+            swap,
+          },
+          meta: {
+            pool: pool_address,
+            strategy: activeStrategy,
+          },
+        }),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      _positionsCacheAt = 0;
+      const refreshed = await getMyPositions({ force: true, silent: true }).catch(() => null);
+      const matching = refreshed?.positions?.find(
+        (position) => position.pool === pool_address && position.lower_bin === minBinId && position.upper_bin === maxBinId,
+      ) || refreshed?.positions?.find((position) => position.pool === pool_address);
+
+      const positionAddress = matching?.position || null;
+      let deployShadowDataCollection = shadow_data_collection ?? null;
+      if (positionAddress) {
+        const signalSnapshot = getAndClearStagedSignals(pool_address, baseMint);
+        deployShadowDataCollection = shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null;
+        trackPosition({
+          position: positionAddress,
+          pool: pool_address,
+          pool_name,
+          strategy: activeStrategy,
+          strategy_profile: strategyProfile,
+          bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+          bin_step,
+          volatility,
+          fee_tvl_ratio,
+          organic_score,
+          amount_sol: finalAmountY,
+          amount_x: finalAmountX,
+          active_bin: activeBin.binId,
+          initial_value_usd,
+          signal_snapshot: signalSnapshot,
+          shadow_data_collection: deployShadowDataCollection,
+        });
+      }
+
+      appendDecision({
+        type: "deploy",
+        actor: "SCREENER",
+        pool: pool_address,
+        pool_name,
+        position: positionAddress,
+        summary: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+        reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+        risks: [
+          volatility != null ? `volatility ${volatility}` : null,
+          fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
+        ].filter(Boolean),
+        metrics: {
+          amount_sol: finalAmountY,
+          strategy: activeStrategy,
+          strategy_profile: strategyProfile,
+          active_bin: activeBin.binId,
+          min_bin: minBinId,
+          max_bin: maxBinId,
+          downside_pct: downside_pct ?? downsideCoveragePct,
+          upside_pct: upside_pct ?? upsideCoveragePct,
+        },
+      });
+      appendDecisionContext({
+        stage: "deploy_success",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        position: positionAddress,
+        reason: `Relay deployed ${finalAmountY} SOL with ${activeStrategy}`,
+        metrics: {
+          bin_step: actualBinStep,
+          base_fee: actualBaseFee,
+          volatility: volatility ?? null,
+          fee_tvl_ratio: fee_tvl_ratio ?? null,
+          strategy_profile: strategyProfile,
+          organic_score: organic_score ?? null,
+        },
+        deploy: {
+          relay: true,
+          request_id: order.requestId,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          strategy_profile: strategyProfile,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          range_coverage: rangeCoverage,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_success",
+      });
+      appendMainCandidateDeploySnapshot({
+        candidate: { shadow_data_collection: deployShadowDataCollection },
+        result: { position: positionAddress, pool: pool_address, pool_name },
+        deploy: {
+          relay: true,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          strategy: activeStrategy,
+          strategy_profile: strategyProfile,
+          bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+          range_coverage: rangeCoverage,
+        },
+        source: "dlmm.deploy.relay_success",
+      });
+
+      return {
+        success: true,
+        relay: true,
+        request_id: order.requestId,
+        position: positionAddress,
+        pool: pool_address,
+        pool_name,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        price_range: { min: minPrice, max: maxPrice },
+        range_coverage: {
+          downside_pct: downsideCoveragePct,
+          upside_pct: upsideCoveragePct,
+          width_pct: totalWidthPct,
+          active_price: activePrice,
+        },
+        bin_step: actualBinStep,
+        base_fee: actualBaseFee,
+        strategy: activeStrategy,
+        strategy_profile: strategyProfile,
+        wide_range: isWideRange,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        txs: normalizeExecutionSignatures(submit),
+      };
+    } catch (error) {
+      const deployCooldown = isRpcRateLimitError(error)
+        ? recordDeployRpcRateLimit(error, "deploy_relay")
+        : null;
+      log("deploy_error", `Relay deploy failed: ${error.message}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: pool_address,
+        poolName: pool_name ?? null,
+        baseMint,
+        reason: error.message,
+        deploy: {
+          relay: true,
+          amount_x: finalAmountX,
+          amount_y: finalAmountY,
+          normalized: normalizedRangeAudit,
+        },
+        source: "dlmm.deploy.relay_error",
+      });
+      return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+    }
+  }
+
+  const wallet = getWallet();
+  const newPosition = Keypair.generate();
+
+  log("deploy", `Pool: ${pool_address}`);
+  log("deploy", `Strategy: ${activeStrategy}, Bins: ${minBinId} to ${maxBinId} (${totalBins} bins${isWideRange ? " — WIDE RANGE" : ""})`);
+  log("deploy", `Amount: ${finalAmountX} X, ${finalAmountY} Y`);
+  log("deploy", `Position: ${newPosition.publicKey.toString()}`);
+
+  try {
+    const txHashes = [];
+
+    if (isWideRange) {
+      // ── Wide Range Path (>69 bins) ─────────────────────────────────
+      // Solana limits inner instruction realloc to 10240 bytes, so we can't create
+      // a large position in a single initializePosition ix.
+      // Solution: createExtendedEmptyPosition (returns Transaction | Transaction[]),
+      //           then addLiquidityByStrategyChunkable (returns Transaction[]).
+
+      // Phase 1: Create empty position (may be multiple txs)
+      const createTxs = await pool.createExtendedEmptyPosition(
+        minBinId,
+        maxBinId,
+        newPosition.publicKey,
+        wallet.publicKey,
+      );
+      const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
+      for (let i = 0; i < createTxArray.length; i++) {
+        const signers = i === 0 ? [wallet, newPosition] : [wallet];
+        const txHash = await sendAndConfirmTransactionWithPriority(
+          getConnection(),
+          createTxArray[i],
+          signers,
+          {},
+          { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+        );
+        txHashes.push(txHash);
+        log("deploy", `Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
+      }
+
+      // Phase 2: Add liquidity (may be multiple txs)
+      const addTxs = await pool.addLiquidityByStrategyChunkable({
+        positionPubKey: newPosition.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalXLamports,
+        totalYAmount: totalYLamports,
+        strategy: { minBinId, maxBinId, strategyType },
+        slippage: 10, // 10%
+      });
+      const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
+      for (let i = 0; i < addTxArray.length; i++) {
+        const txHash = await sendAndConfirmTransactionWithPriority(
+          getConnection(),
+          addTxArray[i],
+          [wallet],
+          {},
+          { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+        );
+        txHashes.push(txHash);
+        log("deploy", `Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+      }
+    } else {
+      // ── Standard Path (≤69 bins) ─────────────────────────────────
+      const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: newPosition.publicKey,
+        user: wallet.publicKey,
+        totalXAmount: totalXLamports,
+        totalYAmount: totalYLamports,
+        strategy: { maxBinId, minBinId, strategyType },
+        slippage: 1000, // 10% in bps
+      });
+      const txHash = await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        tx,
+        [wallet, newPosition],
+        {},
+        { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.deploy_send" },
+      );
+      txHashes.push(txHash);
+    }
+
+    log("deploy", `SUCCESS — ${txHashes.length} tx(s): ${txHashes[0]}`);
+
+    _positionsCacheAt = 0;
+    const signalSnapshot = getAndClearStagedSignals(pool_address, baseMint);
+    const deployShadowDataCollection = shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null;
+    trackPosition({
+      position: newPosition.publicKey.toString(),
+      pool: pool_address,
+      pool_name,
+      strategy: activeStrategy,
+      strategy_profile: strategyProfile,
+      bin_range: { min: minBinId, max: maxBinId, bins_below: activeBinsBelow, bins_above: activeBinsAbove },
+      bin_step,
+      volatility,
+      fee_tvl_ratio,
+      organic_score,
+      amount_sol: finalAmountY,
+      amount_x: finalAmountX,
+      active_bin: activeBin.binId,
+      initial_value_usd,
+      signal_snapshot: signalSnapshot,
+      shadow_data_collection: deployShadowDataCollection,
+    });
+
+    appendDecision({
+      type: "deploy",
+      actor: "SCREENER",
+      pool: pool_address,
+      pool_name,
+      position: newPosition.publicKey.toString(),
+      summary: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      reason: `Chosen range ${minBinId}→${maxBinId} around active bin ${activeBin.binId}`,
+      risks: [
+        volatility != null ? `volatility ${volatility}` : null,
+        fee_tvl_ratio != null ? `fee/TVL ${fee_tvl_ratio}%` : null,
+      ].filter(Boolean),
+      metrics: {
+        amount_sol: finalAmountY,
+        strategy: activeStrategy,
+        strategy_profile: strategyProfile,
+        active_bin: activeBin.binId,
+        min_bin: minBinId,
+        max_bin: maxBinId,
+        downside_pct: downside_pct ?? null,
+        upside_pct: upside_pct ?? null,
+      },
+    });
+    appendDecisionContext({
+      stage: "deploy_success",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      position: newPosition.publicKey.toString(),
+      reason: `Deployed ${finalAmountY} SOL with ${activeStrategy}`,
+      metrics: {
+        bin_step: actualBinStep,
+        base_fee: actualBaseFee,
+        volatility: volatility ?? null,
+        fee_tvl_ratio: fee_tvl_ratio ?? null,
+        strategy_profile: strategyProfile,
+        organic_score: organic_score ?? null,
+      },
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        strategy_profile: strategyProfile,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_success",
+    });
+    appendMainCandidateDeploySnapshot({
+      candidate: { shadow_data_collection: deployShadowDataCollection },
+      result: { position: newPosition.publicKey.toString(), pool: pool_address, pool_name },
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        strategy: activeStrategy,
+        strategy_profile: strategyProfile,
+        bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+        range_coverage: rangeCoverage,
+      },
+      source: "dlmm.deploy.local_success",
+    });
+
+    return {
+      success: true,
+      position: newPosition.publicKey.toString(),
+      pool: pool_address,
+      pool_name,
+      bin_range: { min: minBinId, max: maxBinId, active: activeBin.binId },
+      price_range: { min: minPrice, max: maxPrice },
+      range_coverage: {
+        downside_pct: downsideCoveragePct,
+        upside_pct: upsideCoveragePct,
+        width_pct: totalWidthPct,
+        active_price: activePrice,
+      },
+      bin_step: actualBinStep,
+      base_fee: actualBaseFee,
+      strategy: activeStrategy,
+      strategy_profile: strategyProfile,
+      wide_range: isWideRange,
+      amount_x: finalAmountX,
+      amount_y: finalAmountY,
+      txs: txHashes,
+    };
+  } catch (error) {
+    const deployCooldown = isRpcRateLimitError(error)
+      ? recordDeployRpcRateLimit(error, "deploy_position")
+      : null;
+    log("deploy_error", error.message);
+    appendDecisionContext({
+      stage: "deploy_reject",
+      actor: "SCREENER",
+      pool: pool_address,
+      poolName: pool_name ?? null,
+      baseMint,
+      reason: error.message,
+      deploy: {
+        relay: false,
+        amount_x: finalAmountX,
+        amount_y: finalAmountY,
+        normalized: normalizedRangeAudit,
+      },
+      source: "dlmm.deploy.local_error",
+    });
+    return { success: false, error: error.message, deploy_rpc_cooldown: deployCooldown };
+  }
+}
+
+const POSITIONS_CACHE_TTL = 5 * 60_000; // 5 minutes
+
+let _positionsCache = null;
+let _positionsCacheAt = 0;
+let _positionsInflight = null; // deduplicates concurrent calls
+const LPAGENT_API = "https://api.lpagent.io/open-api/v1";
+
+async function fetchLpAgentOpenPositions(walletAddress) {
+  if (!process.env.LPAGENT_API_KEY) return {};
+
+  const url = `${LPAGENT_API}/lp-positions/opening?owner=${walletAddress}`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "x-api-key": process.env.LPAGENT_API_KEY,
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      log("lpagent_api", `HTTP ${res.status} for owner ${walletAddress.slice(0, 8)}: ${body.slice(0, 160)}`);
+      return {};
+    }
+    const data = await res.json();
+    const positions = data?.data || [];
+    const byAddress = {};
+    for (const p of positions) {
+      const addr = p.position || p.id || p.tokenId;
+      if (addr) byAddress[addr] = p;
+    }
+    return byAddress;
+  } catch (e) {
+    log("lpagent_api", `Fetch error for owner ${walletAddress.slice(0, 8)}: ${e.message}`);
+    return {};
+  }
+}
+
+// ─── Fetch DLMM PnL API for all positions in a pool ────────────
+async function fetchDlmmPnlForPool(poolAddress, walletAddress) {
+  const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      log("pnl_api", `HTTP ${res.status} for pool ${poolAddress.slice(0, 8)}: ${body.slice(0, 120)}`);
+      return {};
+    }
+    const data = await res.json();
+    const positions = data.positions || data.data || [];
+    if (positions.length === 0) {
+      log("pnl_api", `No positions returned for pool ${poolAddress.slice(0, 8)} — keys: ${Object.keys(data).join(", ")}`);
+    }
+    const byAddress = {};
+    for (const p of positions) {
+      const addr = p.positionAddress || p.address || p.position;
+      if (addr) byAddress[addr] = p;
+    }
+    return byAddress;
+  } catch (e) {
+    log("pnl_api", `Fetch error for pool ${poolAddress.slice(0, 8)}: ${e.message}`);
+    return {};
+  }
+}
+
+// ─── Get Position PnL (Meteora API) ─────────────────────────────
+export async function getPositionPnl({ pool_address, position_address }) {
+  pool_address = normalizeMint(pool_address);
+  position_address = normalizeMint(position_address);
+  const walletAddress = getWallet().publicKey.toString();
+  if (shouldUseLpAgentRelay()) {
+    try {
+      const payload = await getMyPositions({ force: true, silent: true });
+      const p = payload?.positions?.find((position) => position.position === position_address);
+      if (p) {
+        return {
+          pnl_usd: p.pnl_usd,
+          pnl_pct: p.pnl_pct,
+          current_value_usd: p.total_value_usd,
+          unclaimed_fee_usd: p.unclaimed_fees_usd,
+          all_time_fees_usd: p.collected_fees_usd,
+          fee_per_tvl_24h: p.fee_per_tvl_24h,
+          in_range: p.in_range,
+          lower_bin: p.lower_bin,
+          upper_bin: p.upper_bin,
+          active_bin: p.active_bin,
+          age_minutes: p.age_minutes,
+          request_id: payload?.request_id || payload?.requestId || null,
+        };
+      }
+      log("pnl_warn", "Local enriched positions did not include requested position; falling back to LPAgent.io direct PnL");
+    } catch (error) {
+      log("pnl_warn", `Local enriched PnL lookup failed; falling back to LPAgent.io direct PnL: ${error.message}`);
+    }
+  }
+  // ─── Fallback 1: LPAgent.io direct ───────────────────────────
+  if (process.env.LPAGENT_API_KEY) {
+    try {
+      const lpAgentByPos = await fetchLpAgentOpenPositions(walletAddress);
+      const lpData = lpAgentByPos[position_address];
+      if (lpData) {
+        log("pnl", `LPAgent.io direct PnL for ${position_address.slice(0, 8)}: ${config.management.solMode ? (lpData.pnl?.percentNative ?? 0).toFixed(2) : (lpData.pnl?.percent ?? 0).toFixed(2)}%`);
+        return {
+          pnl_usd:           Math.round(safeNum(config.management.solMode ? lpData.pnl?.valueNative   : lpData.pnl?.value)       * 100) / 100,
+          pnl_pct:           Math.round(safeNum(config.management.solMode ? lpData.pnl?.percentNative : lpData.pnl?.percent)     * 100) / 100,
+          current_value_usd: Math.round(safeNum(config.management.solMode ? lpData.valueNative        : lpData.value)            * 100) / 100,
+          unclaimed_fee_usd: Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative : lpData.unCollectedFee) * 100) / 100,
+          all_time_fees_usd: Math.round(safeNum(config.management.solMode ? lpData.collectedFeeNative  : lpData.collectedFee)    * 100) / 100,
+          in_range:          !!lpData.inRange,
+          lower_bin:         lpData.tickLower ?? null,
+          upper_bin:         lpData.tickUpper ?? null,
+        };
+      }
+      log("pnl_warn", "LPAgent.io direct: position not found — falling back to Meteora PnL API");
+    } catch (lpErr) {
+      log("pnl_warn", `LPAgent.io direct PnL failed; falling back to Meteora PnL API: ${lpErr.message}`);
+    }
+  }
+  // ─── Fallback 2: Meteora PnL API ─────────────────────────────
+  try {
+    const byAddress = await fetchDlmmPnlForPool(pool_address, walletAddress);
+    const p = byAddress[position_address];
+    if (!p) return { error: "Position not found in PnL API" };
+
+    const unclaimedUsd    = parseFloat(p.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(p.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0);
+    const currentValueUsd = parseFloat(p.unrealizedPnl?.balances || 0);
+    return {
+      pnl_usd:           Math.round((p.pnlUsd ?? 0) * 100) / 100,
+      pnl_pct:           Math.round((p.pnlPctChange ?? 0) * 100) / 100,
+      current_value_usd: Math.round(currentValueUsd * 100) / 100,
+      unclaimed_fee_usd: Math.round(unclaimedUsd * 100) / 100,
+      all_time_fees_usd: Math.round(parseFloat(p.allTimeFees?.total?.usd || 0) * 100) / 100,
+      fee_per_tvl_24h:   Math.round(parseFloat(p.feePerTvl24h || 0) * 100) / 100,
+      in_range:    !p.isOutOfRange,
+      lower_bin:   p.lowerBinId      ?? null,
+      upper_bin:   p.upperBinId      ?? null,
+      active_bin:  p.poolActiveBinId ?? null,
+      age_minutes: p.createdAt ? Math.floor((Date.now() - p.createdAt * 1000) / 60000) : null,
+    };
+  } catch (error) {
+    log("pnl_error", error.message);
+    return { error: error.message };
+  }
+}
+
+function safeNum(value) {
+  const n = parseFloat(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function maybeNum(value) {
+  if (value == null || value === "") return null;
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+const PERFORMANCE_SIGNAL_FIELDS = [
+  "organic_score",
+  "fee_tvl_ratio",
+  "volume",
+  "mcap",
+  "holder_count",
+  "smart_wallets_present",
+  "narrative_quality",
+  "study_win_rate",
+  "hive_consensus",
+  "volatility",
+  "ath_proximity",
+  "volume_trend",
+  "change_1h",
+  "candle_price_range",
+  "okx_signal_present",
+  "token_age_hours",
+  "gmgn_bluechip_present",
+  "gmgn_bundler_present",
+];
+
+function resolvePerformanceSignalSnapshot({ poolAddress, baseMint, tracked }) {
+  const staged = config.darwin?.enabled
+    ? getAndClearStagedSignals(poolAddress, baseMint)
+    : null;
+  const snapshot = {
+    ...(staged || {}),
+    ...(tracked?.signal_snapshot || {}),
+  };
+
+  if (baseMint && snapshot.base_mint == null) snapshot.base_mint = baseMint;
+  for (const field of PERFORMANCE_SIGNAL_FIELDS) {
+    if (snapshot[field] == null && tracked?.[field] != null) {
+      snapshot[field] = tracked[field];
+    }
+  }
+
+  return Object.values(snapshot).some((value) => value != null) ? snapshot : null;
+}
+
+function getClosedPnlValue(posEntry, solMode = false) {
+  if (solMode) {
+    const nativePnl =
+      maybeNum(posEntry?.pnlSol) ??
+      maybeNum(posEntry?.pnl?.valueNative);
+    if (nativePnl != null) return nativePnl;
+    const withdrawn = maybeNum(posEntry?.allTimeWithdrawals?.total?.sol);
+    const deposited = maybeNum(posEntry?.allTimeDeposits?.total?.sol);
+    const fees = maybeNum(posEntry?.allTimeFees?.total?.sol) ?? 0;
+    return withdrawn != null && deposited != null ? (withdrawn + fees) - deposited : 0;
+  }
+
+  return maybeNum(posEntry?.pnlUsd) ?? maybeNum(posEntry?.pnl?.value) ?? 0;
+}
+
+function getClosedPnlPct(posEntry, solMode = false) {
+  const reported = solMode
+    ? maybeNum(posEntry?.pnlSolPctChange) ?? maybeNum(posEntry?.pnl?.percentNative)
+    : maybeNum(posEntry?.pnlPctChange) ?? maybeNum(posEntry?.pnl?.percent);
+  if (reported != null) return reported;
+
+  const pnl = getClosedPnlValue(posEntry, solMode);
+  const deposit = solMode
+    ? maybeNum(posEntry?.allTimeDeposits?.total?.sol)
+    : maybeNum(posEntry?.allTimeDeposits?.total?.usd);
+  return deposit && deposit > 0 ? (pnl / deposit) * 100 : 0;
+}
+
+async function recordDegradedClosePerformance({
+  position_address,
+  poolAddress,
+  poolName = null,
+  closeBaseMint = null,
+  tracked,
+  reason,
+}) {
+  if (!tracked) return null;
+  const deployedAt = new Date(tracked.deployed_at).getTime();
+  const minutesHeld = Number.isFinite(deployedAt)
+    ? Math.floor((Date.now() - deployedAt) / 60000)
+    : 0;
+  const minutesOOR = tracked.out_of_range_since
+    ? Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000)
+    : 0;
+
+  const sm = config.management.solMode;
+  const cachedPos = _positionsCache?.positions?.find((p) => p.position === position_address);
+  let pnlUsd = 0;
+  let pnlPct = 0;
+  let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0);
+  let initialUsd = sm ? (tracked.amount_sol || 0) : (tracked.initial_value_usd || 0);
+  let finalValueUsd = initialUsd;
+
+  if (cachedPos) {
+    pnlUsd = sm
+      ? (cachedPos.pnl_usd ?? 0)
+      : (cachedPos.pnl_true_usd ?? cachedPos.pnl_usd ?? 0);
+    pnlPct = cachedPos.pnl_pct ?? 0;
+    feesUsd = sm
+      ? (cachedPos.collected_fees_usd || 0) + (cachedPos.unclaimed_fees_usd || 0)
+      : (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
+    initialUsd = sm
+      ? (tracked.amount_sol || initialUsd)
+      : (tracked.initial_value_usd || initialUsd);
+    if (initialUsd > 0) {
+      finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+      pnlPct = (pnlUsd / initialUsd) * 100;
+    } else {
+      finalValueUsd = sm
+        ? (cachedPos.total_value_usd ?? 0)
+        : (cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0);
+      initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlUsd);
+    }
+  }
+
+  const baseMint = closeBaseMint ?? tracked.base_mint ?? null;
+  const signalSnapshot = resolvePerformanceSignalSnapshot({
+    poolAddress,
+    baseMint,
+    tracked,
+  });
+
+  await recordPerformance({
+    position: position_address,
+    pool: poolAddress,
+    pool_name: tracked.pool_name || poolName || poolAddress.slice(0, 8),
+    base_mint: baseMint,
+    strategy: tracked.strategy,
+    strategy_profile: tracked.strategy_profile ?? null,
+    bin_range: tracked.bin_range,
+    bin_step: tracked.bin_step || null,
+    volatility: tracked.volatility || null,
+    fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+    organic_score: tracked.organic_score || null,
+    amount_sol: tracked.amount_sol,
+    fees_earned_usd: feesUsd,
+    final_value_usd: finalValueUsd,
+    initial_value_usd: initialUsd,
+    minutes_in_range: minutesHeld - minutesOOR,
+    minutes_held: minutesHeld,
+    close_reason: reason || "agent decision",
+    signal_snapshot: signalSnapshot,
+    shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+  });
+  appendMainCandidateOutcomeSnapshot({
+    tracked,
+    outcome: {
+      position: position_address,
+      pool: poolAddress,
+      pool_name: tracked.pool_name || poolName || poolAddress.slice(0, 8),
+      close_reason: reason || "agent decision",
+      pnl_pct: pnlPct,
+      pnl_usd: pnlUsd,
+      minutes_held: minutesHeld,
+    },
+    source: "dlmm.close.degraded_success",
+  });
+
+  return {
+    pnlUsd,
+    pnlPct,
+    feesUsd,
+    finalValueUsd,
+    initialUsd,
+    minutesHeld,
+    minutesOOR,
+    baseMint,
+    usedCachedPosition: !!cachedPos,
+  };
+}
+
+function deriveOpenPnlPct(binData, solMode = false) {
+  if (!binData) return null;
+
+  const deposit = solMode
+    ? safeNum(binData.allTimeDeposits?.total?.sol)
+    : safeNum(binData.allTimeDeposits?.total?.usd);
+  if (deposit <= 0) return null;
+
+  const balances = solMode
+    ? safeNum(binData.unrealizedPnl?.balancesSol)
+    : safeNum(binData.unrealizedPnl?.balances);
+  const unclaimedFees = solMode
+    ? safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol)
+    : safeNum(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd) + safeNum(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd);
+  const withdrawals = solMode
+    ? safeNum(binData.allTimeWithdrawals?.total?.sol)
+    : safeNum(binData.allTimeWithdrawals?.total?.usd);
+  const fees = solMode
+    ? safeNum(binData.allTimeFees?.total?.sol)
+    : safeNum(binData.allTimeFees?.total?.usd);
+
+  const pnl = balances + unclaimedFees + withdrawals + fees - deposit;
+  return (pnl / deposit) * 100;
+}
+
+function deriveLpAgentPnlPct(lpData, solMode = false) {
+  if (!lpData) return null;
+  const deposit = solMode ? safeNum(lpData.inputNative) : safeNum(lpData.inputValue);
+  if (deposit <= 0) return null;
+
+  const currentValue = solMode ? safeNum(lpData.valueNative) : safeNum(lpData.value);
+  const unclaimedFees = solMode ? safeNum(lpData.unCollectedFeeNative) : safeNum(lpData.unCollectedFee);
+  const pnl = currentValue + unclaimedFees - deposit;
+  return (pnl / deposit) * 100;
+}
+
+async function fetchRawOpenPositionsFromMeridian({ walletAddress, agentId }) {
+  const search = new URLSearchParams({
+    owner: walletAddress,
+    agentId: agentId || "agent-local",
+  });
+  if (!_relayRetryEvidenceMarkerLogged) {
+    log("positions", "Agent Meridian raw relay retry evidence enabled: open-position budget=45000ms perAttempt=20000ms maxAttempts=2 fallback=LPAgent.io direct/Meteora portfolio");
+    _relayRetryEvidenceMarkerLogged = true;
+  }
+  const payload = await meridianJson(`/positions/open/raw?${search.toString()}`, {
+    headers: config.api.publicApiKey ? { "x-api-key": config.api.publicApiKey } : {},
+    retry: {
+      maxElapsedMs: 45_000,
+      perAttemptTimeoutMs: 20_000,
+      maxAttempts: 2,
+    },
+  });
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const byPosition = {};
+  for (const row of rows) {
+    const addr = row?.position || row?.id || row?.tokenId;
+    if (addr) byPosition[addr] = row;
+  }
+  return {
+    ...payload,
+    data: rows,
+    byPosition,
+    request_id: payload?.request_id || payload?.requestId || null,
+  };
+}
+
+function isRpcRateLimitReason(reason) {
+  const text = String(reason || "").toLowerCase();
+  return text.includes("429") || text.includes("too many requests") || text.includes("max usage reached");
+}
+
+function getCachedPositionOwner(positionAddress, maxAgeMs) {
+  const cached = positionOwnerCache.get(positionAddress);
+  if (!cached) return null;
+  if (Date.now() - cached.checkedAt > maxAgeMs) return null;
+  return {
+    verified: cached.verified,
+    owner: cached.owner,
+    reason: cached.reason,
+    cached: true,
+  };
+}
+
+function cacheVerifiedPositionOwner(positionAddress, ownership) {
+  if (!ownership?.verified) return;
+  positionOwnerCache.set(positionAddress, {
+    verified: true,
+    owner: ownership.owner || null,
+    reason: ownership.reason || null,
+    checkedAt: Date.now(),
+  });
+}
+
+function shouldLogPositionOwnerWarning(sourceLabel, positionAddress, reason) {
+  const reasonBucket = isRpcRateLimitReason(reason) ? "rpc-rate-limit" : String(reason || "unknown");
+  const key = `${sourceLabel}:${positionAddress}:${reasonBucket}`;
+  const now = Date.now();
+  const previous = positionOwnerWarningCache.get(key) || 0;
+  if (now - previous < POSITION_OWNER_WARNING_TTL_MS) return false;
+  positionOwnerWarningCache.set(key, now);
+  return true;
+}
+
+async function getDlmmPositionWalletOwner(positionAddress) {
+  const freshCached = getCachedPositionOwner(positionAddress, POSITION_OWNER_CACHE_TTL_MS);
+  if (freshCached) return freshCached;
+
+  try {
+    const account = await withRpcPriority(
+      RPC_PRIORITY.MANAGEMENT,
+      "helius_rpc.position_owner_check",
+      () => getConnection().getAccountInfo(new PublicKey(positionAddress), "confirmed"),
+    );
+    if (!account) {
+      const ownership = { verified: true, owner: null, reason: "account missing or closed" };
+      cacheVerifiedPositionOwner(positionAddress, ownership);
+      return ownership;
+    }
+    if (!account.owner.equals(getDlmmProgramId())) {
+      const ownership = { verified: true, owner: null, reason: `account owned by ${account.owner.toString()}` };
+      cacheVerifiedPositionOwner(positionAddress, ownership);
+      return ownership;
+    }
+    if (!account.data || account.data.length < 72) {
+      return { verified: false, owner: null, reason: "position account data too short" };
+    }
+    const ownership = {
+      verified: true,
+      owner: new PublicKey(account.data.subarray(40, 72)).toString(),
+      reason: null,
+    };
+    cacheVerifiedPositionOwner(positionAddress, ownership);
+    return ownership;
+  } catch (error) {
+    const staleCached = isRpcRateLimitReason(error.message)
+      ? getCachedPositionOwner(positionAddress, POSITION_OWNER_STALE_ON_429_TTL_MS)
+      : null;
+    if (staleCached) {
+      return {
+        ...staleCached,
+        stale: true,
+        reason: `cached owner verification after RPC rate limit: ${error.message}`,
+      };
+    }
+    return { verified: false, owner: null, reason: error.message };
+  }
+}
+
+async function filterPositionsByWalletOwner(walletAddress, positions, sourceLabel) {
+  const livePositions = Array.isArray(positions) ? positions : [];
+  const filtered = [];
+  const rejected = [];
+
+  for (const position of livePositions) {
+    const positionAddress = position?.position;
+    if (!positionAddress) {
+      rejected.push({ label: "missing-position", reason: "missing position address" });
+      continue;
+    }
+
+    const ownership = await getDlmmPositionWalletOwner(positionAddress);
+    if (!ownership.verified) {
+      if (shouldLogPositionOwnerWarning(sourceLabel, positionAddress, ownership.reason)) {
+        log("positions_warn", `${sourceLabel}: could not verify owner for ${positionAddress.slice(0, 8)} (${ownership.reason}) — keeping position`);
+      }
+      filtered.push(position);
+      continue;
+    }
+
+    if (ownership.owner !== walletAddress) {
+      rejected.push({
+        label: `${position.pair || positionAddress.slice(0, 8)}:${positionAddress.slice(0, 8)}`,
+        reason: ownership.owner ? `owner ${ownership.owner.slice(0, 8)}` : ownership.reason,
+      });
+      continue;
+    }
+
+    filtered.push(position);
+  }
+
+  if (rejected.length > 0) {
+    const sample = rejected.slice(0, 3).map((entry) => `${entry.label} (${entry.reason})`).join(", ");
+    log("positions_warn", `${sourceLabel}: rejected ${rejected.length} foreign/closed position(s): ${sample}`);
+  }
+
+  return filtered;
+}
+
+async function buildFilteredPositionsResult(walletAddress, positions, sourceLabel) {
+  const livePositions = await filterPositionsByWalletOwner(walletAddress, positions, sourceLabel);
+  const { positions: filteredPositions, suppressed } = reconcileGhostPositions(livePositions);
+  if (suppressed.length > 0) {
+    log("positions", `${sourceLabel}: suppressed ${suppressed.length} ghost position(s)`);
+  }
+  syncOpenPositions(filteredPositions.map((position) => position.position));
+  return {
+    wallet: walletAddress,
+    total_positions: filteredPositions.length,
+    positions: filteredPositions,
+    ghost_positions: suppressed,
+  };
+}
+
+function isRpcPnlSource(source) {
+  return String(source || "legacy").toLowerCase() === "rpc";
+}
+
+function isRpcPnlShadowSource(source) {
+  return String(source || "legacy").toLowerCase() === "shadow";
+}
+
+function rpcResultHasDegradedRows(result) {
+  return (result?.positions || []).some((position) =>
+    position?.pnl_confidence !== "trusted" || position?.pnl_pct_suspicious === true
+  );
+}
+
+function maybeRecordRpcPnlShadowComparison(walletAddress, legacyResult, { silent = false } = {}) {
+  if (!isRpcPnlShadowSource(config.pnl?.source)) return;
+  recordRpcPnlShadowComparison(walletAddress, legacyResult)
+    .then((shadow) => {
+      if (!silent) {
+        log("rpc_pnl", `Shadow comparison wrote ${shadow.rows} row(s) to ${shadow.file}`);
+      }
+    })
+    .catch((error) => log("rpc_pnl_warn", `Shadow comparison failed: ${error.message}`));
+}
+
+// ─── Get My Positions ──────────────────────────────────────────
+export async function getMyPositions({ force = false, silent = false } = {}) {
+  if (!force && _positionsCache && Date.now() - _positionsCacheAt < POSITIONS_CACHE_TTL) {
+    return _positionsCache;
+  }
+  if (_positionsInflight) return _positionsInflight;
+
+  let walletAddress;
+  try {
+    walletAddress = getWallet().publicKey.toString();
+  } catch {
+    return { wallet: null, total_positions: 0, positions: [], error: "Wallet not configured" };
+  }
+
+  _positionsInflight = (async () => { try {
+    if (isRpcPnlSource(config.pnl?.source)) {
+      try {
+        if (!silent) log("positions", `Computing open positions via RPC PnL (${config.pnl.rpcUrl ? "configured" : "default"})...`);
+        const rpcResult = await computeRpcPositions(walletAddress);
+        const trackedOpenCount = getTrackedPositions(true).length;
+        if (rpcResult.positions.length === 0 && trackedOpenCount > 0) {
+          throw new Error("RPC PnL returned zero positions while tracked positions are open");
+        }
+        if (rpcResultHasDegradedRows(rpcResult)) {
+          throw new Error("RPC PnL returned degraded authoritative rows");
+        }
+        const result = {
+          ...(await buildFilteredPositionsResult(walletAddress, rpcResult.positions, "RPC PnL")),
+          source: "rpc",
+          complete: rpcResult.complete === true,
+        };
+        _positionsCache = result;
+        _positionsCacheAt = Date.now();
+        return result;
+      } catch (error) {
+        log("positions_warn", `RPC PnL source unavailable; falling back to legacy positions: ${error.message}`);
+      }
+    }
+
+    let relayLpAgentByPosition = null;
+    let relayRequestId = null;
+    if (shouldUseLpAgentRelay()) {
+      try {
+        if (!silent) log("positions", "Fetching raw LPAgent open positions via Agent Meridian relay...");
+        const result = await fetchRawOpenPositionsFromMeridian({
+          walletAddress,
+          agentId: config.hiveMind.agentId || "agent-local",
+        });
+        relayLpAgentByPosition = result.byPosition || {};
+        relayRequestId = result.requestId || result.request_id || null;
+      } catch (error) {
+        const retryEvidence = describeRetryEvidence(error);
+        log("positions_warn", `Agent Meridian raw relay failed; trying LPAgent.io direct: ${error.message}${retryEvidence ? ` (${retryEvidence})` : ""}`);
+      }
+    }
+
+    // ─── Fallback 1: LPAgent.io direct ─────────────────────────
+    // LPAgent returns pool + position addresses + PnL. Still calls Meteora PnL per pool for bin IDs.
+    // Only runs if LPAGENT_API_KEY is present and returns at least 1 position.
+    if (relayLpAgentByPosition !== null || process.env.LPAGENT_API_KEY) {
+      const sourceLabel = relayLpAgentByPosition !== null ? "Agent Meridian raw relay" : "LPAgent.io direct";
+      try {
+        if (!silent) log("positions", `${sourceLabel}: enriching open positions locally...`);
+        const lpAgentByPos = relayLpAgentByPosition !== null
+          ? relayLpAgentByPosition
+          : await fetchLpAgentOpenPositions(walletAddress);
+        const posAddresses = Object.keys(lpAgentByPos);
+        if (posAddresses.length > 0) {
+          // Group by pool address so we can batch-fetch Meteora bin data
+          const byPool = {};
+          for (const [posAddr, lpData] of Object.entries(lpAgentByPos)) {
+            const poolAddr = lpData.pool;
+            if (poolAddr) {
+              if (!byPool[poolAddr]) byPool[poolAddr] = [];
+              byPool[poolAddr].push({ posAddr, lpData });
+            }
+          }
+          const poolAddresses = Object.keys(byPool);
+          const pnlMaps = await Promise.all(poolAddresses.map(p => fetchDlmmPnlForPool(p, walletAddress)));
+          const binDataByPool = {};
+          poolAddresses.forEach((p, i) => { binDataByPool[p] = pnlMaps[i]; });
+
+          const positions = [];
+          for (const [poolAddr, posEntries] of Object.entries(byPool)) {
+            for (const { posAddr, lpData } of posEntries) {
+              const tracked = getTrackedPosition(posAddr);
+              const binData = binDataByPool[poolAddr]?.[posAddr];
+              const lowerBin  = binData?.lowerBinId      ?? lpData.tickLower          ?? tracked?.bin_range?.min    ?? null;
+              const upperBin  = binData?.upperBinId      ?? lpData.tickUpper          ?? tracked?.bin_range?.max    ?? null;
+              const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+              const lowerBinSource = binData?.lowerBinId != null ? "live_bin_data" : lpData.tickLower != null ? "live_position_data" : tracked?.bin_range?.min != null ? "tracked_state" : null;
+              const upperBinSource = binData?.upperBinId != null ? "live_bin_data" : lpData.tickUpper != null ? "live_position_data" : tracked?.bin_range?.max != null ? "tracked_state" : null;
+              const activeBinSource = binData?.poolActiveBinId != null ? "live_bin_data" : tracked?.bin_range?.active != null ? "tracked_state" : null;
+              const rangeState = buildEffectiveRangeState({
+                source_in_range: !!lpData.inRange,
+                lower_bin: lowerBin,
+                upper_bin: upperBin,
+                active_bin: activeBin,
+                lower_bin_source: lowerBinSource,
+                upper_bin_source: upperBinSource,
+                active_bin_source: activeBinSource,
+              });
+              if (rangeState.effective_in_range === false) markOutOfRange(posAddr);
+              else if (rangeState.effective_in_range === true) markInRange(posAddr);
+              const ageFromState = tracked?.deployed_at
+                ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
+                : null;
+              const reportedPnlPct = parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0));
+              const derivedPnlPct  = deriveLpAgentPnlPct(lpData, config.management.solMode);
+
+              positions.push({
+                position:               posAddr,
+                pool:                   poolAddr,
+                pair:                   tracked?.pool_name || lpData.pairName || "?/SOL",
+                base_mint:              lpData.token0,
+                lower_bin:              lowerBin,
+                upper_bin:              upperBin,
+                active_bin:             activeBin,
+                in_range:               !!lpData.inRange,
+                source_in_range:        rangeState.source_in_range,
+                effective_in_range:     rangeState.effective_in_range,
+                range_side:             rangeState.derived_range_side,
+                derived_in_range:       rangeState.derived_in_range,
+                range_state_mismatch:   rangeState.range_state_mismatch,
+                range_state_source:     rangeState.range_state_source,
+                lower_bin_source:       rangeState.lower_bin_source,
+                upper_bin_source:       rangeState.upper_bin_source,
+                active_bin_source:      rangeState.active_bin_source,
+                unclaimed_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.unCollectedFeeNative  : lpData.unCollectedFee)  * 10000) / 10000,
+                total_value_usd:        Math.round(safeNum(config.management.solMode ? lpData.valueNative           : lpData.value)           * 10000) / 10000,
+                total_value_true_usd:   Math.round(safeNum(lpData.value)                                                                      * 10000) / 10000,
+                collected_fees_usd:     Math.round(safeNum(config.management.solMode ? lpData.collectedFeeNative    : lpData.collectedFee)    * 10000) / 10000,
+                collected_fees_true_usd: Math.round(safeNum(lpData.collectedFee)                                                              * 10000) / 10000,
+                pnl_usd:                Math.round(safeNum(config.management.solMode ? lpData.pnl?.valueNative      : lpData.pnl?.value)      * 10000) / 10000,
+                pnl_true_usd:           Math.round(safeNum(lpData.pnl?.value)                                                                 * 10000) / 10000,
+                pnl_pct:                Math.round(reportedPnlPct * 100) / 100,
+                pnl_pct_derived:        derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
+                pnl_pct_diff:           null,
+                pnl_pct_suspicious:     false,
+                unclaimed_fees_true_usd: Math.round(safeNum(lpData.unCollectedFee)                                                            * 10000) / 10000,
+                fee_per_tvl_24h:        binData ? Math.round(parseFloat(binData.feePerTvl24h || 0) * 100) / 100 : null,
+                age_minutes:            lpData.ageHour != null ? Math.round(lpData.ageHour * 60) : ageFromState,
+                minutes_out_of_range:   minutesOutOfRange(posAddr),
+                note:                   tracked?.note ?? null,
+              });
+            }
+          }
+
+          log("positions", `${sourceLabel}: ${positions.length} position(s) across ${poolAddresses.length} pool(s)`);
+          _positionsCache = {
+            ...(await buildFilteredPositionsResult(walletAddress, positions, sourceLabel)),
+            request_id: relayRequestId,
+          };
+          _positionsCacheAt = Date.now();
+          maybeRecordRpcPnlShadowComparison(walletAddress, _positionsCache, { silent });
+          return _positionsCache;
+        }
+        log("positions_warn", `${sourceLabel}: 0 positions returned — falling through to Meteora portfolio`);
+      } catch (lpErr) {
+        log("positions_warn", `${sourceLabel} local enrichment failed; falling back to Meteora portfolio: ${lpErr.message}`);
+      }
+    }
+
+    // ─── Fallback 2: Meteora portfolio API ──────────────────────
+    // Portfolio API discovers open pools/positions for this wallet.
+    // Detailed range data stays on Meteora PnL API; value/PnL can be overridden by LPAgent below.
+    if (!silent) log("positions", "Fetching portfolio via Meteora portfolio API...");
+    const portfolioUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddress}`;
+    const res = await fetch(portfolioUrl);
+    if (!res.ok) throw new Error(`Portfolio API ${res.status}: ${await res.text().catch(() => "")}`);
+    const portfolio = await res.json();
+
+    const pools = portfolio.pools || [];
+    log("positions", `Found ${pools.length} pool(s) with open positions`);
+
+    // Fetch bin data (lowerBinId, upperBinId, poolActiveBinId) for all pools in parallel
+    // Needed for rules 3 & 4 (active_bin vs upper_bin comparison)
+    const binDataByPool = {};
+    const pnlMaps = await Promise.all(pools.map(pool => fetchDlmmPnlForPool(pool.poolAddress, walletAddress)));
+    pools.forEach((pool, i) => { binDataByPool[pool.poolAddress] = pnlMaps[i]; });
+    const lpAgentByPosition = relayLpAgentByPosition !== null
+      ? relayLpAgentByPosition
+      : await fetchLpAgentOpenPositions(walletAddress);
+
+    const positions = [];
+    for (const pool of pools) {
+      for (const positionAddress of (pool.listPositions || [])) {
+        const tracked = getTrackedPosition(positionAddress);
+        const isOOR = pool.outOfRange || pool.positionsOutOfRange?.includes(positionAddress);
+
+        // Bin data: from supplemental PnL call (OOR) or tracked state (in-range)
+        const binData = binDataByPool[pool.poolAddress]?.[positionAddress];
+        if (!binData) {
+          log("positions_warn", `PnL API missing data for ${positionAddress.slice(0, 8)} in pool ${pool.poolAddress.slice(0, 8)} — using portfolio only for open-position discovery`);
+        }
+        const lowerBin  = binData?.lowerBinId      ?? tracked?.bin_range?.min ?? null;
+        const upperBin  = binData?.upperBinId      ?? tracked?.bin_range?.max ?? null;
+        const activeBin = binData?.poolActiveBinId ?? tracked?.bin_range?.active ?? null;
+        const lowerBinSource = binData?.lowerBinId != null ? "live_bin_data" : tracked?.bin_range?.min != null ? "tracked_state" : null;
+        const upperBinSource = binData?.upperBinId != null ? "live_bin_data" : tracked?.bin_range?.max != null ? "tracked_state" : null;
+        const activeBinSource = binData?.poolActiveBinId != null ? "live_bin_data" : tracked?.bin_range?.active != null ? "tracked_state" : null;
+        const sourceInRange = binData ? !binData.isOutOfRange : !isOOR;
+        const rangeState = buildEffectiveRangeState({
+          source_in_range: sourceInRange,
+          lower_bin: lowerBin,
+          upper_bin: upperBin,
+          active_bin: activeBin,
+          lower_bin_source: lowerBinSource,
+          upper_bin_source: upperBinSource,
+          active_bin_source: activeBinSource,
+        });
+        if (rangeState.effective_in_range === false) markOutOfRange(positionAddress);
+        else if (rangeState.effective_in_range === true) markInRange(positionAddress);
+        const lpData = lpAgentByPosition[positionAddress] || null;
+
+        const ageFromState = tracked?.deployed_at
+          ? Math.floor((Date.now() - new Date(tracked.deployed_at).getTime()) / 60000)
+          : null;
+        const reportedPnlPct = lpData
+          ? parseFloat(config.management.solMode ? (lpData.pnl?.percentNative || 0) : (lpData.pnl?.percent || 0))
+          : binData
+            ? parseFloat(config.management.solMode ? (binData.pnlSolPctChange || 0) : (binData.pnlPctChange || 0))
+            : null;
+        const derivedPnlPct = lpData
+          ? deriveLpAgentPnlPct(lpData, config.management.solMode)
+          : binData
+            ? deriveOpenPnlPct(binData, config.management.solMode)
+            : null;
+        const pnlPctDiff = reportedPnlPct != null && derivedPnlPct != null
+          ? Math.abs(reportedPnlPct - derivedPnlPct)
+          : null;
+        const pnlPctSuspicious = pnlPctDiff != null && pnlPctDiff > (config.management.pnlSanityMaxDiffPct ?? 5);
+        if (pnlPctSuspicious) {
+          log("positions_warn", `Suspicious pnl_pct for ${positionAddress.slice(0, 8)}: reported=${reportedPnlPct.toFixed(2)} derived=${derivedPnlPct.toFixed(2)} diff=${pnlPctDiff.toFixed(2)}`);
+        }
+
+        positions.push({
+          position:           positionAddress,
+          pool:               pool.poolAddress,
+          pair:               tracked?.pool_name || `${pool.tokenX}/${pool.tokenY}`,
+          base_mint:          pool.tokenXMint,
+          lower_bin:          lowerBin,
+          upper_bin:          upperBin,
+          active_bin:         activeBin,
+          in_range:           sourceInRange,
+          source_in_range:    rangeState.source_in_range,
+          effective_in_range: rangeState.effective_in_range,
+          range_side:         rangeState.derived_range_side,
+          derived_in_range:   rangeState.derived_in_range,
+          range_state_mismatch: rangeState.range_state_mismatch,
+          range_state_source: rangeState.range_state_source,
+          lower_bin_source:   rangeState.lower_bin_source,
+          upper_bin_source:   rangeState.upper_bin_source,
+          active_bin_source:  rangeState.active_bin_source,
+          unclaimed_fees_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.unCollectedFeeNative)
+                  : safeNum(lpData.unCollectedFee)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round((
+                config.management.solMode
+                  ? parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.amountSol || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.amountSol || 0)
+                  : parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)
+              ) * 10000) / 10000
+            : null,
+          total_value_usd:    lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.valueNative)
+                  : safeNum(lpData.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round((
+                config.management.solMode
+                  ? parseFloat(binData.unrealizedPnl?.balancesSol || 0)
+                  : parseFloat(binData.unrealizedPnl?.balances || 0)
+              ) * 10000) / 10000
+            : null,
+          // Always-USD fields for internal accounting and lesson recording.
+          total_value_true_usd: lpData
+            ? Math.round(safeNum(lpData.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.unrealizedPnl?.balances || 0) * 10000) / 10000
+            : null,
+          collected_fees_usd: lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.collectedFeeNative)
+                  : safeNum(lpData.collectedFee)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.allTimeFees?.total?.sol || 0) : (binData.allTimeFees?.total?.usd || 0)) * 10000) / 10000
+            : null,
+          collected_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.collectedFee) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.allTimeFees?.total?.usd || 0) * 10000) / 10000
+            : null,
+          pnl_usd:            lpData
+            ? Math.round((
+                config.management.solMode
+                  ? safeNum(lpData.pnl?.valueNative)
+                  : safeNum(lpData.pnl?.value)
+              ) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(config.management.solMode ? (binData.pnlSol || 0) : (binData.pnlUsd || 0)) * 10000) / 10000
+            : null,
+          pnl_true_usd:       lpData
+            ? Math.round(safeNum(lpData.pnl?.value) * 10000) / 10000
+            : binData
+            ? Math.round(parseFloat(binData.pnlUsd || 0) * 10000) / 10000
+            : null,
+          pnl_pct:            (lpData || binData)
+            ? Math.round(reportedPnlPct * 100) / 100
+            : null,
+          pnl_pct_derived:    derivedPnlPct != null ? Math.round(derivedPnlPct * 100) / 100 : null,
+          pnl_pct_diff:       pnlPctDiff != null ? Math.round(pnlPctDiff * 100) / 100 : null,
+          pnl_pct_suspicious: !!pnlPctSuspicious,
+          unclaimed_fees_true_usd: lpData
+            ? Math.round(safeNum(lpData.unCollectedFee) * 10000) / 10000
+            : binData
+            ? Math.round((parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(binData.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) * 10000) / 10000
+            : null,
+          fee_per_tvl_24h:    binData
+            ? Math.round(parseFloat(binData.feePerTvl24h || 0) * 100) / 100
+            : null,
+          age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
+          minutes_out_of_range: minutesOutOfRange(positionAddress),
+          instruction:        tracked?.instruction ?? null,
+        });
+      }
+    }
+
+    const result = {
+      ...(await buildFilteredPositionsResult(walletAddress, positions, relayLpAgentByPosition !== null ? "Agent Meridian raw relay + Meteora portfolio" : "Meteora portfolio")),
+      request_id: relayRequestId,
+    };
+    _positionsCache = result;
+    _positionsCacheAt = Date.now();
+    maybeRecordRpcPnlShadowComparison(walletAddress, result, { silent });
+    return result;
+  } catch (error) {
+    log("positions_error", `Portfolio fetch failed: ${error.stack || error.message}`);
+    return { wallet: walletAddress, total_positions: 0, positions: [], error: error.message };
+  } finally {
+    _positionsInflight = null;
+  }
+  })();
+  return _positionsInflight;
+}
+
+// ─── Get Positions for Any Wallet ─────────────────────────────
+export async function getWalletPositions({ wallet_address }) {
+  try {
+    const DLMM_PROGRAM = new PublicKey("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+
+    const accounts = await getConnection().getProgramAccounts(DLMM_PROGRAM, {
+      filters: [{ memcmp: { offset: 40, bytes: new PublicKey(wallet_address).toBase58() } }],
+    });
+
+    if (accounts.length === 0) {
+      return { wallet: wallet_address, total_positions: 0, positions: [] };
+    }
+
+    const raw = accounts.map((acc) => ({
+      position: acc.pubkey.toBase58(),
+      pool: new PublicKey(acc.account.data.slice(8, 40)).toBase58(),
+    }));
+
+    // Enrich with PnL API
+    const uniquePools = [...new Set(raw.map((r) => r.pool))];
+    const pnlMaps = await Promise.all(uniquePools.map((pool) => fetchDlmmPnlForPool(pool, wallet_address)));
+    const pnlByPool = {};
+    uniquePools.forEach((pool, i) => { pnlByPool[pool] = pnlMaps[i]; });
+
+    const positions = raw.map((r) => {
+      const p = pnlByPool[r.pool]?.[r.position] || null;
+
+      return {
+        position:           r.position,
+        pool:               r.pool,
+        lower_bin:          p?.lowerBinId      ?? null,
+        upper_bin:          p?.upperBinId      ?? null,
+        active_bin:         p?.poolActiveBinId ?? null,
+        in_range:           p ? !p.isOutOfRange : null,
+        unclaimed_fees_usd: Math.round((p ? (parseFloat(p.unrealizedPnl?.unclaimedFeeTokenX?.usd || 0) + parseFloat(p.unrealizedPnl?.unclaimedFeeTokenY?.usd || 0)) : 0) * 100) / 100,
+        total_value_usd:    Math.round((p ? parseFloat(p.unrealizedPnl?.balances || 0) : 0) * 100) / 100,
+        pnl_usd:            Math.round((p?.pnlUsd ?? 0) * 100) / 100,
+        pnl_pct:            Math.round((p?.pnlPctChange ?? 0) * 100) / 100,
+        age_minutes:        p?.createdAt ? Math.floor((Date.now() - p.createdAt * 1000) / 60000) : null,
+      };
+    });
+
+    return { wallet: wallet_address, total_positions: positions.length, positions };
+  } catch (error) {
+    log("wallet_positions_error", error.message);
+    return { wallet: wallet_address, total_positions: 0, positions: [], error: error.message };
+  }
+}
+
+// ─── Search Pools by Query ─────────────────────────────────────
+export async function searchPools({ query, limit = 10 }) {
+  const url = `https://dlmm.datapi.meteora.ag/pools?query=${encodeURIComponent(query)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Pool search API error: ${res.status} ${res.statusText}`);
+  const data = await res.json();
+  const pools = (Array.isArray(data) ? data : data.data || []).slice(0, limit);
+  return {
+    query,
+    total: pools.length,
+    pools: pools.map((p) => ({
+      pool: p.address || p.pool_address,
+      name: p.name,
+      bin_step: p.bin_step ?? p.dlmm_params?.bin_step,
+      fee_pct: p.base_fee_percentage ?? p.fee_pct,
+      tvl: p.liquidity,
+      volume_24h: p.trade_volume_24h,
+      token_x: { symbol: p.mint_x_symbol ?? p.token_x?.symbol, mint: p.mint_x ?? p.token_x?.address },
+      token_y: { symbol: p.mint_y_symbol ?? p.token_y?.symbol, mint: p.mint_y ?? p.token_y?.address },
+    })),
+  };
+}
+
+// ─── Claim Fees ────────────────────────────────────────────────
+export async function claimFees({ position_address }) {
+  position_address = normalizeMint(position_address);
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, would_claim: position_address, message: "DRY RUN — no transaction sent" };
+  }
+
+  const tracked = getTrackedPosition(position_address);
+  if (tracked?.closed) {
+    return { success: false, error: "Position already closed — fees were claimed during close" };
+  }
+
+  try {
+    log("claim", `Claiming fees for position: ${position_address}`);
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    // Clear cached pool so SDK loads fresh position fee state
+    poolCache.delete(poolAddress.toString());
+    const pool = await getPool(poolAddress);
+
+    const positionData = await pool.getPosition(new PublicKey(position_address));
+    const txs = await pool.claimSwapFee({
+      owner: wallet.publicKey,
+      position: positionData,
+    });
+
+    if (!txs || txs.length === 0) {
+      return { success: false, error: "No fees to claim — transaction is empty" };
+    }
+
+    const txHashes = [];
+    for (const tx of txs) {
+      const txHash = await sendAndConfirmTransactionWithPriority(
+        getConnection(),
+        tx,
+        [wallet],
+        {},
+        { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.claim_send" },
+      );
+      txHashes.push(txHash);
+    }
+    log("claim", `SUCCESS txs: ${txHashes.join(", ")}`);
+    _positionsCacheAt = 0; // invalidate cache after claim
+    recordClaim(position_address);
+
+    return { success: true, position: position_address, txs: txHashes, base_mint: pool.lbPair.tokenXMint.toString() };
+  } catch (error) {
+    log("claim_error", error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ─── Close Position ────────────────────────────────────────────
+export async function closePosition({ position_address, reason, urgent }) {
+  position_address = normalizeMint(position_address);
+  if (process.env.DRY_RUN === "true") {
+    return { dry_run: true, would_close: position_address, message: "DRY RUN — no transaction sent" };
+  }
+
+  const tracked = getTrackedPosition(position_address);
+  let closeModeDecision = null;
+  let closeModeAudit = null;
+
+  try {
+    log("close", `Closing position: ${position_address}`);
+    const wallet = getWallet();
+    const poolAddress = await lookupPoolForPosition(position_address, wallet.publicKey.toString());
+    const poolMeta = await getPoolMetadata(poolAddress);
+    closeModeDecision = selectAdaptiveCloseMode({
+      reason,
+      urgent,
+      relayEnabled: shouldUseLpAgentRelay(),
+      managementConfig: config.management,
+    });
+    closeModeAudit = createCloseModeAudit(position_address, reason, urgent, closeModeDecision);
+    const fastZapDeadlineAt = closeModeDecision.shouldUseFastZapBudget
+      ? Date.now() + closeModeDecision.fastZapTimeoutMs
+      : null;
+
+    log(
+      "close",
+      `Adaptive close mode: enabled=${closeModeDecision.enabled} exit=${closeModeDecision.exitType} mode=${closeModeDecision.selectedMode} reason="${reason || "agent decision"}"`,
+    );
+    if (urgent && shouldUseLpAgentRelay() && !closeModeDecision.shouldAttemptRelay) {
+      log("close", "Urgent close: skipping relay zap-out and using local close-liquidity-first path");
+    }
+    if (closeModeDecision.shouldAttemptRelay) {
+      let relaySubmitted = false;
+      const relayStartedAt = Date.now();
+      try {
+        closeModeAudit.zap_attempted = true;
+        const pool = await getPool(poolAddress);
+        const relayAllowedDebitMints = [
+          pool.lbPair.tokenXMint.toString(),
+          pool.lbPair.tokenYMint.toString(),
+          config.tokens.SOL,
+        ];
+        const livePositions = await getMyPositions({ force: true, silent: true });
+        const livePosition = livePositions?.positions?.find((position) => position.position === position_address);
+        const closeFromBinId = livePosition?.lower_bin ?? tracked?.bin_range?.min ?? -887272;
+        const closeToBinId = livePosition?.upper_bin ?? tracked?.bin_range?.max ?? 887272;
+        const closeOutput = "allToken1";
+
+        const quotes = await meridianJsonAdaptive("/execution/zap-out/quotes", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            agentId: config.hiveMind.agentId || "agent-local",
+            positionId: position_address,
+            bps: 10000,
+          }),
+        }, closeModeAudit, "quote", fastZapDeadlineAt);
+
+        const order = await meridianJsonAdaptive("/execution/zap-out/order", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            agentId: config.hiveMind.agentId || "agent-local",
+            idempotencyKey: `close:${position_address}:10000`,
+            positionId: position_address,
+            owner: wallet.publicKey.toString(),
+            bps: 10000,
+            slippageBps: 5000,
+            output: closeOutput,
+            provider: "OKX",
+            type: "meteora",
+            fromBinId: closeFromBinId,
+            toBinId: closeToBinId,
+            quoteRequestId: quotes.requestId,
+          }),
+        }, closeModeAudit, "order", fastZapDeadlineAt);
+
+        const closeUnsigned = order?.order?.transactions?.close || [];
+        const swapUnsigned = order?.order?.transactions?.swap || [];
+        if (closeUnsigned.length + swapUnsigned.length === 0) {
+          throw new Error(`Relay close returned no transactions for ${position_address}.`);
+        }
+
+        const finishZapSign = startTimedStage(closeModeAudit, "zap_sign");
+        const closeSigned = await signAndSimulateRelayTransactions(closeUnsigned, wallet, {
+          connection: getConnection(),
+          label: "zap-out close",
+          allowedDebitMints: relayAllowedDebitMints,
+          maxSolLoss: 0.05,
+          requiredStaticAccounts: [wallet.publicKey.toString(), position_address],
+        });
+        const swapSigned = await signAndSimulateRelayTransactions(swapUnsigned, wallet, {
+          connection: getConnection(),
+          label: "zap-out swap",
+          allowedDebitMints: relayAllowedDebitMints,
+          maxSolLoss: 0.05,
+          requiredStaticAccounts: [wallet.publicKey.toString()],
+        });
+        finishZapSign();
+
+        assertFastZapSubmitBudget(closeModeAudit, fastZapDeadlineAt);
+        relaySubmitted = true;
+        closeModeAudit.zap_submitted = true;
+        const finishZapSubmit = startTimedStage(closeModeAudit, "zap_submit");
+        const submit = await meridianJson("/execution/zap-out/submit", {
+          method: "POST",
+          headers: getMeridianHeaders(),
+          body: JSON.stringify({
+            requestId: order.requestId,
+            lastValidBlockHeight: order?.order?.lastValidBlockHeight,
+            transactions: {
+              close: closeSigned,
+              swap: swapSigned,
+            },
+          }),
+        });
+        finishZapSubmit();
+        closeModeAudit.zap_total_ms = Date.now() - relayStartedAt;
+
+        const claimTxHashes = [];
+        const closeTxHashes = normalizeExecutionSignatures(submit);
+        const txHashes = [...claimTxHashes, ...closeTxHashes];
+
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        _positionsCacheAt = 0;
+
+        let closedConfirmed = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            const refreshed = await getMyPositions({ force: true, silent: true });
+            const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
+            if (!stillOpen) {
+              closedConfirmed = true;
+              break;
+            }
+            log("close_warn", `Relay close still appears open after submit (attempt ${attempt + 1}/4)`);
+          } catch (e) {
+            log("close_warn", `Relay close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
+          }
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 3000));
+        }
+
+        if (!closedConfirmed) {
+          return {
+            success: false,
+            error: "Close submit succeeded but position still appears open after verification window",
+            position: position_address,
+            pool: poolAddress,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
+            close_txs: closeTxHashes,
+            txs: txHashes,
+          };
+        }
+
+        recordClose(position_address, reason || "agent decision");
+
+        if (tracked) {
+          const deployedAt = new Date(tracked.deployed_at).getTime();
+          const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
+          let minutesOOR = 0;
+          if (tracked.out_of_range_since) {
+            minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
+          }
+
+          const sm = config.management.solMode;
+          const tk = sm ? "sol" : "usd";
+          let pnlUsd = 0;
+          let pnlPct = 0;
+          let finalValueUsd = 0;
+          let initialUsd = 0;
+          let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0); // claim tracker is always USD
+          try {
+            const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
+            for (let attempt = 0; attempt < 6; attempt++) {
+              const res = await fetch(closedUrl);
+              if (res.ok) {
+                const data = await res.json();
+                const posEntry = (data.positions || []).find((entry) => entry.positionAddress === position_address);
+                if (posEntry) {
+                  pnlUsd        = getClosedPnlValue(posEntry, sm);
+                  pnlPct        = getClosedPnlPct(posEntry, sm);
+                  finalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.[tk] || 0);
+                  initialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.[tk]    || 0);
+                  feesUsd       = parseFloat(posEntry.allTimeFees?.total?.[tk]        || 0) || feesUsd;
+                  break;
+                }
+              }
+              if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 5000));
+            }
+          } catch (e) {
+            log("close_warn", `Relay closed PnL fetch failed: ${e.message}`);
+          }
+
+          const closeBaseMint = livePosition?.base_mint || pool.lbPair.tokenXMint.toString();
+          const signalSnapshot = resolvePerformanceSignalSnapshot({
+            poolAddress,
+            baseMint: closeBaseMint,
+            tracked,
+          });
+
+          await recordPerformance({
+            position: position_address,
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            base_mint: closeBaseMint,
+            strategy: tracked.strategy,
+            strategy_profile: tracked.strategy_profile ?? null,
+            bin_range: tracked.bin_range,
+            bin_step: tracked.bin_step || null,
+            volatility: tracked.volatility || null,
+            fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+            organic_score: tracked.organic_score || null,
+            amount_sol: tracked.amount_sol,
+            fees_earned_usd: feesUsd,
+            final_value_usd: finalValueUsd,
+            initial_value_usd: initialUsd,
+            minutes_in_range: minutesHeld - minutesOOR,
+            minutes_held: minutesHeld,
+            close_reason: reason || "agent decision",
+            signal_snapshot: signalSnapshot,
+            shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+          });
+          appendMainCandidateOutcomeSnapshot({
+            tracked,
+            outcome: {
+              position: position_address,
+              pool: poolAddress,
+              pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+              close_reason: reason || "agent decision",
+              pnl_pct: pnlPct,
+              pnl_usd: pnlUsd,
+              minutes_held: minutesHeld,
+            },
+            source: "dlmm.close.relay_success",
+          });
+
+          appendDecision({
+            type: "close",
+            actor: "MANAGER",
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            position: position_address,
+            summary: `Relay closed at ${pnlPct.toFixed(2)}%`,
+            reason: reason || "agent decision",
+            risks: [
+              minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
+              tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
+            ].filter(Boolean),
+            metrics: {
+              pnl_usd: pnlUsd,
+              pnl_pct: pnlPct,
+              fees_usd: feesUsd,
+              minutes_held: minutesHeld,
+            },
+          });
+          appendDecisionContext({
+            stage: "close",
+            actor: "MANAGER",
+            pool: poolAddress,
+            poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+            baseMint: closeBaseMint,
+            position: position_address,
+            reason: reason || "agent decision",
+            metrics: {
+              pnl_sol: pnlUsd,
+              pnl_pct: pnlPct,
+              fees_sol: feesUsd,
+              strategy_profile: tracked.strategy_profile ?? null,
+              minutes_held: minutesHeld,
+              minutes_out_of_range: minutesOOR,
+            },
+            close: {
+              relay: true,
+              urgent: !!urgent,
+              request_id: order.requestId,
+              txs: txHashes,
+              close_mode: closeModeContext(closeModeAudit),
+            },
+            source: "dlmm.close.relay_success",
+          });
+
+          return {
+            success: true,
+            relay: true,
+            close_mode: closeModeAudit.selected_close_mode,
+            adaptive_close: closeModeContext(closeModeAudit),
+            request_id: order.requestId,
+            position: position_address,
+            pool: poolAddress,
+            pool_name: tracked.pool_name || poolMeta.name || null,
+            claim_txs: claimTxHashes,
+            close_txs: closeTxHashes,
+            txs: txHashes,
+            pnl_usd: pnlUsd,
+            pnl_pct: pnlPct,
+            fees_usd: feesUsd,
+            fees_sol: sm ? feesUsd : null,
+            base_mint: closeBaseMint,
+          };
+        }
+
+        appendDecision({
+          type: "close",
+          actor: "MANAGER",
+          pool: poolAddress,
+          pool_name: poolMeta.name || poolAddress.slice(0, 8),
+          position: position_address,
+          summary: "Relay closed position",
+          reason: reason || "agent decision",
+          metrics: {},
+        });
+        appendDecisionContext({
+          stage: "close",
+          actor: "MANAGER",
+          pool: poolAddress,
+          poolName: poolMeta.name || poolAddress.slice(0, 8),
+          baseMint: livePosition?.base_mint || null,
+          position: position_address,
+          reason: reason || "agent decision",
+          metrics: {},
+          close: {
+            relay: true,
+            urgent: !!urgent,
+            request_id: order.requestId,
+            txs: txHashes,
+            close_mode: closeModeContext(closeModeAudit),
+          },
+          source: "dlmm.close.relay_success_untracked",
+        });
+
+        return {
+          success: true,
+          relay: true,
+          close_mode: closeModeAudit.selected_close_mode,
+          adaptive_close: closeModeContext(closeModeAudit),
+          request_id: order.requestId,
+          position: position_address,
+          pool: poolAddress,
+          pool_name: poolMeta.name || null,
+          claim_txs: [],
+          close_txs: closeTxHashes,
+          txs: txHashes,
+          base_mint: livePosition?.base_mint || null,
+        };
+      } catch (relayError) {
+        if (relaySubmitted) throw relayError;
+        closeModeAudit.fallback_reason = relayError.message;
+        log("close_warn", `Relay zap-out failed before submit; falling back to local close + Jupiter autoswap: ${relayError.message}`);
+      }
+    }
+
+    const localCloseStartedAt = Date.now();
+    // Clear cached pool so SDK loads fresh position fee state
+    poolCache.delete(poolAddress.toString());
+    const closePriority = urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.MANAGEMENT;
+    const closeSourcePrefix = urgent ? "helius_rpc.close_urgent" : "helius_rpc.close";
+    const pool = await getPool(poolAddress, {
+      priority: closePriority,
+      source: `${closeSourcePrefix}_pool_create`,
+    });
+
+    const positionPubKey = new PublicKey(position_address);
+    const claimTxHashes = [];
+    const closeTxHashes = [];
+
+    // ─── Step 1: Claim Fees (to clear account state) ───────────
+    // Skip claim on URGENT stop-loss — removeLiquidity (Step 2) uses shouldClaimAndClose:true
+    // which handles fees atomically. Skipping saves ~20–25s exposure during rug scenarios.
+    const recentlyClaimed = tracked?.last_claim_at && (Date.now() - new Date(tracked.last_claim_at).getTime()) < 60_000;
+    if (urgent) {
+      log("close", `Step 1: Skipping claim — urgent stop-loss, going straight to liquidity removal`);
+    } else {
+      try {
+        if (recentlyClaimed) {
+          log("close", `Step 1: Skipping claim — fees already claimed ${Math.round((Date.now() - new Date(tracked.last_claim_at).getTime()) / 1000)}s ago`);
+        } else {
+          log("close", `Step 1: Claiming fees for ${position_address}`);
+          const positionData = await withRpcPriority(
+            closePriority,
+            `${closeSourcePrefix}_claim_position`,
+            () => pool.getPosition(positionPubKey),
+          );
+          const claimTxs = await withRpcPriority(
+            closePriority,
+            `${closeSourcePrefix}_claim_tx_build`,
+            () => pool.claimSwapFee({
+              owner: wallet.publicKey,
+              position: positionData,
+            }),
+          );
+          if (claimTxs && claimTxs.length > 0) {
+            for (const tx of claimTxs) {
+              const claimHash = await sendAndConfirmTransactionWithPriority(
+                getConnection(),
+                tx,
+                [wallet],
+                {},
+                { priority: RPC_PRIORITY.NORMAL_SEND, source: "helius_rpc.close_claim_send" },
+              );
+              claimTxHashes.push(claimHash);
+            }
+            log("close", `Step 1 OK (claim only): ${claimTxHashes.join(", ")}`);
+          }
+        }
+      } catch (e) {
+        log("close_warn", `Step 1 (Claim) failed or nothing to claim: ${e.message}`);
+      }
+    }
+
+    // ─── Step 2: Remove Liquidity & Close ──────────────────────
+    let hasLiquidity = false;
+    let closeFromBinId = -887272;
+    let closeToBinId = 887272;
+    try {
+      const positionDataForClose = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_position_state`,
+        () => pool.getPosition(positionPubKey),
+      );
+      const processed = positionDataForClose?.positionData;
+      if (processed) {
+        closeFromBinId = processed.lowerBinId ?? closeFromBinId;
+        closeToBinId = processed.upperBinId ?? closeToBinId;
+        const bins = Array.isArray(processed.positionBinData) ? processed.positionBinData : [];
+        hasLiquidity = bins.some((bin) => new BN(bin.positionLiquidity || "0").gt(new BN(0)));
+      }
+    } catch (e) {
+      log("close_warn", `Could not check liquidity state: ${e.message}`);
+    }
+
+    if (hasLiquidity) {
+      log("close", `Step 2: Removing liquidity and closing account`);
+      const closeTx = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_remove_liquidity_tx_build`,
+        () => pool.removeLiquidity({
+          user: wallet.publicKey,
+          position: positionPubKey,
+          fromBinId: closeFromBinId,
+          toBinId: closeToBinId,
+          bps: new BN(10000),
+          shouldClaimAndClose: true,
+        }),
+      );
+
+      for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
+        const txHash = await sendCloseTransactionWithRetry(tx, wallet, {
+          urgent: !!urgent,
+          positionPubKey,
+          label: "remove-liquidity close",
+        });
+        closeTxHashes.push(txHash);
+      }
+    } else {
+      log("close", `Step 2: No position liquidity detected, closing account`);
+      const closeTx = await withRpcPriority(
+        closePriority,
+        `${closeSourcePrefix}_close_position_tx_build`,
+        () => pool.closePosition({
+          owner: wallet.publicKey,
+          position: { publicKey: positionPubKey },
+        }),
+      );
+      const txHash = await sendCloseTransactionWithRetry(closeTx, wallet, {
+        urgent: !!urgent,
+        positionPubKey,
+        label: "close-position",
+      });
+      closeTxHashes.push(txHash);
+    }
+    const txHashes = [...claimTxHashes, ...closeTxHashes];
+    log("close", `Step 2 OK (close only): ${closeTxHashes.join(", ") || "none"}`);
+    log("close", `SUCCESS txs: ${txHashes.join(", ")}`);
+    // Wait for RPC to reflect withdrawn balances before returning — prevents
+    // agent from seeing zero balance when attempting post-close swap
+    await new Promise(r => setTimeout(r, 5000));
+    _positionsCacheAt = 0;
+
+    let closedConfirmed = false;
+    let closeVerificationRateLimited = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const refreshed = await withRpcPriority(
+          urgent ? RPC_PRIORITY.URGENT_CLOSE : RPC_PRIORITY.MANAGEMENT,
+          urgent ? "helius_rpc.close_urgent_verification" : "helius_rpc.close_verification",
+          () => getMyPositions({ force: true, silent: true }),
+        );
+        const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
+        if (!stillOpen) {
+          closedConfirmed = true;
+          break;
+        }
+        log("close_warn", `Position ${position_address} still appears open after close txs (attempt ${attempt + 1}/4)`);
+      } catch (e) {
+        if (isRpcRateLimitError(e)) closeVerificationRateLimited = true;
+        log("close_warn", `Close verification failed (attempt ${attempt + 1}/4): ${e.message}`);
+      }
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 3000));
+    }
+
+    if (!closedConfirmed) {
+      closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
+      if (closeVerificationRateLimited && closeTxHashes.length > 0) {
+        log("close_warn", `Close txs were sent but verification degraded by RPC rate limits; preserving tx evidence as successful degraded close`);
+        recordClose(position_address, reason || "agent decision");
+        let degradedPerformance = null;
+        try {
+          degradedPerformance = await recordDegradedClosePerformance({
+            position_address,
+            poolAddress,
+            poolName: poolMeta.name || null,
+            closeBaseMint: pool.lbPair.tokenXMint.toString(),
+            tracked,
+            reason,
+          });
+        } catch (error) {
+          log("close_warn", `Degraded close performance/cooldown recording failed: ${error.message}`);
+        }
+        return {
+          success: true,
+          verification_degraded: true,
+          close_verification_status: "rpc_rate_limited",
+          warning: "Close transactions sent; follow-up verification degraded by RPC rate limits",
+          position: position_address,
+          pool: poolAddress,
+          close_mode: closeModeAudit.selected_close_mode,
+          adaptive_close: closeModeContext(closeModeAudit),
+          claim_txs: claimTxHashes,
+          close_txs: closeTxHashes,
+          txs: txHashes,
+          pnl_usd: degradedPerformance?.pnlUsd ?? null,
+          pnl_pct: degradedPerformance?.pnlPct ?? null,
+          fees_usd: degradedPerformance?.feesUsd ?? null,
+          fees_sol: config.management.solMode ? (degradedPerformance?.feesUsd ?? null) : null,
+          base_mint: degradedPerformance?.baseMint ?? null,
+        };
+      }
+      return {
+        success: false,
+        error: "Close transactions sent but position still appears open after verification window",
+        position: position_address,
+        pool: poolAddress,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
+        claim_txs: claimTxHashes,
+        close_txs: closeTxHashes,
+        txs: txHashes,
+      };
+    }
+
+    closeModeAudit.local_close_ms = Date.now() - localCloseStartedAt;
+    recordClose(position_address, reason || "agent decision");
+
+    // Record performance for learning
+    if (tracked) {
+      const deployedAt = new Date(tracked.deployed_at).getTime();
+      const minutesHeld = Math.floor((Date.now() - deployedAt) / 60000);
+
+      let minutesOOR = 0;
+      if (tracked.out_of_range_since) {
+        minutesOOR = Math.floor((Date.now() - new Date(tracked.out_of_range_since).getTime()) / 60000);
+      }
+
+      const shouldRejectClosedPnl = (pct, closeReasonText) => {
+        if (!Number.isFinite(pct)) return false;
+        const reasonText = String(closeReasonText || "").toLowerCase();
+        const stopLossTriggered = reasonText.includes("stop loss");
+        // Meteora sometimes briefly reports absurd closed pnl while the record is settling.
+        // Trust legitimate stop-loss disasters, but reject obviously unsettled outliers otherwise.
+        return !stopLossTriggered && pct <= -90;
+      };
+
+      // Fetch closed PnL from API — authoritative source after withdrawal settles
+      const sm = config.management.solMode;
+      const tk = sm ? "sol" : "usd";
+      let pnlUsd = 0;
+      let pnlPct = 0;
+      let finalValueUsd = 0;
+      let initialUsd = 0;
+      let feesUsd = sm ? 0 : (tracked.total_fees_claimed_usd || 0); // claim tracker is always USD
+      try {
+        const closedUrl = `https://dlmm.datapi.meteora.ag/positions/${poolAddress}/pnl?user=${wallet.publicKey.toString()}&status=closed&pageSize=50&page=1`;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const res = await fetch(closedUrl);
+          if (res.ok) {
+            const data = await res.json();
+            const posEntry = (data.positions || []).find(p => p.positionAddress === position_address);
+            if (posEntry) {
+              const nextPnlPct        = getClosedPnlPct(posEntry, sm);
+              const nextFinalValueUsd = parseFloat(posEntry.allTimeWithdrawals?.total?.[tk] || 0);
+              const nextInitialUsd    = parseFloat(posEntry.allTimeDeposits?.total?.[tk]    || 0);
+              const nextFeesUsd       = parseFloat(posEntry.allTimeFees?.total?.[tk]        || 0) || feesUsd;
+              const nextPnlUsd        = getClosedPnlValue(posEntry, sm);
+
+              if (shouldRejectClosedPnl(nextPnlPct, reason || tracked?.close_reason)) {
+                log("close_warn", `Rejected unsettled closed PnL for ${position_address.slice(0, 8)} on attempt ${attempt + 1}/6: ${nextPnlPct.toFixed(2)}%`);
+              } else {
+                pnlUsd        = nextPnlUsd;
+                pnlPct        = nextPnlPct;
+                finalValueUsd = nextFinalValueUsd;
+                initialUsd    = nextInitialUsd;
+                feesUsd       = nextFeesUsd;
+                log("close", `Closed PnL from API: pnl=${pnlUsd.toFixed(4)} ${sm ? "SOL" : "USD"} (${pnlPct.toFixed(2)}%), withdrawn=${finalValueUsd.toFixed(4)}, deposited=${initialUsd.toFixed(4)}`);
+                break;
+              }
+            } else {
+              log("close_warn", `Position not found in status=closed response (attempt ${attempt + 1}/6) — may still be settling`);
+            }
+          }
+          if (attempt < 5) await new Promise((r) => setTimeout(r, 5000));
+        }
+      } catch (e) {
+        log("close_warn", `Closed PnL fetch failed: ${e.message}`);
+      }
+      // Fallback to pre-close cache snapshot if closed API had no data
+      if (finalValueUsd === 0) {
+        const cachedPos = _positionsCache?.positions?.find(p => p.position === position_address);
+        if (cachedPos) {
+          // When solMode=true: pnl_usd/collected_fees_usd/total_value_usd store SOL values;
+          // *_true_usd variants always store real USD — do NOT use them here.
+          pnlUsd     = sm
+            ? (cachedPos.pnl_usd ?? 0)
+            : (cachedPos.pnl_true_usd ?? cachedPos.pnl_usd ?? 0);
+          pnlPct     = cachedPos.pnl_pct ?? 0;
+          feesUsd    = sm
+            ? (cachedPos.collected_fees_usd || 0) + (cachedPos.unclaimed_fees_usd || 0)
+            : (cachedPos.collected_fees_true_usd || 0) + (cachedPos.unclaimed_fees_true_usd || 0);
+          initialUsd = sm
+            ? (tracked.amount_sol || 0)           // deploy amount in SOL when solMode
+            : (tracked.initial_value_usd || 0);   // deploy amount in USD otherwise
+          if (initialUsd > 0) {
+            finalValueUsd = Math.max(0, initialUsd + pnlUsd - feesUsd);
+            pnlPct = (pnlUsd / initialUsd) * 100;
+          } else {
+            finalValueUsd = sm
+              ? (cachedPos.total_value_usd ?? 0)
+              : (cachedPos.total_value_true_usd ?? cachedPos.total_value_usd ?? 0);
+            initialUsd = Math.max(0, finalValueUsd + feesUsd - pnlUsd);
+          }
+          log("close_warn", `Using cached pnl fallback because closed API has not settled yet`);
+        }
+      }
+
+      const closeBaseMint = pool.lbPair.tokenXMint.toString();
+      const signalSnapshot = resolvePerformanceSignalSnapshot({
+        poolAddress,
+        baseMint: closeBaseMint,
+        tracked,
+      });
+
+      await recordPerformance({
+        position: position_address,
+        pool: poolAddress,
+        pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+        base_mint: closeBaseMint,
+        strategy: tracked.strategy,
+        strategy_profile: tracked.strategy_profile ?? null,
+        bin_range: tracked.bin_range,
+        bin_step: tracked.bin_step || null,
+        volatility: tracked.volatility || null,
+        fee_tvl_ratio: tracked.fee_tvl_ratio || null,
+        organic_score: tracked.organic_score || null,
+        amount_sol: tracked.amount_sol,
+        fees_earned_usd: feesUsd,
+        final_value_usd: finalValueUsd,
+        initial_value_usd: initialUsd,
+        minutes_in_range: minutesHeld - minutesOOR,
+        minutes_held: minutesHeld,
+        close_reason: reason || "agent decision",
+        signal_snapshot: signalSnapshot,
+        shadow_data_collection: tracked.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
+      });
+      appendMainCandidateOutcomeSnapshot({
+        tracked,
+        outcome: {
+          position: position_address,
+          pool: poolAddress,
+          pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+          close_reason: reason || "agent decision",
+          pnl_pct: pnlPct,
+          pnl_usd: pnlUsd,
+          minutes_held: minutesHeld,
+        },
+        source: "dlmm.close.local_success",
+      });
+
+      appendDecision({
+        type: "close",
+        actor: "MANAGER",
+        pool: poolAddress,
+        pool_name: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+        position: position_address,
+        summary: `Closed at ${pnlPct.toFixed(2)}%`,
+        reason: reason || "agent decision",
+        risks: [
+          minutesOOR > 0 ? `out of range ${minutesOOR}m` : null,
+          tracked.volatility != null ? `volatility ${tracked.volatility}` : null,
+        ].filter(Boolean),
+        metrics: {
+          pnl_usd: pnlUsd,
+          pnl_pct: pnlPct,
+          fees_usd: feesUsd,
+          strategy_profile: tracked.strategy_profile ?? null,
+          minutes_held: minutesHeld,
+        },
+      });
+      appendDecisionContext({
+        stage: "close",
+        actor: "MANAGER",
+        pool: poolAddress,
+        poolName: tracked.pool_name || poolMeta.name || poolAddress.slice(0, 8),
+        baseMint: closeBaseMint,
+        position: position_address,
+        reason: reason || "agent decision",
+        metrics: {
+          pnl_sol: pnlUsd,
+          pnl_pct: pnlPct,
+          fees_sol: feesUsd,
+          minutes_held: minutesHeld,
+          minutes_out_of_range: minutesOOR,
+        },
+        close: {
+          relay: false,
+          urgent: !!urgent,
+          txs: txHashes,
+          close_mode: closeModeContext(closeModeAudit),
+        },
+        source: "dlmm.close.local_success",
+      });
+
+      return {
+        success: true,
+        relay: false,
+        close_mode: closeModeAudit.selected_close_mode,
+        adaptive_close: closeModeContext(closeModeAudit),
+        skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
+        position: position_address,
+        pool: poolAddress,
+        pool_name: tracked.pool_name || poolMeta.name || null,
+        claim_txs: claimTxHashes,
+        close_txs: closeTxHashes,
+        txs: txHashes,
+        pnl_usd: pnlUsd,
+        pnl_pct: pnlPct,
+        fees_usd: feesUsd,
+        fees_sol: sm ? feesUsd : null,
+        base_mint: closeBaseMint,
+      };
+    }
+
+    appendDecision({
+      type: "close",
+      actor: "MANAGER",
+      pool: poolAddress,
+      pool_name: poolMeta.name || poolAddress.slice(0, 8),
+      position: position_address,
+      summary: "Closed position",
+      reason: reason || "agent decision",
+      metrics: {},
+    });
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      pool: poolAddress,
+      poolName: poolMeta.name || poolAddress.slice(0, 8),
+      baseMint: pool.lbPair.tokenXMint.toString(),
+      position: position_address,
+      reason: reason || "agent decision",
+      metrics: {},
+      close: {
+        relay: false,
+        urgent: !!urgent,
+        txs: txHashes,
+        close_mode: closeModeContext(closeModeAudit),
+      },
+      source: "dlmm.close.local_success_untracked",
+    });
+
+    return {
+      success: true,
+      relay: false,
+      close_mode: closeModeAudit.selected_close_mode,
+      adaptive_close: closeModeContext(closeModeAudit),
+      skip_post_close_swap: closeModeDecision.skipPostCloseSwap,
+      position: position_address,
+      pool: poolAddress,
+      pool_name: poolMeta.name || null,
+      claim_txs: claimTxHashes,
+      close_txs: closeTxHashes,
+      txs: txHashes,
+      base_mint: pool.lbPair.tokenXMint.toString(),
+    };
+  } catch (error) {
+    log("close_error", error.message);
+    appendDecisionContext({
+      stage: "close",
+      actor: "MANAGER",
+      position: position_address,
+      reason: error.message,
+      close: {
+        success: false,
+        urgent: !!urgent,
+        requested_reason: reason || null,
+        close_mode: closeModeAudit ? closeModeContext(closeModeAudit) : null,
+      },
+      source: "dlmm.close.error",
+    });
+    return { success: false, error: error.message };
+  }
+}
+
+// ─── Helpers ──────────────────────────────────────────────────
+async function lookupPoolForPosition(position_address, walletAddress) {
+  // Check state registry first (fast path)
+  const tracked = getTrackedPosition(position_address);
+  if (tracked?.pool) return tracked.pool;
+
+  // Check in-memory positions cache
+  const cached = _positionsCache?.positions?.find((p) => p.position === position_address);
+  if (cached?.pool) return cached.pool;
+
+  // SDK scan (last resort)
+  const { DLMM } = await getDLMM();
+  const allPositions = await DLMM.getAllLbPairPositionsByUser(
+    getConnection(),
+    new PublicKey(walletAddress)
+  );
+
+  for (const [lbPairKey, positionData] of Object.entries(allPositions)) {
+    for (const pos of positionData.lbPairPositionsData || []) {
+      if (pos.publicKey.toString() === position_address) return lbPairKey;
+    }
+  }
+
+  throw new Error(`Position ${position_address} not found in open positions`);
+}

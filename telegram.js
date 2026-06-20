@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { log } from "./logger.js";
+import { escapeHtml, stripTags } from "./telegram-render.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const USER_CONFIG_PATH = path.join(__dirname, "user-config.json");
@@ -91,6 +92,14 @@ function isAuthorizedIncomingCallback(callbackQuery) {
 // ─── Core send ───────────────────────────────────────────────────
 export function isEnabled() {
   return !!TOKEN;
+}
+
+export function hasAllowedTelegramUsers() {
+  return ALLOWED_USER_IDS.size > 0;
+}
+
+export function isAllowedTelegramUser(userId) {
+  return userId != null && ALLOWED_USER_IDS.has(String(userId));
 }
 
 function getRetryAfterMs(payloadText) {
@@ -185,6 +194,19 @@ export async function sendHTML(html) {
   return postTelegram("sendMessage", { text: html.slice(0, 4096), parse_mode: "HTML" });
 }
 
+// Renders via standard Telegram parse_mode: HTML. We intentionally do NOT use
+// the bot API's rich_message field — it collapses newlines (renders HTML
+// whitespace), which flattened the multi-line menu cards. parse_mode HTML
+// preserves \n and renders <b>/<code>/<i>, which is what the menu needs.
+export async function sendRichMessage({ html, keyboard = null }) {
+  if (!TOKEN || !chatId) return null;
+  return postTelegram("sendMessage", {
+    text: String(html ?? "").slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    parse_mode: "HTML",
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
 export async function editMessage(text, messageId) {
   if (!TOKEN || !chatId || !messageId) return null;
   return postTelegram("editMessageText", {
@@ -202,11 +224,31 @@ export async function editMessageWithButtons(text, messageId, keyboard) {
   });
 }
 
+export async function editRichMessage({ html, messageId, keyboard = null }) {
+  if (!TOKEN || !chatId || !messageId) return null;
+  return postTelegram("editMessageText", {
+    message_id: messageId,
+    text: String(html ?? "").slice(0, TELEGRAM_MAX_TEXT_LENGTH),
+    parse_mode: "HTML",
+    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+  });
+}
+
 export async function answerCallbackQuery(callbackQueryId, text = "") {
   if (!TOKEN || !callbackQueryId) return null;
   return postTelegram("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
     ...(text ? { text: String(text).slice(0, 200) } : {}),
+  }, { includeChatId: false });
+}
+
+export async function setCommandMenu(commands = []) {
+  if (!TOKEN || commands.length === 0) return null;
+  return postTelegram("setMyCommands", {
+    commands: commands.map(({ command, description }) => ({
+      command: String(command).replace(/^\//, "").slice(0, 32),
+      description: String(description).slice(0, 256),
+    })),
   }, { includeChatId: false });
 }
 
@@ -306,7 +348,7 @@ function summarizeToolResult(name, result) {
   }
 }
 
-export async function createLiveMessage(title, intro = "Starting...") {
+export async function createLiveMessage(title, intro = "Starting...", { html = false } = {}) {
   if (!TOKEN || !chatId) return null;
   const typing = createTypingIndicator();
 
@@ -315,17 +357,21 @@ export async function createLiveMessage(title, intro = "Starting...") {
     intro,
     toolLines: [],
     footer: "",
+    html,
     messageId: null,
     flushTimer: null,
     flushPromise: null,
     flushRequested: false,
   };
 
-  function render({ allowOverflow = false } = {}) {
-    const sections = [state.title];
-    if (state.intro) sections.push(state.intro);
-    if (state.toolLines.length > 0) sections.push(state.toolLines.join("\n"));
-    if (state.footer) sections.push(state.footer);
+  // In HTML mode the title/intro/tool progress are escaped, but the footer (the
+  // final report) is treated as caller-supplied HTML so its formatting renders.
+  function render({ allowOverflow = false, asHtml = false } = {}) {
+    const esc = asHtml ? escapeHtml : (value) => value;
+    const sections = [esc(state.title)];
+    if (state.intro) sections.push(esc(state.intro));
+    if (state.toolLines.length > 0) sections.push(esc(state.toolLines.join("\n")));
+    if (state.footer) sections.push(asHtml ? state.footer : stripTags(state.footer));
     const text = sections.join("\n\n");
     return allowOverflow ? text : text.slice(0, TELEGRAM_MAX_TEXT_LENGTH);
   }
@@ -345,6 +391,33 @@ export async function createLiveMessage(title, intro = "Starting...") {
   async function flushFinalNow() {
     state.flushTimer = null;
     state.flushRequested = false;
+
+    // HTML mode: send one rich message when it fits; otherwise (too long, or the
+    // HTML send is rejected) degrade to tag-stripped plain text so delivery is
+    // never lost.
+    if (state.html) {
+      const richText = render({ allowOverflow: true, asHtml: true });
+      if (richText.length <= TELEGRAM_MAX_TEXT_LENGTH) {
+        if (!state.messageId) {
+          const sent = await postTelegram("sendMessage", { text: richText, parse_mode: "HTML" });
+          if (sent) { state.messageId = sent?.result?.message_id ?? null; return; }
+        } else {
+          const edited = await postTelegram("editMessageText", { message_id: state.messageId, text: richText, parse_mode: "HTML" });
+          if (edited) return;
+        }
+      }
+      const fallbackChunks = splitTelegramText(stripTags(richText));
+      const [firstFallback = "", ...restFallback] = fallbackChunks;
+      if (!state.messageId) {
+        const sent = await postTelegram("sendMessage", { text: firstFallback });
+        state.messageId = sent?.result?.message_id ?? null;
+      } else {
+        await postTelegram("editMessageText", { message_id: state.messageId, text: firstFallback });
+      }
+      for (const chunk of restFallback) await postTelegram("sendMessage", { text: chunk });
+      return;
+    }
+
     const chunks = splitTelegramText(render({ allowOverflow: true }));
     const [firstChunk = "", ...restChunks] = chunks;
 
@@ -415,7 +488,7 @@ export async function createLiveMessage(title, intro = "Starting...") {
         state.flushTimer = null;
       }
       if (state.flushPromise) await state.flushPromise;
-      state.footer = `❌ ${errorText}`;
+      state.footer = `❌ ${state.html ? escapeHtml(errorText) : errorText}`;
       await flushFinalNow();
       _liveMessageDepth = Math.max(0, _liveMessageDepth - 1);
       typing.stop();

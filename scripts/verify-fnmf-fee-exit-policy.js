@@ -7,6 +7,7 @@
  */
 
 import { evaluateFeeExitPolicy } from "../fee-exit-policy.js";
+import { feeExitConfluenceBypassReason, shouldGateFeeExitDecision } from "../fee-exit-confluence.js";
 import { normalizeFeeInputs } from "../fee-helpers.js";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
@@ -63,6 +64,10 @@ function basePolicy(overrides = {}) {
       dustFloor: 0.000001,
       feeHarvestEnabled: true,
       feeHarvestMinFeePctOfEntry: 1.0,
+      feeHarvestMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceMinFeePctOfEntry: 2.0,
+      feeHarvestBypassConfluenceMinNetPnlPct: 0.25,
+      feeHarvestBypassConfluenceStrongNetPnlPct: 0.75,
       feeHarvestMinHoldMinutes: 30,
       noFeeAbortEnabled: true,
       noFeeAbortMaxHoldMinutes: 60,
@@ -77,6 +82,8 @@ function basePolicy(overrides = {}) {
       emergencyFailsafeMinLossPct: 8,
       maxHoldTimeoutEnabled: true,
       maxHoldTimeoutMinutes: 180,
+      exitConfluenceEnabled: true,
+      exitConfluenceRules: ["fee_harvest", "max_hold_timeout"],
       ...overrides,
     },
   };
@@ -109,8 +116,8 @@ function main() {
   assert(normalizedSol.totalFeeAmount === 0.001, "claimed fees should be preserved when unclaimed is dust");
   assert(Math.abs(normalizedSol.feePctOfEntry - 0.6666666667) < 0.0001, "fee percent should normalize against entry equity");
 
-  const orderedHarvest = decisionFor({ pnl_pct: -20, unclaimed_fees_usd: 0.003 }, {});
-  assert(orderedHarvest?.rule === "fee_harvest", "fee_harvest must win when multiple later rules also match");
+  const orderedHarvest = decisionFor({ pnl_pct: 0.5, total_value_usd: 0.151, unclaimed_fees_usd: 0.003 }, {});
+  assert(orderedHarvest?.rule === "fee_harvest", "fee_harvest must remain the first positive fee-exit rule");
   assert(orderedHarvest.shadowOnly === true, "policy should default to shadow-only when enabled");
 
   const noFeeAbort = decisionFor({ age_minutes: 70, pnl_pct: 0, unclaimed_fees_usd: 0.0001 }, {
@@ -140,9 +147,25 @@ function main() {
   });
   assert(maxHold?.rule === "max_hold_timeout", "max hold timeout should be the final ordered rule");
 
-  const liveDecision = decisionFor({ unclaimed_fees_usd: 0.003 }, { shadowOnly: false });
+  const liveDecision = decisionFor({ pnl_pct: 0.5, total_value_usd: 0.151, unclaimed_fees_usd: 0.0016 }, { shadowOnly: false });
   assert(liveDecision?.rule === "fee_harvest", "live policy should still evaluate threshold cases");
   assert(liveDecision.shadowOnly === false, "shadowOnly:false must be preserved for runtime close gating");
+  assert(shouldGateFeeExitDecision(liveDecision, basePolicy().feeExitPolicy) === true, "base live fee harvest should enter confluence gate");
+  assert(feeExitConfluenceBypassReason(liveDecision, basePolicy().feeExitPolicy) === null, "base live fee harvest should not bypass confluence");
+
+  const highFeeDecision = decisionFor({ pnl_pct: 0.3, total_value_usd: 0.1505, unclaimed_fees_usd: 0.0031 }, { shadowOnly: false });
+  assert(highFeeDecision?.rule === "fee_harvest", "high-fee positive policy should still be a fee harvest");
+  assert(
+    feeExitConfluenceBypassReason(highFeeDecision, basePolicy().feeExitPolicy) === "fee_harvest_fee_and_net_pnl_bypass",
+    "high-fee positive harvest should bypass confluence",
+  );
+
+  const strongNetDecision = decisionFor({ pnl_pct: 0.8, total_value_usd: 0.151, unclaimed_fees_usd: 0.0016 }, { shadowOnly: false });
+  assert(strongNetDecision?.rule === "fee_harvest", "strong net policy should still be a fee harvest");
+  assert(
+    feeExitConfluenceBypassReason(strongNetDecision, basePolicy().feeExitPolicy) === "fee_harvest_strong_net_pnl_bypass",
+    "strong net positive harvest should bypass confluence",
+  );
 
   const missingFeeSafety = decisionFor({ unclaimed_fees_usd: null }, {
     feeHarvestEnabled: false,
@@ -224,6 +247,11 @@ function main() {
       maxHold.rule,
     ],
     liveShadowOnly: liveDecision.shadowOnly,
+    hybridBypassReasons: [
+      feeExitConfluenceBypassReason(liveDecision, basePolicy().feeExitPolicy),
+      feeExitConfluenceBypassReason(highFeeDecision, basePolicy().feeExitPolicy),
+      feeExitConfluenceBypassReason(strongNetDecision, basePolicy().feeExitPolicy),
+    ],
     missingFeeSafety: missingFeeSafety ?? null,
     sourceOrder,
   }, null, 2));

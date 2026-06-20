@@ -1,20 +1,40 @@
 import "./envcrypt.js";
 import fs from "fs";
 import path from "path";
+import { execFile } from "child_process";
 import cron from "node-cron";
 import readline from "readline";
 import { agentLoop } from "./agent.js";
 import { log, logAction } from "./logger.js";
-import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getMyPositions, getActiveBin } from "./tools/dlmm.js";
+import { getWalletBalances, quoteSwapToken } from "./tools/wallet.js";
 import { getTopCandidates, getCandidateSignalSnapshot, rankCandidatesByDarwin, applyScoutTailLossShadowDecisions, evaluateTargetPoolNeedleDeployGuard } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
-import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, createLiveMessage } from "./telegram.js";
+import { startPolling, stopPolling, sendMessage, sendHTML, sendMessageWithButtons, editMessage, editMessageWithButtons, sendRichMessage, editRichMessage, answerCallbackQuery, notifyOutOfRange, isEnabled as telegramEnabled, hasAllowedTelegramUsers, isAllowedTelegramUser, createLiveMessage, setCommandMenu } from "./telegram.js";
+import {
+  escapeHtml,
+  shortAddress,
+  formatNum,
+  formatCompactUsd,
+  formatSignedPct,
+  buildDashboardHtml,
+  buildPositionsPageHtml,
+  buildPositionDetailHtml,
+  buildClosePreviewHtml,
+  buildCloseAllPreviewHtml,
+  buildCycleReportHtml,
+  buildDustMenuHtml,
+  dustSpamIcon,
+  mdToTelegramHtml,
+  DETAIL_TABS,
+} from "./telegram-render.js";
+import { resolveTrackerConfig, listJsonlFiles, readJsonlFiles } from "./sol-equity-tracker.js";
+import { getAdvancedInfo as getOkxAdvancedInfo } from "./tools/okx.js";
 import { generateBriefing } from "./briefing.js";
 import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, getOutOfRangeExitPolicy, incrementLowYieldStrike, clearLowYieldStrike, markOhlcvDrawdownShadowTriggersLogged } from "./state.js";
-import { describeRangePolicyForPrompt, getActiveStrategy, resolveStrategyRangePolicy, computeDownsideBinsForPct } from "./strategy-library.js";
+import { buildDynamicRangeShadowTelemetry, describeRangePolicyForPrompt, getActiveStrategy, normalizeCandidateEvidenceForDeploy, resolveStrategyRangePolicy, computeDownsideBinsForPct, resolveDynamicRangeLiveDeployArgs } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote, getActiveCooldowns } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
 import { getTokenNarrative, getTokenInfo } from "./tools/token.js";
@@ -29,7 +49,13 @@ import { evaluateSupertrendLossExit } from "./supertrend-loss-exit.js";
 import { formatAutoresearchStatus } from "./autoresearch.js";
 import { buildStopLossConfirmationResult, buildStopLossExitDecision, calculatePnlVelocityDrop } from "./stop-loss-policy.js";
 import { evaluateFeeExitPolicy } from "./fee-exit-policy.js";
-import { evaluateFeeExitConfluenceFromRows, shouldGateFeeExitDecision } from "./fee-exit-confluence.js";
+import {
+  evaluateFeeExitConfluenceFromRows,
+  feeExitConfluenceBypassReason,
+  feeExitConfluenceMinRows,
+  filterClosedConfluenceCandles,
+  shouldGateFeeExitDecision,
+} from "./fee-exit-confluence.js";
 import { activeBinOracleRecorder } from "./active-bin-oracle.js";
 import { fetchOhlcv, getOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow.js";
 import { appendOhlcvDrawdownShadowRows } from "./ohlcv-drawdown-shadow-log.js";
@@ -45,6 +71,10 @@ import {
   buildEffectiveRangeStateFromPosition,
   finiteNumberOrNull,
 } from "./range-state.js";
+import {
+  allowsOutOfRangeExit,
+  allowsRecoveryHoldNonFeeExit,
+} from "./oor-exit-policy.js";
 
 log("startup", "DLMM LP Agent starting...");
 log("startup", `Mode: ${process.env.DRY_RUN === "true" ? "DRY RUN" : "LIVE"}`);
@@ -404,6 +434,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         position?.pnl_pct ?? null,
         config.management.trailingDropPct,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
+        config.management,
       );
       if (resolved?.confirmed) {
         log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
@@ -498,6 +529,14 @@ function isOorRepositionCloseRule(closeRule) {
   );
 }
 
+function isUrgentOorCloseRule(closeRule) {
+  return (
+    (closeRule?.rule === 3 || closeRule?.rule === 4) &&
+    closeRule?.urgent === true &&
+    closeRule?.indicatorPolicy === "bypass"
+  );
+}
+
 async function closeEmergencyDirect(position, exit, source = "management") {
   const pair = position?.pair || position?.pool_name || position?.position || "position";
   const reason = exit?.reason || "Emergency exit";
@@ -544,6 +583,18 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
     return { enabled: false, accepted: true, reason: "fee-exit confluence not required" };
   }
 
+  const bypassReason = feeExitConfluenceBypassReason(decision, policy);
+  if (bypassReason) {
+    return {
+      enabled: true,
+      accepted: true,
+      reason: `exit confluence bypassed: ${bypassReason}`,
+      signalCount: null,
+      signals: {},
+      confluenceBypassReason: bypassReason,
+    };
+  }
+
   const pool = position?.pool ?? position?.pool_address ?? tracked?.pool ?? null;
   const baseMint = position?.base_mint ?? tracked?.base_mint ?? null;
   if (!pool) {
@@ -551,27 +602,43 @@ async function evaluateFeeExitConfluence(position, tracked, decision) {
   }
 
   try {
-    const aggregateMin = policy.exitConfluenceAggregateMin ?? 5;
+    const aggregateMin = policy.exitConfluenceAggregateMin ?? 3;
+    const minRows = feeExitConfluenceMinRows(policy);
+    const closedCandlesOnly = policy.exitConfluenceClosedCandlesOnly !== false;
+    const candleCloseLagSeconds = Math.max(0, Number(policy.exitConfluenceCandleCloseLagSeconds ?? 10) || 0);
+    const beforeTimestamp = Math.floor((Date.now() - (closedCandlesOnly ? candleCloseLagSeconds * 1000 : 0)) / 1000);
     const lookbackMinutes = Math.max(
-      policy.exitConfluenceLookbackMinutes ?? 180,
+      policy.exitConfluenceLookbackMinutes ?? 90,
       Math.ceil(Number(position?.age_minutes ?? 0) || 0),
       60,
     );
     const ohlcv = await fetchOhlcv(pool, baseMint, {
       aggregateMin,
-      beforeTimestamp: Math.floor(Date.now() / 1000),
+      beforeTimestamp,
       lookbackMinutes,
+      minRows,
     });
     if (!ohlcv?.rows?.length) {
       return { enabled: true, accepted: false, reason: "exit confluence unavailable: no OHLCV rows" };
     }
-    const result = evaluateFeeExitConfluenceFromRows(ohlcv.rows, policy);
+    const closed = filterClosedConfluenceCandles(ohlcv.rows, {
+      closedCandlesOnly,
+      candleCloseLagSeconds,
+      nowMs: Date.now(),
+    });
+    const result = evaluateFeeExitConfluenceFromRows(closed.rows, policy);
     return {
       ...result,
       ohlcv: {
         source: ohlcv.source,
+        requestedAggregateMin: aggregateMin,
         aggregateMin: ohlcv.aggregateMin,
-        rowCount: ohlcv.rows.length,
+        rowCount: closed.rows.length,
+        rawRowCount: ohlcv.rows.length,
+        closedCandlesOnly: closed.closedCandlesOnly,
+        latestClosedCandleTs: closed.latestClosedCandleTs,
+        droppedOpenCandleCount: closed.droppedOpenCandleCount,
+        closeCutoffTs: closed.closeCutoffTs,
       },
     };
   } catch (error) {
@@ -607,6 +674,7 @@ async function handleFeeExitPolicyDecision(position, evaluation, source = "PnL p
         signal_count: confluence.signalCount ?? null,
         signals: confluence.signals ?? null,
         confluence_metrics: confluence.metrics ?? null,
+        confluence_bypass_reason: confluence.confluenceBypassReason ?? null,
         ohlcv: confluence.ohlcv ?? null,
       },
       source: "management.feeExitPolicy.confluence",
@@ -809,8 +877,8 @@ activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
     _activeBinOracleEmergencyInFlight.delete(positionAddress);
   }
 }, {
-  enabled: true,
-  maxPnlPct: 2,
+  enabled: config.management.activeBinVelocityEmergencyLiveEnabled === true,
+  maxPnlPct: config.management.activeBinVelocityEmergencyMaxPnlPct,
   belowRangeEnabled: config.management.activeBinBelowRangeEmergencyLiveEnabled === true,
   belowRangePnlPct: config.management.activeBinBelowRangeEmergencyPnlPct,
   belowRangeEntryDrawdownPct: config.management.activeBinBelowRangeEmergencyEntryDrawdownPct,
@@ -870,7 +938,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
   try {
     if (!silent && telegramEnabled()) {
-      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...");
+      liveMessage = await createLiveMessage("🔄 Management Cycle", "Evaluating positions...", { html: true });
     }
     const livePositions = await getMyPositions({ force: true }).catch(() => null);
     positions = livePositions?.positions || [];
@@ -878,7 +946,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     if (positions.length === 0) {
       log("cron", "No open positions — triggering screening cycle");
-      mgmtReport = "No open positions. Triggering screening cycle.";
+      mgmtReport = "🩶 No open positions — triggering a screening cycle to find an entry.";
       runScreeningCycle().catch((e) => log("cron_error", `Triggered screening failed: ${e.message}`));
       return mgmtReport;
     }
@@ -900,7 +968,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       await appendOhlcvDrawdownShadow(livePositions?.wallet, p);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
-          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct, config.management)) {
             scheduleTrailingDropConfirmation(p.position);
           }
           continue;
@@ -986,6 +1054,15 @@ export async function runManagementCycle({ silent = false } = {}) {
         }
         if (isEmergencyDirectExit(closeRule)) {
           const result = await closeEmergencyDirect(p, closeRule, "Management cycle");
+          actionMap.set(p.position, {
+            action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
+            reason: closeRule.reason,
+            result,
+          });
+          continue;
+        }
+        if (isUrgentOorCloseRule(closeRule)) {
+          const result = await closeEmergencyDirect(p, closeRule, "Management cycle urgent OOR");
           actionMap.set(p.position, {
             action: result?.success ? "CLOSED_DIRECT" : "DIRECT_CLOSE_FAILED",
             reason: closeRule.reason,
@@ -1083,22 +1160,51 @@ export async function runManagementCycle({ silent = false } = {}) {
     const totalValue = positionData.reduce((s, p) => s + (p.total_value_usd ?? 0), 0);
     const totalUnclaimed = positionData.reduce((s, p) => s + (p.unclaimed_fees_usd ?? 0), 0);
 
+    // Build pretty per-position cards (view-model + action annotations). The
+    // derived-aware range label is computed here via formatPositionRangeLabel.
     const reportLines = positionData.map((p) => {
       const act = actionMap.get(p.position);
-      const inRange = formatPositionRangeLabel(p);
-      const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
-      const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
-      const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
-      if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSED_DIRECT") line += `\n⚡ Closed directly: ${act.reason}`;
-      if (act.action === "DIRECT_CLOSE_FAILED") line += `\n⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Exit trigger: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
-      if (act.indicatorHold) line += `\nIndicator hold: ${act.indicatorHold}`;
-      if (act.action === "CLAIM") line += `\n→ Claiming fees`;
-      if (act.indicatorHold) line += `\n📊 Indicator hold: ${act.indicatorHold}`;
-      return line;
+      const inRange = formatPositionRangeLabel(p, { icon: false });
+      const actionTag = act.action === "INSTRUCTION"
+        ? "🧭 HOLD (instruction)"
+        : act.action === "STAY"
+          ? "STAY"
+          : act.action === "CLAIM"
+            ? "🪙 CLAIM"
+            : act.action === "CLOSED_DIRECT"
+              ? "⚡ CLOSED"
+              : act.action === "DIRECT_CLOSE_FAILED"
+                ? "⚠️ CLOSE FAILED"
+                : act.action === "CLOSE"
+                  ? (act.rule === "exit" ? "⚡ CLOSE" : "🔒 CLOSE")
+                  : act.action;
+      const notes = [];
+      if (p.instruction) notes.push(`📝 "${p.instruction}"`);
+      if (act.action === "CLOSED_DIRECT") notes.push(`⚡ Closed directly: ${act.reason}`);
+      if (act.action === "DIRECT_CLOSE_FAILED") notes.push(`⚠️ Direct emergency close failed: ${act.result?.error ?? "unknown"} — ${act.reason}`);
+      if (act.action === "CLOSE" && act.rule === "exit") notes.push(`⚡ Exit trigger: ${act.reason}`);
+      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") notes.push(`Rule ${act.rule}: ${act.reason}`);
+      if (act.action === "CLAIM") notes.push(`→ Claiming fees`);
+      if (act.indicatorHold) notes.push(`📊 Indicator hold: ${act.indicatorHold}`);
+      return {
+        tag: actionTag,
+        notes,
+        view: {
+          pair: p.pair,
+          address: p.position,
+          statusLabel: positionRangeStatus(p),
+          rangeLabel: inRange,
+          pnlPct: p.pnl_pct,
+          value: p.total_value_usd,
+          fees: p.unclaimed_fees_usd,
+          lowerBin: p.lower_bin,
+          upperBin: p.upper_bin,
+          activeBin: p.active_bin,
+          feePerTvl: finiteNumberOrNull(p.fee_per_tvl_24h),
+          ageMin: p.age_minutes,
+          solMode: config.management.solMode,
+        },
+      };
     });
 
     const needsAction = [...actionMap.values()].filter(a => !["STAY", "CLOSED_DIRECT", "DIRECT_CLOSE_FAILED"].includes(a.action));
@@ -1106,9 +1212,13 @@ export async function runManagementCycle({ silent = false } = {}) {
       ? needsAction.map(a => a.action === "INSTRUCTION" ? "EVAL instruction" : `${a.action}${a.reason ? ` (${a.reason})` : ""}`).join(", ")
       : "no action";
 
-    const cur = config.management.solMode ? "◎" : "$";
-    mgmtReport = reportLines.join("\n\n") +
-      `\n\nSummary: 💼 ${positions.length} positions | ${cur}${totalValue.toFixed(4)} | fees: ${cur}${totalUnclaimed.toFixed(4)} | ${actionSummary}`;
+    mgmtReport = buildCycleReportHtml({
+      items: reportLines,
+      totalValue,
+      totalFees: totalUnclaimed,
+      solMode: config.management.solMode,
+      actionSummary,
+    });
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
@@ -1119,6 +1229,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (actionPositions.length > 0) {
       log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
 
+      const cur = config.management.solMode ? "◎" : "$";
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
         return [
@@ -1149,10 +1260,10 @@ After executing, write a brief one-line result per position.
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
 
-      mgmtReport += `\n\n${content}`;
+      mgmtReport += `\n\n<b>⚙️ Actions taken</b>\n${mdToTelegramHtml(stripThink(content))}`;
     } else {
       log("cron", "Management: all positions STAY — skipping LLM");
-      await liveMessage?.note("No tool actions needed.");
+      await liveMessage?.note("All positions healthy — no action needed.");
     }
 
     // Trigger screening after management
@@ -1164,13 +1275,13 @@ After executing, write a brief one-line result per position.
     }
   } catch (error) {
     log("cron_error", `Management cycle failed: ${error.message}`);
-    mgmtReport = `Management cycle failed: ${error.message}`;
+    mgmtReport = mdToTelegramHtml(`❌ Management cycle failed: ${error.message}`);
   } finally {
     _managementBusy = false;
     if (!silent && telegramEnabled()) {
       if (mgmtReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(mgmtReport)).catch(() => {});
-        else sendMessage(`🔄 Management Cycle\n\n${stripThink(mgmtReport)}`).catch(() => { });
+        else sendHTML(`🔄 <b>Management Cycle</b>\n\n${stripThink(mgmtReport)}`).catch(() => { });
       }
       for (const p of positions) {
         const rangeState = buildEffectiveRangeStateFromPosition(p);
@@ -1218,7 +1329,7 @@ export async function runScreeningCycle({ silent = false } = {}) {
   let screenReport = null;
   const screeningDeadlineAt = Date.now() + Math.max(60_000, Number(config.rpcPressure?.screeningCycleBudgetMs ?? 4 * 60_000));
   if (!silent && telegramEnabled()) {
-    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...");
+    liveMessage = await createLiveMessage("🔍 Screening Cycle", "Checking wallet, positions, and safety guards...", { html: true });
   }
   try {
     prePositions = await getMyPositions({ force: true });
@@ -1508,15 +1619,15 @@ STEPS:
    If bins_below bounds are configured by the active strategy, keep bins_below inside those bounds. Do not use volatility expansion unless the strategy JSON explicitly defines it.
    For single-side SOL deploys, do not invent upside:
    set amount_y only, keep amount_x = 0, keep bins_above = 0, and let the upper bin stay at the active bin.
-3. Report in this exact format (no tables, no extra sections):
-   🚀 DEPLOYED
+3. Report in this exact format (use Telegram markdown — wrap every label in **double asterisks** so it renders bold; keep it compact and scannable, one metric per line, a blank line between sections; no tables, no extra sections):
+   🚀 **DEPLOYED**
 
-   <pool name>
-   <pool address>
+   **<pool name>**
+   \`<pool address>\`
 
-   ◎ <deploy amount> SOL | <strategy> | bin <active_bin>
-   Range: <minPrice> → <maxPrice>
-   Range cover: <downside %> downside | <upside %> upside | <total width %> total
+   💰 **Size** ◎<deploy amount> SOL  ·  **<strategy>**  ·  **bin** <active_bin>
+   📐 **Range** <minPrice> → <maxPrice>
+   🛡 **Cover** <downside %> down · <upside %> up · <total width %> total
 
    IMPORTANT:
    - Do NOT calculate the range percentages yourself.
@@ -1525,41 +1636,41 @@ STEPS:
      range_coverage.upside_pct
      range_coverage.width_pct
 
-   MARKET
-   Fee/TVL: <x>%
-   Volume: $<x>
-   TVL: $<x>
-   Volatility: <x>
-   Organic: <x>
-   Mcap: $<x>
-   Age: <x>h
+   📊 **Market**
+   • **Fee/TVL** <x>%
+   • **Volume** $<x>
+   • **TVL** $<x>
+   • **Volatility** <x>
+   • **Organic** <x>
+   • **Mcap** $<x>
+   • **Age** <x>h
 
-   AUDIT
-   Top10: <x>%
-   Bots: <x>%
-   Fees paid: <x> SOL
-   Smart wallets: <names or none>
+   🔍 **Audit**
+   • **Top 10** <x>%
+   • **Bots** <x>%
+   • **Fees paid** <x> SOL
+   • **Smart wallets** <names or none>
 
-   RISK
-   <If OKX advanced/risk data exists, list only the fields that actually exist: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
+   ⚠️ **Risk**
+   <If OKX advanced/risk data exists, list only the fields that actually exist, one per "• **Label** value" line: Risk level, Bundle, Sniper, Suspicious, ATH distance, Rugpull, Wash.>
    <If only rugpull/wash exist, list just those.>
-   <If OKX enrichment is missing, write exactly: OKX: unavailable>
+   <If OKX enrichment is missing, write exactly: • OKX: unavailable>
 
-   WHY THIS WON
-   <2-4 concise sentences on why this pool won, key risks, and why it still beat the alternatives>
-4. If no pool qualifies, report in this exact format instead:
-   ⛔ NO DEPLOY
+   🏆 **Why this won**
+   <2-4 concise, information-dense sentences: the decisive metrics that won it, the key risks you are accepting, and why it beat the runner-up by name.>
+4. If no pool qualifies, report in this EXACT format instead (also bold every label):
+   ⛔ **NO DEPLOY**
 
    Cycle finished with no valid entry.
 
-   BEST LOOKING CANDIDATE
+   👀 **Best looking candidate**
    <name or none>
 
-   WHY SKIPPED
-   <2-4 concise sentences explaining why nothing was good enough>
+   🚫 **Why skipped**
+   <2-4 concise sentences explaining why nothing cleared the bar.>
 
-   REJECTED
-   <short flat list of top candidate names and why they were skipped>
+   📋 **Rejected**
+   <short flat list, one per "• <name> — <reason>" line>
 IMPORTANT:
 - Never write "unknown" for OKX. Use real values, omit missing fields, or write exactly "OKX: unavailable".
 - Keep the whole report compact and highly scannable for Telegram.
@@ -1567,7 +1678,7 @@ IMPORTANT:
         onToolStart: async ({ name }) => { await liveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await liveMessage?.toolFinish(name, result, success); },
       });
-    screenReport = content;
+    screenReport = mdToTelegramHtml(stripThink(content));
     if (/⛔\s*NO DEPLOY/i.test(content)) {
       appendDecision({
         type: "no_deploy",
@@ -1578,13 +1689,13 @@ IMPORTANT:
     }
   } catch (error) {
     log("cron_error", `Screening cycle failed: ${error.message}`);
-    screenReport = `Screening cycle failed: ${error.message}`;
+    screenReport = mdToTelegramHtml(`❌ Screening cycle failed: ${error.message}`);
   } finally {
     _screeningBusy = false;
     if (!silent && telegramEnabled()) {
       if (screenReport) {
         if (liveMessage) await liveMessage.finalize(stripThink(screenReport)).catch(() => {});
-        else sendMessage(`🔍 Screening Cycle\n\n${stripThink(screenReport)}`).catch(() => { });
+        else sendHTML(`🔍 <b>Screening Cycle</b>\n\n${stripThink(screenReport)}`).catch(() => { });
       }
     }
   }
@@ -1671,7 +1782,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
             log("state", `[PnL poll] Exit indicator bypass: ${p.pair} — ${exit.reason}`);
           }
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
-            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct, config.management)) {
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
@@ -1740,9 +1851,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (maxHoldMinutes != null) {
           const tracked = getTrackedPosition(p.position);
           const deployedAt = tracked?.deployed_at ? new Date(tracked.deployed_at).getTime() : null;
+          const currentPnlPct = finiteNumberOrNull(p.pnl_pct);
+          const canMaxHoldClose = allowsRecoveryHoldNonFeeExit(
+            currentPnlPct,
+            config.management,
+            config.management.requirePositivePnlForMaxHoldExit,
+          );
           if (deployedAt != null && Number.isFinite(deployedAt)) {
             const ageMinutes = (Date.now() - deployedAt) / 60000;
-            if (ageMinutes >= maxHoldMinutes) {
+            if (ageMinutes >= maxHoldMinutes && canMaxHoldClose) {
               log("state", `[PnL poll] Max hold exit: ${p.pair} — age ${ageMinutes.toFixed(1)}m >= ${maxHoldMinutes}m — closing directly (no LLM)`);
               _pollTriggeredAt = Date.now();
               try {
@@ -1788,6 +1905,30 @@ Summarize the current portfolio health, total fees earned, and performance of al
               },
               onError: async (e) => {
                 log("cron_error", `Direct deterministic stop-loss error: ${e.message}`);
+                runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
+              },
+            });
+            if (!started) continue;
+            break;
+          }
+          if (isUrgentOorCloseRule(closeRule)) {
+            log("state", `[PnL poll] URGENT OOR close: ${p.pair} — Rule ${closeRule.rule}: ${closeRule.reason} — closing directly`);
+            _pollTriggeredAt = Date.now();
+            const started = startDirectCloseWithGuard({
+              positionAddress: p.position,
+              reason: closeRule.reason,
+              urgent: true,
+              source: "PnL poll urgent OOR",
+              onResult: async (result) => {
+                if (result?.success) {
+                  log("state", `[PnL poll] Direct urgent OOR close succeeded: ${p.pair} PnL=${result.pnl_pct?.toFixed(2) ?? "?"}%`);
+                } else {
+                  log("cron_error", `Direct urgent OOR close failed for ${p.pair}: ${result?.error ?? "unknown"}`);
+                  runManagementCycle({ silent: true }).catch((e) => log("cron_error", `Fallback management failed: ${e.message}`));
+                }
+              },
+              onError: async (e) => {
+                log("cron_error", `Direct urgent OOR close error: ${e.message}`);
                 runManagementCycle({ silent: true }).catch((e2) => log("cron_error", `Fallback management failed: ${e2.message}`));
               },
             });
@@ -1900,6 +2041,11 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   const currentPnlPct = finiteNumberOrNull(position.pnl_pct);
+  const canLowYieldClose = allowsRecoveryHoldNonFeeExit(
+    currentPnlPct,
+    managementConfig,
+    managementConfig.requirePositivePnlForLowYieldExit,
+  );
   if (!pnlSuspect) {
     const velocity = calculatePnlVelocityDrop(
       tracked?.pnl_history,
@@ -1919,17 +2065,27 @@ function getDeterministicCloseRule(position, managementConfig) {
   const rangeSide = position.range_side || deriveRangeSide(position);
   if (
     rangeSide === "above_range" &&
+    allowsOutOfRangeExit(currentPnlPct, managementConfig, { rangeSide, forceAboveRange: true }) &&
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
   ) {
-    return { action: "CLOSE", rule: 3, reason: "pumped far above range", rangeSide, oorSide: rangeSide };
+    return {
+      action: "CLOSE",
+      rule: 3,
+      reason: "pumped far above range",
+      urgent: true,
+      indicatorPolicy: "bypass",
+      rangeSide,
+      oorSide: rangeSide,
+    };
   }
+  const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
   if (
     (rangeSide === "above_range" || rangeSide === "below_range") &&
+    allowsOutOfRangeExit(currentPnlPct, managementConfig, { rangeSide, oorStage: oorExit?.stage }) &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
-    const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
     return {
       action: "CLOSE",
       rule: 4,
@@ -1946,7 +2102,8 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60) &&
+    canLowYieldClose
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
@@ -1967,8 +2124,14 @@ let _latestCandidates = [];
 let _latestCandidatesAt = null;
 
 function setLatestCandidates(candidates = []) {
-  _latestCandidates = Array.isArray(candidates) ? candidates : [];
-  _latestCandidatesAt = new Date().toISOString();
+  const cacheTs = new Date().toISOString();
+  _latestCandidates = Array.isArray(candidates)
+    ? candidates.map((candidate) => normalizeCandidateEvidenceForDeploy(candidate, {
+        decisionTs: cacheTs,
+        sourceStage: "latest_candidates_cache",
+      }))
+    : [];
+  _latestCandidatesAt = cacheTs;
 }
 
 function getLatestCandidatesMeta() {
@@ -2083,6 +2246,708 @@ function fmtSettingValue(value) {
 
 function settingButton(label, data) {
   return { text: label, callback_data: data };
+}
+
+const TELEGRAM_POSITIONS_PAGE_SIZE = 3;
+const TELEGRAM_ACTION_TTL_MS = Math.max(10_000, Number(config.telegram?.actionTtlMs ?? 60_000));
+const TELEGRAM_DUST_MAX_USD = Number(config.telegram?.dustMaxUsd ?? 5);
+const TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS = Number(config.telegram?.dustMaxPriceImpactBps ?? 250);
+const _telegramActions = new Map();
+let _telegramActionSeq = 0;
+
+// Presentation primitives (escapeHtml, formatNum, formatCurrency, rangeBar,
+// and the build* HTML helpers) live in the pure ./telegram-render.js module so
+// rendered message length can be budget-tested with fixtures. The helpers below
+// are the runtime-coupled glue: they read live tracker/config/range state and
+// turn a raw position into the plain view-model the renderer consumes.
+
+function telegramNowLabel() {
+  return new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Jakarta",
+    hour12: false,
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }) + " WIB";
+}
+
+function positionRangeStatus(position = {}) {
+  const state = buildPositionDisplayRangeState(position);
+  if (position.pnl_pct_suspicious || position.pnl_confidence === "degraded") return "DEGRADED PNL";
+  if (state.rangeStateMismatch) return "API LAG";
+  if (state.derivedRangeSide === "above_range") return "OOR ABOVE";
+  if (state.derivedRangeSide === "below_range") return "OOR BELOW";
+  if (state.preferredInRange === true || state.derivedRangeSide === "in_range") return "IN";
+  if (state.preferredInRange === false) return "OOR";
+  return "UNKNOWN";
+}
+
+function trackedForPosition(position = {}) {
+  return position?.position ? getTrackedPosition(position.position) : null;
+}
+
+function positionWidth(position = {}, tracked = null) {
+  const lower = finiteNumberOrNull(position.lower_bin ?? tracked?.bin_range?.min);
+  const upper = finiteNumberOrNull(position.upper_bin ?? tracked?.bin_range?.max);
+  if (lower == null || upper == null) return null;
+  return Math.abs(upper - lower);
+}
+
+function positionDownCoverage(position = {}, tracked = null) {
+  const binStep = finiteNumberOrNull(position.bin_step ?? tracked?.bin_step);
+  const width = positionWidth(position, tracked);
+  if (binStep == null || width == null) return null;
+  return Number(((width * binStep) / 10_000 * 100).toFixed(2));
+}
+
+// Turn a raw position (+ live tracker/range state) into the plain view-model the
+// pure renderer consumes. All runtime coupling lives here; the renderer stays
+// fixture-testable.
+function toPositionView(position = {}, index = 0) {
+  const tracked = trackedForPosition(position);
+  const entryMcap = tracked?.mcap ?? tracked?.signal_snapshot?.mcap ?? null;
+  return {
+    index,
+    pair: position.pair || tracked?.pool_name || shortAddress(position.pool),
+    address: position.position,
+    statusLabel: positionRangeStatus(position),
+    rangeLabel: formatPositionRangeLabel(position, { icon: false }),
+    pnlPct: position.pnl_pct,
+    pnlUsd: position.pnl_usd,
+    value: position.total_value_usd,
+    fees: position.unclaimed_fees_usd,
+    claimed: finiteNumberOrNull(tracked?.total_fees_claimed_usd),
+    lowerBin: position.lower_bin,
+    upperBin: position.upper_bin,
+    activeBin: position.active_bin,
+    binStep: finiteNumberOrNull(position.bin_step ?? tracked?.bin_step),
+    width: positionWidth(position, tracked),
+    downCoverage: positionDownCoverage(position, tracked),
+    baseFee: finiteNumberOrNull(tracked?.base_fee),
+    ageMin: position.age_minutes,
+    deploySol: finiteNumberOrNull(tracked?.amount_sol),
+    entryMcap,
+    feePerTvl: finiteNumberOrNull(position.fee_per_tvl_24h ?? tracked?.initial_fee_tvl_24h),
+    strategy: tracked?.strategy ?? null,
+    solMode: config.management.solMode,
+  };
+}
+
+function toPositionViews(positions = []) {
+  return positions.map((position, index) => toPositionView(position, index));
+}
+
+// Most recent WIB (Asia/Jakarta, UTC+7, no DST) midnight, as a UTC instant.
+function wibDayCutoffUtc(now = new Date()) {
+  const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
+  const shifted = new Date(now.getTime() + WIB_OFFSET_MS);
+  const midnightWib = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+  return new Date(midnightWib - WIB_OFFSET_MS);
+}
+
+// Read the SOL-equity sidecar (sol-equity-tracker) snapshots and derive the
+// numbers the dashboard surfaces: latest equity, since-baseline owner-adjusted
+// PnL, day PnL (vs the previous WIB-day-cutoff balance), and that prev-day
+// balance — all in SOL. Read-only; never throws into the caller.
+function readSolEquityTracker(now = new Date()) {
+  try {
+    const cfg = resolveTrackerConfig();
+    const files = listJsonlFiles(cfg.logDir, "sol-balance-snapshots-");
+    if (!files.length) return { available: false };
+    const { rows } = readJsonlFiles(files);
+    const snaps = rows
+      .filter((r) => r && r.event === "sol_balance_snapshot" && r.ts && finiteNumberOrNull(r.estimatedEquitySol) != null)
+      .filter((r) => !cfg.botName || !r.bot || r.bot === cfg.botName)
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts));
+    if (!snaps.length) return { available: false };
+    const latest = snaps[snaps.length - 1];
+    const cutoff = wibDayCutoffUtc(now);
+    const prior = snaps.filter((r) => new Date(r.ts) <= cutoff);
+    const prevDay = prior.length ? prior[prior.length - 1] : null;
+    const equitySol = finiteNumberOrNull(latest.estimatedEquitySol);
+    const prevDaySol = prevDay ? finiteNumberOrNull(prevDay.estimatedEquitySol) : null;
+    const dayPnlSol = (equitySol != null && prevDaySol != null) ? Number((equitySol - prevDaySol).toFixed(6)) : null;
+    const dayPnlPct = (dayPnlSol != null && prevDaySol) ? Number(((dayPnlSol / prevDaySol) * 100).toFixed(2)) : null;
+    return {
+      available: true,
+      stale: now.getTime() - new Date(latest.ts).getTime() > 10 * 60 * 1000,
+      asOf: latest.ts,
+      equitySol,
+      ownerPnlSol: finiteNumberOrNull(latest.ownerAdjustedPnlSol),
+      ownerPnlPct: finiteNumberOrNull(latest.ownerAdjustedPnlPct),
+      baselineEquitySol: finiteNumberOrNull(latest.baselineEquitySol),
+      dayPnlSol,
+      dayPnlPct,
+      prevDaySol,
+    };
+  } catch {
+    return { available: false };
+  }
+}
+
+function buildDashboardSummary(wallet, positionsResult) {
+  const positions = positionsResult?.positions || [];
+  const totalValue = positions.reduce((sum, p) => sum + (finiteNumberOrNull(p.total_value_usd) ?? 0), 0);
+  const freeSol = finiteNumberOrNull(wallet?.sol) ?? 0;
+  const tracker = readSolEquityTracker();
+  // Equity = TOTAL wallet value in SOL (free SOL + open-position SOL value +
+  // residual tokens). The SOL-equity sidecar is the free, accurate source of
+  // truth; fall back to a live free+positions estimate if it has no data. We do
+  // NOT call the paid/low-rpm LP Agent equity endpoint here.
+  const liveEquitySol = freeSol + totalValue;
+  const equitySol = (tracker?.available && tracker.equitySol != null) ? tracker.equitySol : liveEquitySol;
+  return {
+    nowLabel: telegramNowLabel(),
+    running: cronStarted,
+    dryRun: process.env.DRY_RUN === "true",
+    sol: wallet?.sol,
+    solUsd: wallet?.sol_usd,
+    equitySol,
+    equitySource: (tracker?.available && tracker.equitySol != null) ? "sidecar" : "live",
+    open: positions.length,
+    maxPositions: config.risk.maxPositions,
+    totalValue,
+    totalFees: positions.reduce((sum, p) => sum + (finiteNumberOrNull(p.unclaimed_fees_usd) ?? 0), 0),
+    solMode: config.management.solMode,
+    tracker,
+  };
+}
+
+function positionKeyboard(page = 0, positions = []) {
+  const start = page * TELEGRAM_POSITIONS_PAGE_SIZE;
+  const visible = positions.slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
+  const rows = visible.map((_, offset) => {
+    const index = start + offset;
+    return [
+      settingButton(`🔎 ${index + 1}`, `tg:detail:${index}:${page}:summary`),
+      settingButton(`🔒 Close ${index + 1}`, `tg:close_preview:${index}:${page}`),
+    ];
+  });
+  const nav = [];
+  if (page > 0) nav.push(settingButton("◀ Prev", `tg:pos:${page - 1}`));
+  if (start + TELEGRAM_POSITIONS_PAGE_SIZE < positions.length) nav.push(settingButton("Next ▶", `tg:pos:${page + 1}`));
+  if (nav.length) rows.push(nav);
+  rows.push([
+    settingButton("🔄 Refresh", `tg:pos:${page}`),
+    settingButton("🏠 Dashboard", "tg:dash"),
+  ]);
+  rows.push([
+    settingButton("🔒 Close All", "tg:close_all_preview"),
+    settingButton("🧹 Dust", "tg:dust"),
+  ]);
+  return rows;
+}
+
+function dashboardKeyboard() {
+  const cycleButton = cronStarted
+    ? settingButton("⏸ Pause", "tg:pause")
+    : settingButton("▶️ Resume", "tg:resume");
+  return [
+    [settingButton("📦 Positions", "tg:pos:0"), settingButton("🧹 Dust", "tg:dust")],
+    [cycleButton, settingButton("🔄 Refresh", "tg:dash")],
+    [settingButton("⛔ Stop Bot", "tg:stop_preview"), settingButton("⚙️ Settings", "cfg:page:main")],
+  ];
+}
+
+function detailTabButton(label, tab, index, page, activeTab) {
+  const text = tab === activeTab ? `• ${label}` : label;
+  return settingButton(text, `tg:detail:${index}:${page}:${tab}`);
+}
+
+function detailKeyboard(index, page = 0, activeTab = "summary") {
+  return [
+    [
+      detailTabButton("Summary", "summary", index, page, activeTab),
+      detailTabButton("Range", "range", index, page, activeTab),
+      detailTabButton("Market", "market", index, page, activeTab),
+    ],
+    [settingButton("🔒 Close", `tg:close_preview:${index}:${page}`), settingButton("🔄 Refresh", `tg:detail:${index}:${page}:${activeTab}`)],
+    [settingButton("◀ Back", `tg:pos:${page}`), settingButton("🏠 Dashboard", "tg:dash")],
+  ];
+}
+
+async function showRichOrSend({ html, keyboard = null, messageId = null }) {
+  if (messageId) {
+    return editRichMessage({ html, messageId, keyboard });
+  }
+  return sendRichMessage({ html, keyboard });
+}
+
+async function showTelegramDashboard(messageId = null) {
+  const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  return showRichOrSend({
+    html: buildDashboardHtml(buildDashboardSummary(wallet, positions)),
+    keyboard: dashboardKeyboard(),
+    messageId,
+  });
+}
+
+async function showTelegramPositions({ messageId = null, page = 0 } = {}) {
+  const { positions = [] } = await getMyPositions({ force: true });
+  const safePage = Math.max(0, Math.min(page, Math.floor(Math.max(positions.length - 1, 0) / TELEGRAM_POSITIONS_PAGE_SIZE)));
+  const start = safePage * TELEGRAM_POSITIONS_PAGE_SIZE;
+  const visible = toPositionViews(positions).slice(start, start + TELEGRAM_POSITIONS_PAGE_SIZE);
+  return showRichOrSend({
+    html: buildPositionsPageHtml({
+      views: visible,
+      total: positions.length,
+      maxPositions: config.risk.maxPositions,
+      nowLabel: telegramNowLabel(),
+    }),
+    keyboard: positionKeyboard(safePage, positions),
+    messageId,
+  });
+}
+
+async function showTelegramPositionDetail({ messageId = null, index = 0, page = 0, tab = "summary" } = {}) {
+  const safeTab = DETAIL_TABS.includes(tab) ? tab : "summary";
+  const { positions = [] } = await getMyPositions({ force: true });
+  const position = positions[index];
+  if (!position) {
+    return showRichOrSend({
+      html: "Position not found. Refresh the positions list.",
+      keyboard: [[settingButton("📦 Positions", `tg:pos:${page}`)]],
+      messageId,
+    });
+  }
+  return showRichOrSend({
+    html: buildPositionDetailHtml(toPositionView(position, index), safeTab),
+    keyboard: detailKeyboard(index, page, safeTab),
+    messageId,
+  });
+}
+
+function assertTelegramDestructiveAllowed(msg) {
+  if (!hasAllowedTelegramUsers()) {
+    return "Destructive Telegram controls require TELEGRAM_ALLOWED_USER_IDS.";
+  }
+  if (!isAllowedTelegramUser(msg?.from?.id)) {
+    return "This Telegram user is not allowed to execute destructive controls.";
+  }
+  return null;
+}
+
+function createTelegramAction(type, msg, payload = {}) {
+  const id = `a${(++_telegramActionSeq).toString(36)}`;
+  const now = Date.now();
+  _telegramActions.set(id, {
+    id,
+    type,
+    payload,
+    chatId: String(msg?.chat?.id ?? ""),
+    userId: String(msg?.from?.id ?? ""),
+    createdAt: now,
+    expiresAt: now + TELEGRAM_ACTION_TTL_MS,
+  });
+  return id;
+}
+
+function consumeTelegramAction(id, msg, expectedType) {
+  const action = _telegramActions.get(id);
+  _telegramActions.delete(id);
+  if (!action || action.type !== expectedType) return { error: "Action expired or invalid." };
+  if (Date.now() > action.expiresAt) return { error: "Action expired. Refresh and try again." };
+  if (action.chatId !== String(msg?.chat?.id ?? "") || action.userId !== String(msg?.from?.id ?? "")) {
+    return { error: "Action does not belong to this Telegram user/chat." };
+  }
+  return { action };
+}
+
+function closeResultLine(pair, result) {
+  if (!result?.success) return `${escapeHtml(pair)}: failed (${escapeHtml(result?.error || "unknown")})`;
+  const status = result.post_close_swap_status ? ` | swap ${result.post_close_swap_status}` : "";
+  const attention = result.requires_operator_attention ? " | residual attention" : "";
+  const tx = result.close_txs?.[0] || result.txs?.[0] || result.tx || null;
+  return `${escapeHtml(pair)}: closed ${escapeHtml(formatSignedPct(result.pnl_pct))}${status}${attention}${tx ? ` | ${escapeHtml(shortAddress(tx, 6, 6))}` : ""}`;
+}
+
+async function showClosePreview(msg, { index = 0, page = 0, messageId = null } = {}) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Back", `tg:pos:${page}`)]], messageId });
+  }
+  const { positions = [] } = await getMyPositions({ force: true });
+  const position = positions[index];
+  if (!position) {
+    return showRichOrSend({ html: "Position not found. Refresh first.", keyboard: [[settingButton("📦 Positions", `tg:pos:${page}`)]], messageId });
+  }
+  const actionId = createTelegramAction("close_one", msg, {
+    position: position.position,
+    pair: position.pair,
+    page,
+    snapshot: {
+      pnl_pct: position.pnl_pct,
+      total_value_usd: position.total_value_usd,
+      unclaimed_fees_usd: position.unclaimed_fees_usd,
+    },
+  });
+  return showRichOrSend({
+    html: buildClosePreviewHtml(toPositionView(position, index), Math.round(TELEGRAM_ACTION_TTL_MS / 1000)),
+    keyboard: [
+      [settingButton("✅ Confirm Close", `tg:act:${actionId}`)],
+      [settingButton("Cancel", `tg:detail:${index}:${page}:summary`)],
+    ],
+    messageId,
+  });
+}
+
+async function executeCloseOneAction(action) {
+  const result = await executeTool("close_position", {
+    position_address: action.payload.position,
+    reason: "Telegram operator close",
+  });
+  return [
+    `<b>Close Result</b>`,
+    closeResultLine(action.payload.pair || action.payload.position, result),
+    result.post_close_swap_error ? `Swap note: ${escapeHtml(result.post_close_swap_error)}` : null,
+  ].filter(Boolean).join("\n");
+}
+
+async function showCloseAllPreview(msg, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Positions", "tg:pos:0")]], messageId });
+  }
+  const { positions = [] } = await getMyPositions({ force: true });
+  if (!positions.length) {
+    return showRichOrSend({ html: "No open positions.", keyboard: [[settingButton("🏠 Dashboard", "tg:dash")]], messageId });
+  }
+  const actionId = createTelegramAction("close_all", msg, {
+    positions: positions.map((position) => ({
+      position: position.position,
+      pair: position.pair,
+      pnl_pct: position.pnl_pct,
+      total_value_usd: position.total_value_usd,
+    })),
+  });
+  const views = toPositionViews(positions);
+  const totalValue = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.total_value_usd) ?? 0), 0);
+  const totalPnlUsd = positions.reduce((sum, position) => sum + (finiteNumberOrNull(position.pnl_usd) ?? 0), 0);
+  const totalPnlPct = totalValue ? (totalPnlUsd / Math.max(1e-9, totalValue - totalPnlUsd)) * 100 : null;
+  return showRichOrSend({
+    html: buildCloseAllPreviewHtml({
+      views,
+      totalValue,
+      totalPnlPct,
+      solMode: config.management.solMode,
+      ttlSeconds: Math.round(TELEGRAM_ACTION_TTL_MS / 1000),
+    }),
+    keyboard: [
+      [settingButton("✅ Confirm Close All", `tg:act:${actionId}`)],
+      [settingButton("Cancel", "tg:pos:0")],
+    ],
+    messageId,
+  });
+}
+
+async function executeCloseAllAction(action) {
+  const results = [];
+  for (const item of action.payload.positions || []) {
+    try {
+      const result = await executeTool("close_position", {
+        position_address: item.position,
+        reason: "Telegram operator close-all",
+      });
+      results.push(closeResultLine(item.pair || item.position, result));
+    } catch (error) {
+      results.push(`${escapeHtml(item.pair || item.position)}: failed (${escapeHtml(error.message)})`);
+    }
+  }
+  return [`<b>Close All Result</b>`, "", ...results].join("\n");
+}
+
+// Spam/scam classification for dust tokens, combining OKX advanced-info and
+// GMGN top-trader risk. Cached briefly so opening/refreshing the dust menu
+// doesn't re-hit the APIs for every token each time.
+const _dustRiskCache = new Map(); // mint -> { ts, data }
+const DUST_RISK_TTL_MS = 5 * 60 * 1000;
+
+function classifyDustRisk(okx, gmgn) {
+  const flags = [];
+  if (okx) {
+    if (okx.is_honeypot) flags.push("honeypot");
+    const rl = finiteNumberOrNull(okx.risk_level);
+    if (rl != null && rl >= 4) flags.push(`risk ${rl}/5`);
+    if ((finiteNumberOrNull(okx.dev_rug_count) ?? 0) > 0) flags.push(`dev rugged ${okx.dev_rug_count}x`);
+    if (okx.dev_sold_all) flags.push("dev dumped");
+    if (okx.low_liquidity) flags.push("low liq");
+  }
+  if (gmgn) {
+    const top10 = finiteNumberOrNull(gmgn.top10_concentration_pct);
+    if (top10 != null && top10 >= 80) flags.push(`top10 ${Math.round(top10)}%`);
+    if ((finiteNumberOrNull(gmgn.suspicious_count) ?? 0) >= 3) flags.push(`${gmgn.suspicious_count} sus wallets`);
+  }
+  const haveData = Boolean(okx || gmgn);
+  return { verdict: !haveData ? "unknown" : (flags.length ? "spam" : "ok"), flags };
+}
+
+async function getDustRisk(mint) {
+  if (!mint) return { verdict: "unknown", flags: [] };
+  const cached = _dustRiskCache.get(mint);
+  if (cached && Date.now() - cached.ts < DUST_RISK_TTL_MS) return cached.data;
+  const [okx, gmgn] = await Promise.all([
+    getOkxAdvancedInfo(mint).catch(() => null),
+    fetchGmgnTokenRisk(mint).catch(() => null),
+  ]);
+  const data = classifyDustRisk(okx, gmgn);
+  _dustRiskCache.set(mint, { ts: Date.now(), data });
+  return data;
+}
+
+function toDustView(token, wallet, risk) {
+  const solPrice = finiteNumberOrNull(wallet?.sol_price);
+  const usd = finiteNumberOrNull(token.usd);
+  const valueSol = (usd != null && solPrice && solPrice > 0) ? usd / solPrice : null;
+  return {
+    symbol: token.symbol,
+    mint: token.mint,
+    amount: finiteNumberOrNull(token.balance),
+    usd,
+    valueSol,
+    verdict: risk?.verdict ?? "unknown",
+    flags: risk?.flags ?? [],
+  };
+}
+
+function dustCandidatesFromWallet(wallet, positions) {
+  const activeBaseMints = new Set((positions || []).map((position) => position.base_mint).filter(Boolean));
+  const stableMints = new Set([config.tokens.SOL, config.tokens.USDC, config.tokens.USDT]);
+  return (wallet?.tokens || [])
+    .filter((token) => token?.mint && !stableMints.has(token.mint))
+    .filter((token) => !activeBaseMints.has(token.mint))
+    .filter((token) => (finiteNumberOrNull(token.usd) ?? 0) > 0 && (finiteNumberOrNull(token.usd) ?? 0) <= TELEGRAM_DUST_MAX_USD)
+    .sort((a, b) => (finiteNumberOrNull(b.usd) ?? 0) - (finiteNumberOrNull(a.usd) ?? 0));
+}
+
+async function showDustMenu(messageId = null) {
+  const [wallet, { positions = [] }] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  const candidates = dustCandidatesFromWallet(wallet, positions).slice(0, 8);
+  const risks = await Promise.all(candidates.map((token) => getDustRisk(token.mint)));
+  const tokens = candidates.map((token, index) => toDustView(token, wallet, risks[index]));
+  const rows = candidates.map((token, index) => [
+    settingButton(`${dustSpamIcon(tokens[index].verdict)} Sell ${token.symbol || shortAddress(token.mint)} ${formatCompactUsd(token.usd)}`, `tg:dust_preview:${index}`),
+  ]);
+  rows.push([settingButton("🔄 Refresh", "tg:dust"), settingButton("🏠 Dashboard", "tg:dash")]);
+  rows.push([settingButton("🔥 Burn Tokens", "tg:burn_info")]);
+  return showRichOrSend({
+    html: buildDustMenuHtml({ tokens, thresholdUsd: TELEGRAM_DUST_MAX_USD, nowLabel: telegramNowLabel() }),
+    keyboard: rows,
+    messageId,
+  });
+}
+
+async function showDustPreview(msg, index, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Back", "tg:dust")]], messageId });
+  }
+  const [wallet, { positions = [] }] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
+  const candidates = dustCandidatesFromWallet(wallet, positions);
+  const token = candidates[index];
+  if (!token) return showRichOrSend({ html: "Dust token not found. Refresh first.", keyboard: [[settingButton("Dust", "tg:dust")]], messageId });
+  const [quote, risk] = await Promise.all([
+    quoteSwapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance }),
+    getDustRisk(token.mint),
+  ]);
+  const view = toDustView(token, wallet, risk);
+  const priceImpactBps = finiteNumberOrNull(quote?.swap_trace?.price_impact_bps);
+  const expectedOutRaw = quote?.swap_trace?.expected_out_raw ?? quote?.swap_trace?.order?.outAmount ?? null;
+  const quoteBlocked = !quote?.success || expectedOutRaw == null || (priceImpactBps != null && priceImpactBps > TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS);
+  const actionId = quoteBlocked ? null : createTelegramAction("sell_dust", msg, {
+    mint: token.mint,
+    symbol: token.symbol,
+    amount: token.balance,
+    usd: token.usd,
+    expected_out_raw: expectedOutRaw,
+    price_impact_bps: priceImpactBps,
+  });
+  const html = [
+    `<b>Dust Sell Preview</b>`,
+    `${dustSpamIcon(view.verdict)} <b>${escapeHtml(token.symbol || shortAddress(token.mint))}</b>`,
+    `Mint: <code>${escapeHtml(shortAddress(token.mint, 6, 6))}</code>`,
+    `Amount: ${escapeHtml(formatNum(token.balance, 8))}`,
+    `Value: ◎${escapeHtml(formatNum(view.valueSol, 4))} · ${escapeHtml(formatCompactUsd(token.usd))}`,
+    `Risk: ${dustSpamIcon(view.verdict)} ${escapeHtml(view.verdict)}${view.flags.length ? ` — ${escapeHtml(view.flags.join(", "))}` : ""} <i>(GMGN+OKX)</i>`,
+    "",
+    quote?.success
+      ? `Quote: expected SOL raw <code>${escapeHtml(expectedOutRaw ?? "?")}</code> | impact ${escapeHtml(priceImpactBps ?? "?")} bps`
+      : `Quote failed: ${escapeHtml(quote?.error || "unknown")}`,
+    quoteBlocked ? `Blocked: quote missing or impact > ${TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS} bps.` : `Confirm to swap this dust token to SOL.`,
+  ].join("\n");
+  return showRichOrSend({
+    html,
+    keyboard: [
+      ...(actionId ? [[settingButton("Confirm Sell Dust", `tg:act:${actionId}`)]] : []),
+      [settingButton("Back", "tg:dust")],
+    ],
+    messageId,
+  });
+}
+
+async function executeSellDustAction(action) {
+  const tokenUsd = finiteNumberOrNull(action.payload.usd) ?? 0;
+  if (tokenUsd > TELEGRAM_DUST_MAX_USD) {
+    return `Dust sell blocked: token value ${escapeHtml(formatCompactUsd(tokenUsd))} is above threshold.`;
+  }
+  const priceImpactBps = finiteNumberOrNull(action.payload.price_impact_bps);
+  if (!action.payload.expected_out_raw || (priceImpactBps != null && priceImpactBps > TELEGRAM_DUST_MAX_PRICE_IMPACT_BPS)) {
+    return "Dust sell blocked: quote is missing output or exceeds price-impact threshold. Refresh the dust preview.";
+  }
+  const result = await executeTool("swap_token", {
+    input_mint: action.payload.mint,
+    output_mint: "SOL",
+    amount: action.payload.amount,
+  });
+  if (!result?.success) return `Dust sell failed: ${escapeHtml(result?.error || "unknown")}`;
+  return [
+    `<b>Dust Sell Result</b>`,
+    `${escapeHtml(action.payload.symbol || shortAddress(action.payload.mint))}: swapped to SOL`,
+    `Tx: <code>${escapeHtml(shortAddress(result.tx, 8, 8))}</code>`,
+    `Out: ${escapeHtml(result.amount_out ?? "?")}`,
+  ].join("\n");
+}
+
+async function showStopPreview(msg, messageId = null) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId });
+  }
+  if (process.env.TELEGRAM_ENABLE_PM2_STOP !== "true") {
+    return showRichOrSend({
+      html: "PM2 stop is disabled. Set TELEGRAM_ENABLE_PM2_STOP=true on VPS to enable this danger control.",
+      keyboard: [[settingButton("Dashboard", "tg:dash")]],
+      messageId,
+    });
+  }
+  const pmId = process.env.pm_id;
+  if (!pmId) {
+    return showRichOrSend({
+      html: "PM2 stop unavailable: process.env.pm_id is missing. Use SSH/PM2 directly.",
+      keyboard: [[settingButton("Dashboard", "tg:dash")]],
+      messageId,
+    });
+  }
+  const actionId = createTelegramAction("pm2_stop", msg, { pmId });
+  return showRichOrSend({
+    html: [
+      `<b>Confirm Stop Bot</b>`,
+      "",
+      `This will run <code>pm2 stop ${escapeHtml(pmId)}</code>. Telegram control may go offline until restarted from SSH/PM2.`,
+      `Expires in ${Math.round(TELEGRAM_ACTION_TTL_MS / 1000)}s.`,
+    ].join("\n"),
+    keyboard: [
+      [settingButton("Confirm Stop Bot", `tg:act:${actionId}`)],
+      [settingButton("Cancel", "tg:dash")],
+    ],
+    messageId,
+  });
+}
+
+function pm2StopSelf(pmId) {
+  return new Promise((resolve) => {
+    execFile("pm2", ["stop", String(pmId)], { timeout: 10_000 }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ success: false, error: error.message, stderr });
+        return;
+      }
+      resolve({ success: true, stdout });
+    });
+  });
+}
+
+async function executePm2StopAction(action) {
+  if (process.env.TELEGRAM_ENABLE_PM2_STOP !== "true") return "PM2 stop is disabled.";
+  if (!process.env.pm_id || String(process.env.pm_id) !== String(action.payload.pmId)) {
+    return "PM2 stop blocked: pm_id changed or is missing.";
+  }
+  const result = await pm2StopSelf(action.payload.pmId);
+  return result.success
+    ? `PM2 stop requested for ${escapeHtml(action.payload.pmId)}.`
+    : `PM2 stop failed: ${escapeHtml(result.error || result.stderr || "unknown")}`;
+}
+
+async function executeTelegramAction(msg, id) {
+  const authError = assertTelegramDestructiveAllowed(msg);
+  if (authError) {
+    await answerCallbackQuery(msg.callbackQueryId, "Blocked");
+    return showRichOrSend({ html: escapeHtml(authError), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId: msg.messageId });
+  }
+  const raw = _telegramActions.get(id);
+  const expectedType = raw?.type;
+  const { action, error } = consumeTelegramAction(id, msg, expectedType);
+  if (error) {
+    await answerCallbackQuery(msg.callbackQueryId, "Expired");
+    return showRichOrSend({ html: escapeHtml(error), keyboard: [[settingButton("Dashboard", "tg:dash")]], messageId: msg.messageId });
+  }
+  await answerCallbackQuery(msg.callbackQueryId, "Executing");
+  let html;
+  if (action.type === "close_one") html = await executeCloseOneAction(action);
+  else if (action.type === "close_all") html = await executeCloseAllAction(action);
+  else if (action.type === "sell_dust") html = await executeSellDustAction(action);
+  else if (action.type === "pm2_stop") html = await executePm2StopAction(action);
+  else html = "Unknown action.";
+  return showRichOrSend({
+    html,
+    keyboard: [[settingButton("Dashboard", "tg:dash"), settingButton("Positions", "tg:pos:0")]],
+    messageId: msg.messageId,
+  });
+}
+
+async function applyTelegramControlCallback(msg) {
+  const data = msg.callbackData || msg.text || "";
+  const parts = data.split(":");
+  const action = parts[1];
+  if (action === "dash") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramDashboard(msg.messageId);
+  } else if (action === "pos") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramPositions({ messageId: msg.messageId, page: Number(parts[2] || 0) });
+  } else if (action === "detail") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showTelegramPositionDetail({ messageId: msg.messageId, index: Number(parts[2] || 0), page: Number(parts[3] || 0), tab: parts[4] || "summary" });
+  } else if (action === "close_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showClosePreview(msg, { index: Number(parts[2] || 0), page: Number(parts[3] || 0), messageId: msg.messageId });
+  } else if (action === "close_all_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showCloseAllPreview(msg, msg.messageId);
+  } else if (action === "dust") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showDustMenu(msg.messageId);
+  } else if (action === "dust_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showDustPreview(msg, Number(parts[2] || 0), msg.messageId);
+  } else if (action === "burn_info") {
+    await answerCallbackQuery(msg.callbackQueryId, "Deferred");
+    await showRichOrSend({
+      html: "Burn execution is deferred. It requires a separate approved ticket because token burns are irreversible.",
+      keyboard: [[settingButton("Dust", "tg:dust")]],
+      messageId: msg.messageId,
+    });
+  } else if (action === "pause") {
+    stopCronJobs();
+    cronStarted = false;
+    await answerCallbackQuery(msg.callbackQueryId, "Paused");
+    await showRichOrSend({ html: "Autonomous cycles paused. Telegram control remains online.", keyboard: dashboardKeyboard(), messageId: msg.messageId });
+  } else if (action === "resume") {
+    if (!cronStarted) {
+      cronStarted = true;
+      timers.managementLastRun = Date.now();
+      timers.screeningLastRun = Date.now();
+      startCronJobs();
+    }
+    await answerCallbackQuery(msg.callbackQueryId, "Resumed");
+    await showRichOrSend({ html: "Autonomous cycles resumed.", keyboard: dashboardKeyboard(), messageId: msg.messageId });
+  } else if (action === "stop_preview") {
+    await answerCallbackQuery(msg.callbackQueryId);
+    await showStopPreview(msg, msg.messageId);
+  } else if (action === "act") {
+    await executeTelegramAction(msg, parts[2]);
+  } else {
+    await answerCallbackQuery(msg.callbackQueryId, "Unknown");
+  }
 }
 
 function toggleButton(key, label) {
@@ -2334,33 +3199,52 @@ async function applySettingsMenuCallback(msg) {
   await showSettingsMenu({ messageId: msg.messageId, page });
 }
 
+const TELEGRAM_SLASH_COMMANDS = [
+  { command: "help", help: "/help — show commands", description: "Show commands" },
+  { command: "status", help: "/status — wallet + positions snapshot", description: "Wallet + positions snapshot" },
+  { command: "wallet", help: "/wallet — wallet, deploy amount, HiveMind status", description: "Wallet, deploy amount, HiveMind status" },
+  { command: "menu", help: "/menu — rich Telegram control dashboard", description: "Open control dashboard" },
+  { command: "positions", help: "/positions — rich open-position menu", description: "Open positions menu" },
+  { command: "pool", help: "/pool <n> — rich detail for one open position", description: "Position detail by number" },
+  { command: "close", help: "/close <n> — preview close for one position", description: "Preview close by position number" },
+  { command: "closeall", help: "/closeall — preview close all open positions", description: "Preview close all positions" },
+  { command: "set", help: "/set <n> <note> — set note/instruction on position", description: "Set note on position" },
+  { command: "config", help: "/config — show important runtime config", description: "Show runtime config" },
+  { command: "settings", help: "/settings — read-only inline settings menu", description: "Open settings menu" },
+  { command: "setcfg", help: "/setcfg <key> <value> — update persisted config", description: "Update persisted config" },
+  { command: "cooldowns", help: "/cooldowns — active pool + token cooldowns with countdown", description: "Show active cooldowns" },
+  { command: "screen", help: "/screen — refresh deterministic candidate list", description: "Refresh deterministic screen" },
+  { command: "candidates", help: "/candidates — show latest cached candidates", description: "Show latest candidates" },
+  { command: "deploy", help: "/deploy <n> — deploy candidate by cached index", description: "Deploy candidate by index" },
+  { command: "briefing", help: "/briefing — morning briefing", description: "Show morning briefing" },
+  { command: "autoresearch", help: "/autoresearch — shadow autoresearch status", description: "Show autoresearch status" },
+  { command: "hive", help: "/hive — HiveMind sync status", description: "HiveMind sync status" },
+  { command: "pause", help: "/pause — stop cron cycles", description: "Pause autonomous cycles" },
+  { command: "resume", help: "/resume — start cron cycles again", description: "Resume autonomous cycles" },
+  { command: "stop", help: "/stop — guarded PM2 stop preview when explicitly enabled", description: "Guarded PM2 stop preview" },
+];
+
+async function registerTelegramSlashCommands() {
+  const result = await setCommandMenu(TELEGRAM_SLASH_COMMANDS.map(({ command, description }) => ({ command, description })));
+  if (result?.ok) log("telegram", `Registered ${TELEGRAM_SLASH_COMMANDS.length} slash commands`);
+  else if (telegramEnabled()) log("telegram_warn", "Telegram slash command menu registration skipped or failed");
+  return result;
+}
+
 function formatHelpText() {
   return [
     "Telegram commands",
     "",
-    "/help — show commands",
-    "/status — wallet + positions snapshot",
-    "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
-    "/pool <n> — detailed info for one open position",
-    "/close <n> — close one position by index",
-    "/closeall — close all open positions",
-    "/set <n> <note> — set note/instruction on position",
-    "/config — show important runtime config",
-    "/settings — read-only inline settings menu",
-    "/setcfg <key> <value> — update persisted config",
-    "/cooldowns — active pool + token cooldowns with countdown",
-    "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
-    "/deploy <n> — deploy candidate by cached index",
-    "/briefing — morning briefing",
-    "/autoresearch — shadow autoresearch status",
-    "/hive — HiveMind sync status",
+    ...TELEGRAM_SLASH_COMMANDS.map(({ help }) => help),
     "/hive pull — manual HiveMind pull now",
-    "/pause — stop cron cycles",
-    "/resume — start cron cycles again",
-    "/stop — shut down agent",
   ].join("\n");
+}
+
+function normalizeTelegramCommandText(rawText) {
+  const text = String(rawText ?? "").trim();
+  return text.replace(/^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?(?=\s|$)(.*)$/s, (_, command, rest) => {
+    return `/${String(command).toLowerCase()}${rest || ""}`.trim();
+  });
 }
 
 async function runDeterministicScreen(limit = 5) {
@@ -2385,10 +3269,15 @@ async function runDeterministicScreen(limit = 5) {
 }
 
 async function deployLatestCandidate(index) {
-  const candidate = _latestCandidates[index];
+  let candidate = _latestCandidates[index];
   if (!candidate) {
     throw new Error("Invalid candidate index. Run /screen first.");
   }
+  const deployDecisionTs = new Date().toISOString();
+  candidate = normalizeCandidateEvidenceForDeploy(candidate, {
+    decisionTs: deployDecisionTs,
+    sourceStage: "deploy_latest_candidate",
+  });
   const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard(candidate, config.screening);
   if (targetPoolNeedleGuard.decision === "blocked") {
     throw new Error("Target-pool needle veto live block rejected cached candidate. Run /screen for a fresh candidate list.");
@@ -2397,16 +3286,20 @@ async function deployLatestCandidate(index) {
   if (tailLossChecked.length === 0) {
     throw new Error("Tail-loss protection live block rejected cached candidate. Run /screen for a fresh candidate list.");
   }
-  if (config.darwin?.enabled && candidate.pool) {
-    const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
-    stageSignals(candidate.pool, {
-      ...(candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate)),
-      base_mint: baseMint,
-    });
-  }
   const deployAmount = computeDeployAmount((await getWalletBalances()).sol);
   const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
   const binsAbove = activeRangePolicy.binsAbove ?? 0;
+  const dynamicRangeShadow = buildDynamicRangeShadowTelemetry(candidate, {
+    deployAmountSol: deployAmount,
+    assumedDeployUsd: config.screening?.dynamicEntryShadowAssumedDeployUsd,
+    rangePolicy: activeRangePolicy,
+    adaptiveWidthMode: config.strategy?.dynamicRangeAdaptiveWidthMode ?? config.screening?.dynamicRangeAdaptiveWidthMode,
+    currentRange: {
+      binsBelow: activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow,
+      binsAbove,
+      targetDownsidePct: activeRangePolicy.targetDownsidePct,
+    },
+  });
 
   // Compute bins_below: if strategy uses target_downside_pct, derive from pool bin_step
   let binsBelow;
@@ -2422,25 +3315,85 @@ async function deployLatestCandidate(index) {
   } else {
     binsBelow = activeRangePolicy.binsBelowDefault ?? config.strategy.binsBelow;
   }
+  const dynamicRangeLive = resolveDynamicRangeLiveDeployArgs({
+    candidate,
+    dynamicRangeShadow,
+    fallbackPool: candidate.pool,
+    fallbackBinsBelow: binsBelow,
+    fallbackBinStep: candidate.bin_step,
+    adaptiveWidthMode: config.strategy?.dynamicRangeAdaptiveWidthMode ?? config.screening?.dynamicRangeAdaptiveWidthMode,
+  });
+  const deployPoolAddress = dynamicRangeLive.pool_address ?? candidate.pool;
+  const deployBinsBelow = dynamicRangeLive.bins_below ?? binsBelow;
+  const deployBinStep = dynamicRangeLive.bin_step ?? candidate.bin_step;
+  const deployDynamicRangeShadow = {
+    ...dynamicRangeShadow,
+    cached_shadow_rebuilt_for_deploy: candidate.dynamic_range_shadow ? true : false,
+    cached_shadow_verdict: candidate.dynamic_range_shadow?.range_feasibility_shadow?.shadow_verdict ?? null,
+    live_application: dynamicRangeLive,
+  };
+  const deployProvenance = {
+    source: candidate.source_evidence?.source ?? null,
+    row_id: candidate.source_evidence?.row_id ?? null,
+    asof_ts: candidate.source_evidence?.asof_ts ?? null,
+    pool: candidate.pool ?? null,
+    base_mint: candidate.base_mint ?? candidate.baseMint ?? null,
+    quote_mint: candidate.quote_mint ?? candidate.quoteMint ?? null,
+    evidence_problems: candidate.source_evidence?.evidence_problems ?? candidate.evidence_problems ?? [],
+    same_mint_alternative_count: Array.isArray(candidate.source_evidence?.same_mint_alternatives)
+      ? candidate.source_evidence.same_mint_alternatives.length
+      : 0,
+    same_mint_alternative_statuses: Array.isArray(dynamicRangeShadow?.range_feasibility_shadow?.pool_normalization_candidates)
+      ? dynamicRangeShadow.range_feasibility_shadow.pool_normalization_candidates
+          .filter((entry) => entry?.is_current_pool === false)
+          .map((entry) => ({
+            pool: entry.pool ?? null,
+            evidence_status: entry.evidence_status ?? null,
+            pool_step_status: entry.pool_step_status ?? null,
+            recommendable_shadow: entry.recommendable_shadow === true,
+          }))
+      : [],
+  };
+  if (dynamicRangeLive.applied_to_deploy_args) {
+    log("deploy", `[dynamic_range_live] applying ${dynamicRangeLive.reason}: pool=${deployPoolAddress} bins_below=${deployBinsBelow} bin_step=${deployBinStep}`);
+  } else {
+    log("deploy", `[dynamic_range_live] fallback to strategy range: reason=${dynamicRangeLive.reason} pool=${deployPoolAddress} bins_below=${deployBinsBelow}`);
+  }
+  if (config.darwin?.enabled && deployPoolAddress) {
+    const baseMint = candidate.base?.mint || candidate.base_mint || candidate.mint || null;
+    stageSignals(deployPoolAddress, {
+      ...(candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate)),
+      base_mint: baseMint,
+    });
+  }
   const result = await executeTool("deploy_position", {
-    pool_address: candidate.pool,
+    pool_address: deployPoolAddress,
     amount_y: deployAmount,
     strategy: activeRangePolicy.lpStrategy || config.strategy.strategy,
-    bins_below: binsBelow,
+    bins_below: deployBinsBelow,
     bins_above: binsAbove,
     pool_name: candidate.name,
     base_mint: candidate.base?.mint || candidate.base_mint || null,
-    bin_step: candidate.bin_step,
+    bin_step: deployBinStep,
     base_fee: candidate.base_fee,
     volatility: candidate.volatility,
+    mcap: candidate.mcap,
+    active_tvl: candidate.active_tvl ?? candidate.tvl ?? null,
+    price_change_pct: candidate.price_change_pct ?? candidate.change_1h,
+    deploy_share_of_active_tvl_pct: candidate.deploy_share_of_active_tvl_pct ?? candidate.dynamic_entry_shadow?.deploy_share_of_active_tvl_pct,
     fee_tvl_ratio: candidate.fee_active_tvl_ratio ?? candidate.fee_tvl_ratio,
+    volume_active_tvl_multiple: candidate.volume_active_tvl_multiple,
+    fee_velocity_usd_per_min: candidate.fee_velocity_usd_per_min,
     organic_score: candidate.organic_score,
     initial_value_usd: candidate.active_tvl ?? candidate.tvl ?? null,
+    shadow_data_collection: (candidate.darwin_signal_snapshot || getCandidateSignalSnapshot(candidate))?.shadow_data_collection ?? null,
+    dynamic_range_shadow: deployDynamicRangeShadow,
+    deploy_provenance: deployProvenance,
   });
   if (result?.success === false || result?.error) {
     throw new Error(result.error || "Deploy failed");
   }
-  return { result, candidate, deployAmount, binsBelow };
+  return { result, candidate, deployAmount, binsBelow: deployBinsBelow, dynamicRangeLive };
 }
 
 function appendHistory(userMsg, assistantMsg) {
@@ -2466,15 +3419,25 @@ async function drainTelegramQueue() {
 }
 
 async function telegramHandler(msg) {
-  const text = (msg?.callbackData || msg?.text || "").trim();
+  const text = normalizeTelegramCommandText(msg?.callbackData || msg?.text || "");
   if (!text) return;
+
+  if (text.startsWith("tg:")) {
+    await applyTelegramControlCallback(msg);
+    return;
+  }
 
   if (text.startsWith("cfg:")) {
     await applySettingsMenuCallback(msg);
     return;
   }
 
-  if (["/settings", "/menu", "/configmenu"].includes(text)) {
+  if (text === "/menu") {
+    await showTelegramDashboard();
+    return;
+  }
+
+  if (["/settings", "/configmenu"].includes(text)) {
     await showSettingsMenu();
     return;
   }
@@ -2509,11 +3472,20 @@ async function telegramHandler(msg) {
     return;
   }
 
-  if (text === "/wallet" || text === "/status") {
+  if (text === "/status") {
+    try {
+      await showTelegramDashboard();
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/wallet") {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
+      const suffix = positions.total_positions
+        ? `\n\nUse /positions for the rich position menu.`
         : "";
       await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => {});
     } catch (e) {
@@ -2566,16 +3538,7 @@ async function telegramHandler(msg) {
 
   if (text === "/positions") {
     try {
-      const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
-      const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
-        const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const range = formatPositionRangeLabel(p);
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age} | ${range}`;
-      });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+      await showTelegramPositions();
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
@@ -2584,19 +3547,7 @@ async function telegramHandler(msg) {
   if (poolMatch) {
     try {
       const idx = parseInt(poolMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage([
-        `${idx + 1}. ${pos.pair}`,
-        `Pool: ${pos.pool}`,
-        `Position: ${pos.position}`,
-        `Range: ${pos.lower_bin} → ${pos.upper_bin} | active ${pos.active_bin}`,
-        `PnL: ${pos.pnl_pct ?? "?"}% | fees: ${config.management.solMode ? "◎" : "$"}${pos.unclaimed_fees_usd ?? "?"}`,
-        `Value: ${config.management.solMode ? "◎" : "$"}${pos.total_value_usd ?? "?"}`,
-        `Age: ${pos.age_minutes ?? "?"}m | ${formatPositionRangeLabel(pos)}`,
-        pos.instruction ? `Note: ${pos.instruction}` : null,
-      ].filter(Boolean).join("\n"));
+      await showTelegramPositionDetail({ index: idx, page: 0 });
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2607,37 +3558,14 @@ async function telegramHandler(msg) {
   if (closeMatch) {
     try {
       const idx = parseInt(closeMatch[1]) - 1;
-      const { positions } = await getMyPositions({ force: true });
-      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
-      const pos = positions[idx];
-      await sendMessage(`Closing ${pos.pair}...`);
-      const result = await closePosition({ position_address: pos.position });
-      if (result.success) {
-        const closeTxs = result.close_txs?.length ? result.close_txs : result.txs;
-        const claimNote = result.claim_txs?.length ? `\nClaim txs: ${result.claim_txs.join(", ")}` : "";
-        await sendMessage(`✅ Closed ${pos.pair}\nPnL: ${config.management.solMode ? "◎" : "$"}${result.pnl_usd ?? "?"} | close txs: ${closeTxs?.join(", ") || "n/a"}${claimNote}`);
-      } else {
-        await sendMessage(`❌ Close failed: ${JSON.stringify(result)}`);
-      }
+      await showClosePreview(msg, { index: idx, page: 0 });
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => {}); }
     return;
   }
 
   if (text === "/closeall") {
     try {
-      const { positions } = await getMyPositions({ force: true });
-      if (!positions.length) { await sendMessage("No open positions."); return; }
-      await sendMessage(`Closing ${positions.length} position(s)...`);
-      const results = [];
-      for (const pos of positions) {
-        try {
-          const result = await closePosition({ position_address: pos.position });
-          results.push(`${pos.pair}: ${result.success ? "closed" : `failed (${result.error || "unknown"})`}`);
-        } catch (error) {
-          results.push(`${pos.pair}: failed (${error.message})`);
-        }
-      }
-      await sendMessage(`Close-all finished.\n\n${results.join("\n")}`).catch(() => {});
+      await showCloseAllPreview(msg);
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
@@ -2730,6 +3658,15 @@ async function telegramHandler(msg) {
       await sendMessage("▶️ Autonomous cycles resumed.").catch(() => {});
     } else {
       await sendMessage("Autonomous cycles are already running.").catch(() => {});
+    }
+    return;
+  }
+
+  if (text === "/stop") {
+    try {
+      await showStopPreview(msg);
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => {});
     }
     return;
   }
@@ -2883,6 +3820,7 @@ if (isTTY) {
   maybeRunMissedBriefing().catch(() => { });
 
   startPolling(telegramHandler);
+  registerTelegramSlashCommands().catch((error) => log("telegram_warn", `Slash command menu registration failed: ${error.message}`));
 
   console.log(`
 Commands:
@@ -3107,14 +4045,18 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 } else {
   // Non-TTY: start immediately
   log("startup", "Non-TTY mode — starting cron cycles immediately.");
+  cronStarted = true; // reflect running state so the Telegram dashboard shows Running, not Paused
+  timers.managementLastRun = Date.now();
+  timers.screeningLastRun = Date.now();
   startCronJobs();
   maybeRunMissedBriefing().catch(() => { });
   startPolling(telegramHandler);
+  registerTelegramSlashCommands().catch((error) => log("telegram_warn", `Slash command menu registration failed: ${error.message}`));
   (async () => {
     let startupLiveMessage = null;
     try {
       if (telegramEnabled()) {
-        startupLiveMessage = await createLiveMessage("🚀 Startup Check", "Checking wallet, open positions, and best current opportunity...");
+        startupLiveMessage = await createLiveMessage("🚀 Startup Check", "Checking wallet, open positions, and best current opportunity...", { html: true });
       }
       const startupStep3 = process.env.DRY_RUN === "true"
         ? `3. Ignore wallet SOL threshold in dry run: get_top_candidates then simulate deploy ${DEPLOY} SOL.`
@@ -3123,20 +4065,36 @@ Focus on: hold duration, entry/exit timing, what win rates look like, whether sc
 STARTUP CHECK
 1. get_wallet_balance. 2. get_my_positions. ${startupStep3} 4. Report.
 When reporting open positions, use effective derived bin range state (range_side from fresh active/lower/upper bins) as the range truth when available. If in_range says true but range_side is above_range or below_range, explicitly report API lag telemetry and do not describe the position as simply healthy in range.
+
+REPORT FORMAT — use Telegram markdown (wrap every label in **double asterisks** for bold), keep it compact and scannable, one metric per line, a blank line between sections:
+
+💼 **Wallet**
+• **SOL** <balance> ($<usd>)
+• **Equity** $<total portfolio value>
+• **Threshold** <met/not met — deployed N SOL | skipped>
+
+📦 **Open positions (<count>)**
+For each, two lines:
+**<name>** — **<IN | OOR↑ | OOR↓ | API lag>**  ·  PnL <±x%>  ·  fees $<x>
+bins <lower>→<upper> · active <active> · <minutes OOR if any>
+
+🆕 **New deploy** (only if you deployed this startup; otherwise omit this whole section)
+**<name>** — ◎<size> SOL · <strategy> · bin <active>
+<one sentence on why it qualified>
       `, config.llm.maxSteps, [], "SCREENER", config.llm.screeningModel, null, {
         onToolStart: async ({ name }) => { await startupLiveMessage?.toolStart(name); },
         onToolFinish: async ({ name, result, success }) => { await startupLiveMessage?.toolFinish(name, result, success); },
       });
       if (startupLiveMessage) {
-        await startupLiveMessage.finalize(stripThink(content)).catch(() => {});
+        await startupLiveMessage.finalize(mdToTelegramHtml(stripThink(content))).catch(() => {});
       } else if (telegramEnabled()) {
-        await sendMessage(`🚀 Startup Check\n\n${stripThink(content)}`).catch(() => {});
+        await sendHTML(`🚀 <b>Startup Check</b>\n\n${mdToTelegramHtml(stripThink(content))}`).catch(() => {});
       }
     } catch (e) {
       if (startupLiveMessage) {
         await startupLiveMessage.fail(e.message).catch(() => {});
       } else if (telegramEnabled()) {
-        await sendMessage(`🚀 Startup Check\n\n❌ ${e.message}`).catch(() => {});
+        await sendHTML(`🚀 <b>Startup Check</b>\n\n❌ ${mdToTelegramHtml(e.message)}`).catch(() => {});
       }
       log("startup_error", e.message);
     }

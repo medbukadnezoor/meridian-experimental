@@ -22,6 +22,10 @@ import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsO
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
 import { config, computeDeployAmount, reloadScreeningThresholds } from "../config.js";
 import { normalizeForcedSingleSidedSolBidAskArgs } from "./single-side-bidask-guard.js";
+import { applyRangeWidthDecision } from "../range-width-decision.js";
+import { applyDynamicPoolSizing } from "../dynamic-pool-sizing.js";
+import { evaluateFabriqOhlcvEntryGate } from "../fabriq-ohlcv-entry-gate.js";
+import { evaluateCriticalThinEntryOverlay } from "../critical-thin-entry-overlay.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import path from "path";
@@ -185,6 +189,24 @@ const toolMap = {
       targetPoolNeedleVetoHighDrawdownPct: ["screening", "targetPoolNeedleVetoHighDrawdownPct"],
       targetPoolNeedleVetoMinHighRunupPct: ["screening", "targetPoolNeedleVetoMinHighRunupPct"],
       targetPoolNeedleVetoLiveReasonCodes: ["screening", "targetPoolNeedleVetoLiveReasonCodes"],
+      fabriqOhlcvEntryGateEnabled: ["screening", "fabriqOhlcvEntryGateEnabled"],
+      fabriqOhlcvEntryGateMode: ["screening", "fabriqOhlcvEntryGateMode"],
+      fabriqOhlcvEntryGateProviders: ["screening", "fabriqOhlcvEntryGateProviders"],
+      fabriqOhlcvEntryGateDecisiveProviderOrder: ["screening", "fabriqOhlcvEntryGateDecisiveProviderOrder"],
+      fabriqOhlcvEntryGateIntervals: ["screening", "fabriqOhlcvEntryGateIntervals"],
+      fabriqOhlcvEntryGateLookbackMinutes: ["screening", "fabriqOhlcvEntryGateLookbackMinutes"],
+      fabriqOhlcvEntryGateMinRows: ["screening", "fabriqOhlcvEntryGateMinRows"],
+      fabriqOhlcvEntryGateBlockOnMissingOhlcv: ["screening", "fabriqOhlcvEntryGateBlockOnMissingOhlcv"],
+      criticalThinEntryOverlayEnabled: ["screening", "criticalThinEntryOverlayEnabled"],
+      criticalThinEntryOverlayMode: ["screening", "criticalThinEntryOverlayMode"],
+      criticalThinMcapUsd: ["screening", "criticalThinMcapUsd"],
+      criticalThinActiveTvlUsd: ["screening", "criticalThinActiveTvlUsd"],
+      criticalThinWatchMcapUsd: ["screening", "criticalThinWatchMcapUsd"],
+      criticalThinWatchActiveTvlUsd: ["screening", "criticalThinWatchActiveTvlUsd"],
+      criticalThinRequireChartAccept: ["screening", "criticalThinRequireChartAccept"],
+      criticalThinMinFeeActiveTvlRatio: ["screening", "criticalThinMinFeeActiveTvlRatio"],
+      criticalThinMinVolumeActiveTvlMultiple: ["screening", "criticalThinMinVolumeActiveTvlMultiple"],
+      criticalThinBlockOnMissingInputs: ["screening", "criticalThinBlockOnMissingInputs"],
       minFeePerTvl24h: ["management", "minFeePerTvl24h"],
       // management
       minClaimAmount: ["management", "minClaimAmount"],
@@ -199,6 +221,10 @@ const toolMap = {
       repeatDeployCooldownScope: ["management", "repeatDeployCooldownScope"],
       repeatDeployCooldownMinFeeEarnedPct: ["management", "repeatDeployCooldownMinFeeEarnedPct"],
       minVolumeToRebalance: ["management", "minVolumeToRebalance"],
+      recoveryHoldProfileEnabled: ["management", "recoveryHoldProfileEnabled"],
+      requirePositivePnlForOutOfRangeExit: ["management", "requirePositivePnlForOutOfRangeExit"],
+      requirePositivePnlForLowYieldExit: ["management", "requirePositivePnlForLowYieldExit"],
+      requirePositivePnlForMaxHoldExit: ["management", "requirePositivePnlForMaxHoldExit"],
       stopLossPct: ["management", "stopLossPct"],
       stopLossConfirmDelayMs: ["management", "stopLossConfirmDelayMs"],
       hardStopLossPct: ["management", "hardStopLossPct"],
@@ -226,6 +252,11 @@ const toolMap = {
       profitGivebackEmergencyEnabled: ["management", "profitGivebackEmergencyEnabled"],
       profitGivebackTriggerPct: ["management", "profitGivebackTriggerPct"],
       profitGivebackFloorPct: ["management", "profitGivebackFloorPct"],
+      activeBinBelowRangeEmergencyLiveEnabled: ["management", "activeBinBelowRangeEmergencyLiveEnabled"],
+      activeBinBelowRangeEmergencyPnlPct: ["management", "activeBinBelowRangeEmergencyPnlPct"],
+      activeBinBelowRangeEmergencyEntryDrawdownPct: ["management", "activeBinBelowRangeEmergencyEntryDrawdownPct"],
+      activeBinVelocityEmergencyLiveEnabled: ["management", "activeBinVelocityEmergencyLiveEnabled"],
+      activeBinVelocityEmergencyMaxPnlPct: ["management", "activeBinVelocityEmergencyMaxPnlPct"],
       pnlSanityMaxDiffPct: ["management", "pnlSanityMaxDiffPct"],
       earlyDumpPct: ["management", "earlyDumpPct"],
       earlyDumpMaxAgeMin: ["management", "earlyDumpMaxAgeMin"],
@@ -258,6 +289,32 @@ const toolMap = {
       // strategy
       strategy: ["strategy", "strategy"],
       binsBelow: ["strategy", "binsBelow"],
+      minSingleSidedSolBins: ["strategy", "minSingleSidedSolBins"],
+      dynamicRangeWidthEnabled: ["strategy", "dynamicRangeWidthEnabled"],
+      dynamicRangeWidthMode: ["strategy", "dynamicRangeWidthMode"],
+      dynamicRangeWidthMinBins: ["strategy", "dynamicRangeWidthMinBins"],
+      dynamicRangeWidthMaxBins: ["strategy", "dynamicRangeWidthMaxBins"],
+      dynamicRangeWidthBlockOnMissingInputs: ["strategy", "dynamicRangeWidthBlockOnMissingInputs"],
+      dynamicRangeWidthMaxDeploySharePct: ["strategy", "dynamicRangeWidthMaxDeploySharePct"],
+      dynamicRangeWidthLowerMcapInputFloor: ["strategy", "dynamicRangeWidthLowerMcapInputFloor"],
+      dynamicRangeWidthMinTargetDownsidePct: ["strategy", "dynamicRangeWidthMinTargetDownsidePct"],
+      dynamicRangeWidthFeeDensityTighteningEnabled: ["strategy", "dynamicRangeWidthFeeDensityTighteningEnabled"],
+      dynamicRangeWidthStrongFeeActiveTvlRatio: ["strategy", "dynamicRangeWidthStrongFeeActiveTvlRatio"],
+      dynamicRangeWidthStrongVolumeActiveTvlMultiple: ["strategy", "dynamicRangeWidthStrongVolumeActiveTvlMultiple"],
+      dynamicRangeWidthStrongFeeVelocityUsdPerMin: ["strategy", "dynamicRangeWidthStrongFeeVelocityUsdPerMin"],
+      dynamicRangeWidthStrongTightenPct: ["strategy", "dynamicRangeWidthStrongTightenPct"],
+      dynamicRangeWidthGoodFeeActiveTvlRatio: ["strategy", "dynamicRangeWidthGoodFeeActiveTvlRatio"],
+      dynamicRangeWidthGoodVolumeActiveTvlMultiple: ["strategy", "dynamicRangeWidthGoodVolumeActiveTvlMultiple"],
+      dynamicRangeWidthGoodTightenPct: ["strategy", "dynamicRangeWidthGoodTightenPct"],
+      dynamicRangeWidthTiers: ["strategy", "dynamicRangeWidthTiers"],
+      dynamicPoolSizingEnabled: ["strategy", "dynamicPoolSizingEnabled"],
+      dynamicPoolSizingMode: ["strategy", "dynamicPoolSizingMode"],
+      dynamicPoolSizingTargetActiveTvlSharePct: ["strategy", "dynamicPoolSizingTargetActiveTvlSharePct"],
+      dynamicPoolSizingHardActiveTvlSharePct: ["strategy", "dynamicPoolSizingHardActiveTvlSharePct"],
+      dynamicPoolSizingMinDeploySol: ["strategy", "dynamicPoolSizingMinDeploySol"],
+      dynamicPoolSizingMaxDeploySol: ["strategy", "dynamicPoolSizingMaxDeploySol"],
+      dynamicPoolSizingBlockBelowMin: ["strategy", "dynamicPoolSizingBlockBelowMin"],
+      dynamicPoolSizingBlockOnMissingInputs: ["strategy", "dynamicPoolSizingBlockOnMissingInputs"],
       // hivemind
       hiveMindUrl: ["hiveMind", "url"],
       hiveMindApiKey: ["hiveMind", "apiKey"],
@@ -542,9 +599,49 @@ export async function executeTool(name, args) {
   }
 
   if (name === "deploy_position") {
-    const forcedDeployAmountSol = process.env.DRY_RUN === "true"
+    const walletSnapshot = process.env.DRY_RUN === "true"
+      ? { sol: null, sol_price: args?.sol_usd ?? args?.sol_price ?? null }
+      : await getWalletBalances().catch(() => ({ sol: null, sol_price: args?.sol_usd ?? args?.sol_price ?? null }));
+    const dynamicPoolSizing = applyDynamicPoolSizing(args, config, {
+      solUsd: walletSnapshot?.sol_price ?? args?.sol_usd ?? args?.sol_price ?? null,
+    });
+    args = dynamicPoolSizing.args;
+    if (!dynamicPoolSizing.ok) {
+      log("deploy_reject", `[dynamic-pool-sizing] ${dynamicPoolSizing.reason}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
+        reason: dynamicPoolSizing.reason,
+        metrics: {
+          dynamic_pool_sizing_decision: dynamicPoolSizing.decision,
+        },
+        deploy: {
+          dynamic_pool_sizing_decision: dynamicPoolSizing.decision,
+          args,
+        },
+        source: "executor.dynamic_pool_sizing",
+      });
+      return {
+        success: false,
+        blocked: true,
+        reason: dynamicPoolSizing.reason,
+        dynamic_pool_sizing_decision: dynamicPoolSizing.decision,
+      };
+    }
+    if (dynamicPoolSizing.decision?.decision === "override") {
+      log("deploy", `[dynamic-pool-sizing] Override amount_y ${dynamicPoolSizing.decision.original_amount_y} -> ${dynamicPoolSizing.decision.final_amount_y} active_tvl=$${dynamicPoolSizing.decision.active_tvl_usd} sol=$${dynamicPoolSizing.decision.sol_usd}`);
+    } else if (dynamicPoolSizing.decision?.decision === "shadow_only") {
+      log("deploy", `[dynamic-pool-sizing] Shadow decision=${JSON.stringify(dynamicPoolSizing.decision)}`);
+    }
+
+    const forcedDeployAmountSol = dynamicPoolSizing.decision?.live_applied === true && dynamicPoolSizing.decision?.final_amount_y != null
+      ? dynamicPoolSizing.decision.final_amount_y
+      : process.env.DRY_RUN === "true"
       ? config.management.deployAmountSol
-      : computeDeployAmount((await getWalletBalances().catch(() => ({ sol: null }))).sol);
+      : computeDeployAmount(walletSnapshot?.sol);
     const activeRangePolicy = resolveStrategyRangePolicy(getActiveStrategy(), config);
     const forcedDeploy = normalizeForcedSingleSidedSolBidAskArgs(args, {
       force: config.strategy.forceSingleSidedSolBidAsk || activeRangePolicy.singleSidedSol,
@@ -583,6 +680,125 @@ export async function executeTool(name, args) {
     if (forcedDeploy.repaired) {
       log("deploy", `[forced-single-side-bidask] Repaired deploy args: ${JSON.stringify(forcedDeploy.repairs)}`);
       args = forcedDeploy.args;
+    }
+
+    const rangeWidth = applyRangeWidthDecision(args, config);
+    args = rangeWidth.args;
+    if (!rangeWidth.ok) {
+      log("deploy_reject", `[range-width-decision] ${rangeWidth.reason}`);
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
+        reason: rangeWidth.reason,
+        metrics: {
+          range_width_decision: rangeWidth.decision,
+        },
+        deploy: {
+          range_width_decision: rangeWidth.decision,
+          args,
+        },
+        source: "executor.range_width_decision",
+      });
+      return {
+        success: false,
+        blocked: true,
+        reason: rangeWidth.reason,
+        range_width_decision: rangeWidth.decision,
+      };
+    }
+    if (rangeWidth.decision?.decision === "override") {
+      log("deploy", `[range-width-decision] Override bins_below ${rangeWidth.decision.original_bins_below} -> ${rangeWidth.decision.final_bins_below} target=${rangeWidth.decision.target_downside_pct}% step=${rangeWidth.decision.bin_step}`);
+    } else if (rangeWidth.decision?.decision === "shadow_only") {
+      log("deploy", `[range-width-decision] Shadow decision=${JSON.stringify(rangeWidth.decision)}`);
+    }
+
+    const fabriqOhlcvEntryGate = await evaluateFabriqOhlcvEntryGate({
+      ...args,
+      pool: args?.pool_address,
+      pool_address: args?.pool_address,
+      name: args?.pool_name,
+      base_mint: args?.base_mint,
+    }, config);
+    if (fabriqOhlcvEntryGate.enabled) {
+      args = {
+        ...args,
+        fabriq_ohlcv_entry_gate: fabriqOhlcvEntryGate,
+      };
+      log("deploy", `[fabriq-ohlcv-entry-gate] result=${fabriqOhlcvEntryGate.result} provider=${fabriqOhlcvEntryGate.decisive_provider ?? "none"} rows=${fabriqOhlcvEntryGate.row_count}`);
+      if (
+        fabriqOhlcvEntryGate.live_applied === true &&
+        (
+          fabriqOhlcvEntryGate.result === "reject" ||
+          (fabriqOhlcvEntryGate.result === "missing_evidence" && config.screening.fabriqOhlcvEntryGateBlockOnMissingOhlcv !== false)
+        )
+      ) {
+        const reason = fabriqOhlcvEntryGate.result === "missing_evidence"
+          ? "fabriq OHLCV entry gate missing evidence"
+          : "fabriq OHLCV entry gate rejected candidate";
+        appendDecisionContext({
+          stage: "deploy_reject",
+          actor: "SCREENER",
+          pool: args?.pool_address ?? null,
+          poolName: args?.pool_name ?? null,
+          baseMint: args?.base_mint ?? null,
+          reason,
+          metrics: {
+            fabriq_ohlcv_entry_gate: fabriqOhlcvEntryGate,
+          },
+          deploy: {
+            fabriq_ohlcv_entry_gate: fabriqOhlcvEntryGate,
+            args,
+          },
+          source: "executor.fabriq_ohlcv_entry_gate",
+        });
+        return {
+          success: false,
+          blocked: true,
+          reason,
+          fabriq_ohlcv_entry_gate: fabriqOhlcvEntryGate,
+        };
+      }
+    }
+
+    const criticalThinOverlay = evaluateCriticalThinEntryOverlay(args, config, {
+      fabriqOhlcvEntryGate,
+      dynamicPoolSizingDecision: dynamicPoolSizing.decision,
+    });
+    args = {
+      ...args,
+      critical_thin_entry_overlay: criticalThinOverlay.overlay,
+    };
+    if (criticalThinOverlay.overlay?.bucket !== "none" || criticalThinOverlay.overlay?.enabled === true) {
+      log("deploy", `[critical-thin-entry-overlay] bucket=${criticalThinOverlay.overlay.bucket} decision=${criticalThinOverlay.overlay.decision} reasons=${criticalThinOverlay.overlay.reason_codes.join(",") || "none"}`);
+    }
+    if (!criticalThinOverlay.ok) {
+      appendDecisionContext({
+        stage: "deploy_reject",
+        actor: "SCREENER",
+        pool: args?.pool_address ?? null,
+        poolName: args?.pool_name ?? null,
+        baseMint: args?.base_mint ?? null,
+        reason: criticalThinOverlay.overlay.reason,
+        metrics: {
+          critical_thin_entry_overlay: criticalThinOverlay.overlay,
+          fabriq_ohlcv_entry_gate: args?.fabriq_ohlcv_entry_gate ?? null,
+          dynamic_pool_sizing_decision: args?.dynamic_pool_sizing_decision ?? null,
+        },
+        deploy: {
+          critical_thin_entry_overlay: criticalThinOverlay.overlay,
+          args,
+        },
+        source: "executor.critical_thin_entry_overlay",
+      });
+      return {
+        success: false,
+        blocked: true,
+        reason: criticalThinOverlay.overlay.reason,
+        critical_thin_entry_overlay: criticalThinOverlay.overlay,
+      };
     }
 
     const targetPoolNeedleGuard = await evaluateTargetPoolNeedleDeployGuard({
@@ -784,7 +1000,10 @@ async function runSafetyChecks(name, args) {
         };
       }
 
-      const minDeploy = Math.max(0.1, config.management.deployAmountSol);
+      const dynamicSizingMin = args.dynamic_pool_sizing_decision?.live_applied === true
+        ? Number(args.dynamic_pool_sizing_decision?.min_deploy_sol)
+        : null;
+      const minDeploy = Math.max(0.1, Number.isFinite(dynamicSizingMin) ? dynamicSizingMin : config.management.deployAmountSol);
       if (amountY < minDeploy) {
         return {
           pass: false,
