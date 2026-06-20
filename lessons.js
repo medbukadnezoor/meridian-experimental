@@ -158,6 +158,7 @@ export async function recordPerformance(perf) {
   const entry = {
     ...perf,
     signal_snapshot: signalSnapshot,
+    shadow_data_collection: perf.shadow_data_collection ?? signalSnapshot?.shadow_data_collection ?? null,
     pnl_usd: Math.round(pnl_usd * 100) / 100,
     pnl_pct: roundedPnlPct,
     range_efficiency: Math.round(range_efficiency * 10) / 10,

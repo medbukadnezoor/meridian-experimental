@@ -66,6 +66,7 @@ const RPC_PRESSURE_GUARD_VERIFIER_PATH = join(__dirname, "verify-rpc-pressure-gu
 const RPC_PNL_POLLER_VERIFIER_PATH = join(__dirname, "verify-rpc-pnl-poller.js");
 const DIRECT_CLOSE_INFLIGHT_GUARD_VERIFIER_PATH = join(__dirname, "verify-direct-close-inflight-guard.js");
 const EVIL_PANDA_FEE_DUMP_VERIFIER_PATH = join(__dirname, "verify-evil-panda-fee-dump-plan.js");
+const RECOVERY_HOLD_EXIT_PROFILE_VERIFIER_PATH = join(__dirname, "verify-recovery-hold-exit-profile.js");
 const MAIN_CANDIDATE_SHADOW_COLLECTION_VERIFIER_PATH = join(__dirname, "verify-main-candidate-shadow-collection.js");
 const POSITION_RANGE_DISPLAY_VERIFIER_PATH = join(__dirname, "verify-position-range-display.js");
 const PNL_RANGE_STATE_TELEMETRY_VERIFIER_PATH = join(__dirname, "verify-pnl-range-state-telemetry.js");
@@ -558,6 +559,10 @@ function runActiveBinOracleProof() {
   return JSON.parse(result.stdout);
 }
 
+function runRecoveryHoldExitProfileProof() {
+  return runJsonVerifier(RECOVERY_HOLD_EXIT_PROFILE_VERIFIER_PATH, "verify-recovery-hold-exit-profile");
+}
+
 function runAdaptiveCloseModeProof() {
   const result = spawnSync(process.execPath, [ADAPTIVE_CLOSE_MODE_VERIFIER_PATH], {
     cwd: ROOT,
@@ -853,6 +858,7 @@ function buildChecks() {
   const rpcPnlPollerProof = runRpcPnlPollerProof();
   const directCloseInflightGuardProof = runDirectCloseInflightGuardProof();
   const evilPandaFeeDumpProof = runEvilPandaFeeDumpProof();
+  const recoveryHoldExitProfileProof = runRecoveryHoldExitProfileProof();
   const providerRateLimitReportProof = runProviderRateLimitReportProof();
 
   return [
@@ -916,6 +922,20 @@ function buildChecks() {
         evilPandaFeeDumpProof?.checks?.includes("pool memory blocks no-fee and velocity-stop pools/mints") &&
         evilPandaFeeDumpProof?.checks?.includes("daily report groups by exit reason and strategy profile") &&
         evilPandaFeeDumpProof?.checks?.includes("close verification degraded evidence remains preserved"),
+    },
+    {
+      file: "scripts/verify-recovery-hold-exit-profile.js",
+      label: "[Main recovery-hold] negative exits hold until -25% catastrophic stop while positive exits remain enabled",
+      test: () =>
+        recoveryHoldExitProfileProof?.success === true &&
+        recoveryHoldExitProfileProof?.heldNegativePnlCases?.includes(-24.9) &&
+        recoveryHoldExitProfileProof?.catastrophic?.action === "STOP_LOSS" &&
+        recoveryHoldExitProfileProof?.catastrophic?.urgent === true &&
+        recoveryHoldExitProfileProof?.positiveAllowed?.oor === "OUT_OF_RANGE" &&
+        recoveryHoldExitProfileProof?.positiveAllowed?.lowYield === "LOW_YIELD" &&
+        recoveryHoldExitProfileProof?.positiveAllowed?.feeHarvest === "fee_harvest" &&
+        recoveryHoldExitProfileProof?.positiveAllowed?.maxHoldTimeout === "max_hold_timeout" &&
+        recoveryHoldExitProfileProof?.activeBinVelocityLiveEnabled === false,
     },
     {
       file: "scripts/verify-target-pool-needle-veto.js",
@@ -1239,6 +1259,8 @@ function buildChecks() {
         activeBinOracleProof?.checks?.coverageGapReportHonorsGraceWindow === true &&
         activeBinOracleProof?.checks?.noWhaleEscapeExecutionConsumers === true &&
         activeBinOracleProof?.checks?.noRangeProximityExecutionConsumers === true &&
+        activeBinOracleProof?.checks?.velocityExtremeLabelNeutral === true &&
+        activeBinOracleProof?.checks?.liveEmergencyConfigGateCanDisable === true &&
         activeBinOracleProof?.checks?.liveEmergencyTriggersExtremeOnly === true,
     },
     {

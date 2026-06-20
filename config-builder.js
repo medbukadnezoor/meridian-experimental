@@ -42,6 +42,10 @@ function normalizeNullableNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function configValueAllowNull(config, key, fallback = null) {
+  return Object.prototype.hasOwnProperty.call(config, key) ? config[key] : fallback;
+}
+
 export function normalizeScreeningSource(value) {
   const normalized = normalizeOptionalString(value)?.toLowerCase();
   return SCREENING_SOURCES.has(normalized) ? normalized : "meteora";
@@ -144,6 +148,8 @@ function buildFeeExitPolicyConfig(userConfig = {}) {
     exitConfluenceLookbackMinutes: normalizeNullableNumber(policy.exitConfluenceLookbackMinutes, 180),
     exitConfluenceRules: Array.isArray(policy.exitConfluenceRules) ? policy.exitConfluenceRules : ["fee_harvest", "max_hold_timeout"],
     maxHoldTimeoutBypassesConfluence: policy.maxHoldTimeoutBypassesConfluence === true,
+    positiveOnly: policy.positiveOnly === true,
+    recoveryHoldPositiveOnly: policy.recoveryHoldPositiveOnly === true,
   };
 }
 
@@ -450,7 +456,12 @@ export function buildConfig(userConfig = {}, env = process.env) {
       repeatLowYieldCooldownHours: u.repeatLowYieldCooldownHours ?? 12,
       repeatLowYieldCooldownScope: u.repeatLowYieldCooldownScope ?? "token",
       minVolumeToRebalance: u.minVolumeToRebalance ?? 1000,
-      stopLossPct: u.stopLossPct ?? u.emergencyPriceDropPct ?? -50,
+      recoveryHoldProfileEnabled: u.recoveryHoldProfileEnabled ?? false,
+      recoveryHoldNonFeeExitMinNetPnlPct: u.recoveryHoldNonFeeExitMinNetPnlPct ?? 0,
+      requirePositivePnlForOutOfRangeExit: u.requirePositivePnlForOutOfRangeExit ?? false,
+      requirePositivePnlForLowYieldExit: u.requirePositivePnlForLowYieldExit ?? false,
+      requirePositivePnlForMaxHoldExit: u.requirePositivePnlForMaxHoldExit ?? false,
+      stopLossPct: configValueAllowNull(u, "stopLossPct", u.emergencyPriceDropPct ?? -50),
       stopLossConfirmDelayMs: u.stopLossConfirmDelayMs ?? 0,
       hardStopLossPct: u.hardStopLossPct ?? null,
       stopLossFastClosePct: u.stopLossFastClosePct ?? (isNanocapPreset ? -10 : null),
@@ -489,6 +500,8 @@ export function buildConfig(userConfig = {}, env = process.env) {
       activeBinBelowRangeEmergencyLiveEnabled: u.activeBinBelowRangeEmergencyLiveEnabled ?? false,
       activeBinBelowRangeEmergencyPnlPct: u.activeBinBelowRangeEmergencyPnlPct ?? -5,
       activeBinBelowRangeEmergencyEntryDrawdownPct: u.activeBinBelowRangeEmergencyEntryDrawdownPct ?? -20,
+      activeBinVelocityEmergencyLiveEnabled: u.activeBinVelocityEmergencyLiveEnabled ?? false,
+      activeBinVelocityEmergencyMaxPnlPct: u.activeBinVelocityEmergencyMaxPnlPct ?? 2,
       pnlSanityMaxDiffPct: u.pnlSanityMaxDiffPct ?? 5,
       pnlSnapshotLoggingEnabled: u.pnlSnapshotLoggingEnabled ?? false,
       pnlSnapshotDebug: u.pnlSnapshotDebug ?? false,

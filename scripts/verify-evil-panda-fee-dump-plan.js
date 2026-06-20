@@ -263,6 +263,13 @@ async function main() {
   assert.strictEqual(example.binsBelow, 35, "Fabriq example keeps fixed 35 bins below");
   assert.strictEqual(example.dynamicRangeWidthEnabled, false, "Fabriq example leaves dynamic range width disabled");
   assert.strictEqual(example.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "example uses Fabriq fee-rotation profile");
+  assert.strictEqual(example.recoveryHoldProfileEnabled, true, "Fabriq example enables recovery-hold profile");
+  assert.strictEqual(example.stopLossPct, null, "Fabriq recovery-hold disables ordinary stop loss");
+  assert.strictEqual(example.hardStopLossPct, -25, "Fabriq recovery-hold keeps -25% catastrophic stop");
+  assert.strictEqual(example.rollingDrawdownExitEnabled, false, "Fabriq recovery-hold disables rolling drawdown close");
+  assert.strictEqual(example.earlyDumpPct, null, "Fabriq recovery-hold disables early dump close");
+  assert.strictEqual(example.supertrendLossExitEnabled, false, "Fabriq recovery-hold disables Supertrend loss close");
+  assert.strictEqual(example.feeExitPolicy.recoveryHoldPositiveOnly, true, "Fabriq recovery-hold gates fee exits to positive PnL");
   assert.strictEqual(example.feeExitPolicy.feeHarvestMinHoldMinutes, 8, "Fabriq fee harvest can exit after 8m");
   assert.strictEqual(example.feeExitPolicy.noFeeAbortMaxHoldMinutes, 20, "Fabriq no-fee abort is rapid");
   assert.strictEqual(example.feeExitPolicy.exitConfluenceEnabled, true, "confluence enabled");
@@ -273,6 +280,8 @@ async function main() {
   assert.strictEqual(built.strategy.binsBelow, 35, "runtime config resolves binsBelow=35");
   assert.strictEqual(built.strategy.dynamicRangeWidthEnabled, false, "runtime config resolves dynamic width disabled");
   assert.strictEqual(built.management.feeExitPolicy.strategyProfile, FABRIQ_DEGEN_STRATEGY_ID, "runtime keeps Fabriq strategy profile");
+  assert.strictEqual(built.management.recoveryHoldProfileEnabled, true, "runtime keeps recovery-hold profile enabled");
+  assert.strictEqual(built.management.feeExitPolicy.recoveryHoldPositiveOnly, true, "runtime keeps fee exits positive-only");
   assert.strictEqual(built.management.feeExitPolicy.exitConfluenceMinSignals, 2, "runtime keeps confluence threshold");
   assert.strictEqual(built.management.noFeeAbortCooldownHours, 12, "runtime keeps no-fee cooldown");
   assert.strictEqual(built.management.velocityStopCooldownHours, 24, "runtime keeps velocity cooldown");

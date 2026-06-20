@@ -268,8 +268,10 @@ try {
   assert.strictEqual(velocity30s.velocity_30s_bins_per_sec, 2.096774);
   const extremeSignal = classifyShadowVelocity(velocity30s);
   assert.strictEqual(extremeSignal.shadow_velocity_signal, "rug_like_extreme");
-  assert.ok(extremeSignal.shadow_velocity_reason.includes("shadow_only_velocity_candidate"));
+  assert.ok(extremeSignal.shadow_velocity_reason.includes("velocity_extreme_candidate"));
+  assert.ok(!extremeSignal.shadow_velocity_reason.includes("shadow_only_velocity_candidate"));
   assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...extremeSignal, pnl_pct: -1.1 }), true);
+  assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...extremeSignal, pnl_pct: -1.1 }, { enabled: false }), false);
   assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...watchSignal, pnl_pct: -20 }), false);
   assert.strictEqual(shouldTriggerActiveBinEmergencyExit({ ...extremeSignal, pnl_pct: 4.5 }), false);
 
@@ -796,6 +798,8 @@ try {
       lptele4FieldsPreservedInRows: true,
       velocity10sWatchSignal: true,
       velocity30sExtremeSignal: true,
+      velocityExtremeLabelNeutral: true,
+      liveEmergencyConfigGateCanDisable: true,
       liveEmergencyTriggersExtremeOnly: true,
       priceMovementDoesNotTriggerEmergency: true,
       initialSampleWrittenAfterSubscribe: true,

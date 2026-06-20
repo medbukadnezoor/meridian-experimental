@@ -56,6 +56,18 @@ startHiveMindBackgroundSync();
 const TP_PCT = config.management.takeProfitPct;
 const DEPLOY = config.management.deployAmountSol;
 
+function getRecoveryHoldNonFeeExitMinNetPnlPct(managementConfig = {}) {
+  if (!managementConfig.recoveryHoldProfileEnabled) return null;
+  return finiteNumberOrNull(managementConfig.recoveryHoldNonFeeExitMinNetPnlPct) ?? 0;
+}
+
+function allowsRecoveryHoldNonFeeExit(currentPnlPct, managementConfig = {}, requirePositive = false) {
+  if (!requirePositive) return true;
+  const minNetPnlPct = getRecoveryHoldNonFeeExitMinNetPnlPct(managementConfig);
+  if (minNetPnlPct == null) return true;
+  return currentPnlPct != null && currentPnlPct >= minNetPnlPct;
+}
+
 // ═══════════════════════════════════════════
 //  CYCLE TIMERS
 // ═══════════════════════════════════════════
@@ -404,6 +416,7 @@ function scheduleTrailingDropConfirmation(positionAddress) {
         position?.pnl_pct ?? null,
         config.management.trailingDropPct,
         TRAILING_DROP_CONFIRM_TOLERANCE_PCT,
+        config.management,
       );
       if (resolved?.confirmed) {
         log("state", `[Trailing recheck] Confirmed trailing exit for ${positionAddress} — triggering management`);
@@ -811,8 +824,8 @@ activeBinOracleRecorder.setEmergencyExitHandler(async (row) => {
     _activeBinOracleEmergencyInFlight.delete(positionAddress);
   }
 }, {
-  enabled: true,
-  maxPnlPct: 2,
+  enabled: config.management.activeBinVelocityEmergencyLiveEnabled === true,
+  maxPnlPct: config.management.activeBinVelocityEmergencyMaxPnlPct,
   belowRangeEnabled: config.management.activeBinBelowRangeEmergencyLiveEnabled === true,
   belowRangePnlPct: config.management.activeBinBelowRangeEmergencyPnlPct,
   belowRangeEntryDrawdownPct: config.management.activeBinBelowRangeEmergencyEntryDrawdownPct,
@@ -902,7 +915,7 @@ export async function runManagementCycle({ silent = false } = {}) {
       await appendOhlcvDrawdownShadow(livePositions?.wallet, p);
       if (exit) {
         if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
-          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+          if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct, config.management)) {
             scheduleTrailingDropConfirmation(p.position);
           }
           continue;
@@ -1673,7 +1686,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
             log("state", `[PnL poll] Exit indicator bypass: ${p.pair} — ${exit.reason}`);
           }
           if (exit.action === "TRAILING_TP" && exit.needs_confirmation) {
-            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct)) {
+            if (queueTrailingDropConfirmation(p.position, exit.peak_pnl_pct, exit.current_pnl_pct, config.management.trailingDropPct, config.management)) {
               scheduleTrailingDropConfirmation(p.position);
             }
             continue;
@@ -1742,9 +1755,15 @@ Summarize the current portfolio health, total fees earned, and performance of al
         if (maxHoldMinutes != null) {
           const tracked = getTrackedPosition(p.position);
           const deployedAt = tracked?.deployed_at ? new Date(tracked.deployed_at).getTime() : null;
+          const currentPnlPct = finiteNumberOrNull(p.pnl_pct);
+          const canMaxHoldClose = allowsRecoveryHoldNonFeeExit(
+            currentPnlPct,
+            config.management,
+            config.management.requirePositivePnlForMaxHoldExit,
+          );
           if (deployedAt != null && Number.isFinite(deployedAt)) {
             const ageMinutes = (Date.now() - deployedAt) / 60000;
-            if (ageMinutes >= maxHoldMinutes) {
+            if (ageMinutes >= maxHoldMinutes && canMaxHoldClose) {
               log("state", `[PnL poll] Max hold exit: ${p.pair} — age ${ageMinutes.toFixed(1)}m >= ${maxHoldMinutes}m — closing directly (no LLM)`);
               _pollTriggeredAt = Date.now();
               try {
@@ -1902,6 +1921,16 @@ function getDeterministicCloseRule(position, managementConfig) {
   })();
 
   const currentPnlPct = finiteNumberOrNull(position.pnl_pct);
+  const canOutOfRangeClose = allowsRecoveryHoldNonFeeExit(
+    currentPnlPct,
+    managementConfig,
+    managementConfig.requirePositivePnlForOutOfRangeExit,
+  );
+  const canLowYieldClose = allowsRecoveryHoldNonFeeExit(
+    currentPnlPct,
+    managementConfig,
+    managementConfig.requirePositivePnlForLowYieldExit,
+  );
   if (!pnlSuspect) {
     const velocity = calculatePnlVelocityDrop(
       tracked?.pnl_history,
@@ -1921,6 +1950,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   const rangeSide = position.range_side || deriveRangeSide(position);
   if (
     rangeSide === "above_range" &&
+    canOutOfRangeClose &&
     position.active_bin != null &&
     position.upper_bin != null &&
     position.active_bin > position.upper_bin + managementConfig.outOfRangeBinsToClose
@@ -1929,6 +1959,7 @@ function getDeterministicCloseRule(position, managementConfig) {
   }
   if (
     (rangeSide === "above_range" || rangeSide === "below_range") &&
+    canOutOfRangeClose &&
     (position.minutes_out_of_range ?? 0) >= managementConfig.outOfRangeWaitMinutes
   ) {
     const oorExit = getOutOfRangeExitPolicy(position.minutes_out_of_range ?? 0, managementConfig);
@@ -1948,7 +1979,8 @@ function getDeterministicCloseRule(position, managementConfig) {
   if (
     position.fee_per_tvl_24h != null &&
     position.fee_per_tvl_24h < managementConfig.minFeePerTvl24h &&
-    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60)
+    (position.age_minutes ?? 0) >= (managementConfig.minAgeBeforeYieldCheck ?? 60) &&
+    canLowYieldClose
   ) {
     return { action: "CLOSE", rule: 5, reason: "low yield" };
   }
