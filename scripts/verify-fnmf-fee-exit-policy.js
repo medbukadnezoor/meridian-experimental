@@ -175,6 +175,53 @@ function main() {
   }, { total_fees_claimed_sol: null });
   assert(missingFeeSafety == null, "missing fee data must not trigger fee abort rules");
 
+  // ── Null-input safety ──────────────────────────────────────────────────────
+  // JS default params only apply for `undefined`, not `null`. A caller passing
+  // an explicit null position/tracked record (e.g. an unmatched tracker entry)
+  // must not throw on property access. normalizeFeeInputs coerces nullish
+  // inputs to empty objects; evaluateFeeExitPolicy must inherit that safety for
+  // both enabled and disabled policy.
+  const nullInputCases = [
+    { label: "null tracked", position: basePosition(), tracked: null },
+    { label: "null position", position: null, tracked: baseTracked() },
+    { label: "both null", position: null, tracked: null },
+  ];
+  const nullInputResults = {};
+  for (const { label, position, tracked } of nullInputCases) {
+    // normalizeFeeInputs must not throw on null inputs (direct call).
+    let normalizedNull;
+    try {
+      normalizedNull = normalizeFeeInputs(position, tracked, { solMode: true, dustFloor: 0.000001 });
+    } catch (e) {
+      throw new Error(`normalizeFeeInputs threw on ${label}: ${e.message}`);
+    }
+    assert(normalizedNull != null, `normalizeFeeInputs must return a result for ${label}`);
+
+    // Disabled policy (default-off) must not throw and must emit no decision.
+    let disabledResult;
+    try {
+      disabledResult = evaluateFeeExitPolicy({ position, tracked, managementConfig: { solMode: true } });
+    } catch (e) {
+      throw new Error(`evaluateFeeExitPolicy (disabled) threw on ${label}: ${e.message}`);
+    }
+    assert(disabledResult.enabled === false, `disabled policy must stay off for ${label}`);
+    assert(disabledResult.decision == null, `disabled policy must emit no decision for ${label}`);
+
+    // Enabled policy must not throw on null inputs either.
+    let enabledResult;
+    try {
+      enabledResult = evaluateFeeExitPolicy({ position, tracked, managementConfig: basePolicy() });
+    } catch (e) {
+      throw new Error(`evaluateFeeExitPolicy (enabled) threw on ${label}: ${e.message}`);
+    }
+    assert(enabledResult.enabled === true, `enabled policy must report enabled for ${label}`);
+
+    nullInputResults[label] = {
+      disabledDecision: disabledResult.decision,
+      enabledDecision: enabledResult.decision,
+    };
+  }
+
   const indexSource = source("index.js");
   const deterministicBody = indexSource.match(/function getDeterministicCloseRule[\s\S]*?\n}\n\n\/\/ ═/)?.[0] ?? "";
   const pnlPollBody = indexSource.match(/const pnlPollInterval = setInterval\(async \(\) => \{[\s\S]*?_pnlPollBusy = false;\n    }\n  }, pnlPollIntervalMs\);/)?.[0] ?? "";
@@ -253,6 +300,7 @@ function main() {
       feeExitConfluenceBypassReason(strongNetDecision, basePolicy().feeExitPolicy),
     ],
     missingFeeSafety: missingFeeSafety ?? null,
+    nullInputSafety: nullInputResults,
     sourceOrder,
   }, null, 2));
 }

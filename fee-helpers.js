@@ -20,6 +20,12 @@ export function nonNegativeNumberOrNull(value, dustFloor = 0) {
 }
 
 export function normalizeFeeInputs(position = {}, tracked = {}, options = {}) {
+  // Default params only apply for `undefined`, not `null`. Callers can pass
+  // explicit null (e.g. an unmatched tracked record), which would throw on
+  // property access below. Coerce nullish inputs to empty objects here.
+  position = position || {};
+  tracked = tracked || {};
+  options = options || {};
   const solMode = options.solMode === true;
   const dustFloor = Math.max(0, Number(options.dustFloor ?? 0));
 
