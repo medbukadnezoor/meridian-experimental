@@ -130,6 +130,12 @@ check("autonomous cycle/startup reports render as HTML (no literal markdown)", (
   has(files.index, /mdToTelegramHtml\(stripThink\(content\)\)/)
 );
 
+check("management action prompt defines currency symbol before interpolating action blocks", () =>
+  has(files.index, /const\s+cur\s*=\s*config\.management\.solMode\s*\?\s*"◎"\s*:\s*"\$";[\s\S]*?const\s+actionBlocks\s*=/) &&
+  has(files.index, /\$\{cur\}\$\{p\.unclaimed_fees_usd\}/) &&
+  has(files.index, /\$\{cur\}\$\{p\.total_value_usd\}/)
+);
+
 check("destructive callbacks require TELEGRAM_ALLOWED_USER_IDS user allowlist", () =>
   has(files.index, /hasAllowedTelegramUsers/) &&
   has(files.index, /isAllowedTelegramUser/) &&
