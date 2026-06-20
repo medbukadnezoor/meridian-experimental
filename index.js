@@ -1220,6 +1220,7 @@ export async function runManagementCycle({ silent = false } = {}) {
     if (actionPositions.length > 0) {
       log("cron", `Management: ${actionPositions.length} action(s) needed — invoking LLM [model: ${config.llm.managementModel}]`);
 
+      const cur = config.management.solMode ? "◎" : "$";
       const actionBlocks = actionPositions.map((p) => {
         const act = actionMap.get(p.position);
         return [
