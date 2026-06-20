@@ -30,6 +30,7 @@
   "dynamicRangeWidthLowerMcapInputFloor": 500000,
   "dynamicRangeWidthMinTargetDownsidePct": 16,
   "dynamicRangeWidthFeeDensityTighteningEnabled": true,
+  "dynamicRangeWidthRequireFeeProofToTighten": false,
   "dynamicRangeWidthStrongFeeActiveTvlRatio": 3,
   "dynamicRangeWidthStrongVolumeActiveTvlMultiple": 1.5,
   "dynamicRangeWidthStrongFeeVelocityUsdPerMin": 3,

@@ -19,6 +19,7 @@ const DEFAULT_POLICY = Object.freeze({
   lowerMcapInputFloor: 500_000,
   minTargetDownsidePct: 16,
   feeDensityTighteningEnabled: false,
+  requireFeeProofToTighten: false,
   strongFeeActiveTvlRatio: 3,
   strongVolumeActiveTvlMultiple: 1.5,
   strongFeeVelocityUsdPerMin: 3,
@@ -69,6 +70,7 @@ export function resolveRangeWidthPolicy(config = {}) {
     lowerMcapInputFloor: positiveNumber(strategy.dynamicRangeWidthLowerMcapInputFloor) ?? DEFAULT_POLICY.lowerMcapInputFloor,
     minTargetDownsidePct: positiveNumber(strategy.dynamicRangeWidthMinTargetDownsidePct) ?? DEFAULT_POLICY.minTargetDownsidePct,
     feeDensityTighteningEnabled: strategy.dynamicRangeWidthFeeDensityTighteningEnabled === true,
+    requireFeeProofToTighten: strategy.dynamicRangeWidthRequireFeeProofToTighten === true,
     strongFeeActiveTvlRatio: positiveNumber(strategy.dynamicRangeWidthStrongFeeActiveTvlRatio) ?? DEFAULT_POLICY.strongFeeActiveTvlRatio,
     strongVolumeActiveTvlMultiple: positiveNumber(strategy.dynamicRangeWidthStrongVolumeActiveTvlMultiple) ?? DEFAULT_POLICY.strongVolumeActiveTvlMultiple,
     strongFeeVelocityUsdPerMin: positiveNumber(strategy.dynamicRangeWidthStrongFeeVelocityUsdPerMin) ?? DEFAULT_POLICY.strongFeeVelocityUsdPerMin,
@@ -284,7 +286,7 @@ export function buildRangeWidthDecision(args = {}, config = {}) {
   }
 
   const policyBins = Math.max(policy.minBins, requiredBins);
-  if (originalBinsBelow != null && originalBinsBelow > policyBins && !hasFeeDensityRangeProof(args, policy)) {
+  if (policy.requireFeeProofToTighten && originalBinsBelow != null && originalBinsBelow > policyBins && !hasFeeDensityRangeProof(args, policy)) {
     decision.final_bins_below = originalBinsBelow;
     decision.decision = liveEnabled ? "keep" : "shadow_only";
     addUnique(reasonCodes, "tighten_blocked_missing_fee_density");

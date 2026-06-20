@@ -551,6 +551,7 @@ export function buildConfig(userConfig = {}, env = process.env) {
       dynamicRangeWidthLowerMcapInputFloor: u.dynamicRangeWidthLowerMcapInputFloor ?? 500_000,
       dynamicRangeWidthMinTargetDownsidePct: u.dynamicRangeWidthMinTargetDownsidePct ?? 16,
       dynamicRangeWidthFeeDensityTighteningEnabled: u.dynamicRangeWidthFeeDensityTighteningEnabled ?? false,
+      dynamicRangeWidthRequireFeeProofToTighten: u.dynamicRangeWidthRequireFeeProofToTighten ?? false,
       dynamicRangeWidthStrongFeeActiveTvlRatio: u.dynamicRangeWidthStrongFeeActiveTvlRatio ?? 3,
       dynamicRangeWidthStrongVolumeActiveTvlMultiple: u.dynamicRangeWidthStrongVolumeActiveTvlMultiple ?? 1.5,
       dynamicRangeWidthStrongFeeVelocityUsdPerMin: u.dynamicRangeWidthStrongFeeVelocityUsdPerMin ?? 3,
