@@ -8,6 +8,7 @@ import {
   evaluateFabriqOhlcvEntryGate,
   evaluateFabriqOhlcvRows,
   normalizeOkxCandlestickRows,
+  resolveFabriqOhlcvEntryGatePolicy,
 } from "../fabriq-ohlcv-entry-gate.js";
 import { __test as ohlcvInternals } from "../ohlcv-drawdown-shadow.js";
 
@@ -193,6 +194,11 @@ const built = buildConfig({
 });
 assert.strictEqual(built.screening.fabriqOhlcvEntryGateEnabled, true, "config builder maps OHLCV entry gate enabled");
 assert.deepStrictEqual(built.screening.fabriqOhlcvEntryGateProviders, ["dexpaprika", "gmgn", "okx"], "config builder maps provider order");
+
+// Policy resolution: minScore=0 must disable the score gate (regression: positiveInteger coerced 0 -> 3)
+assert.strictEqual(resolveFabriqOhlcvEntryGatePolicy({ screening: { fabriqOhlcvEntryGateMinScore: 0 } }).minScore, 0, "minScore 0 disables the score gate, not coerced to default");
+assert.strictEqual(resolveFabriqOhlcvEntryGatePolicy({ screening: {} }).minScore, 3, "minScore defaults to 3 when unset");
+assert.strictEqual(resolveFabriqOhlcvEntryGatePolicy({ screening: { fabriqOhlcvEntryGateRetraceVetoPct: -25, fabriqOhlcvEntryGateReboundMinPct: 3 } }).retraceVetoPct, -25, "retrace veto pct maps through");
 
 const executor = read("tools/executor.js");
 assert.ok(executor.includes("evaluateFabriqOhlcvEntryGate"), "executor calls Fabriq OHLCV entry gate");
